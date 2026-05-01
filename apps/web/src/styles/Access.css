@@ -1,0 +1,278 @@
+.access-page {
+  padding: 24px 32px;
+  min-height: calc(100vh - 57px);
+  background: #F8FAFC;
+}
+
+.access-header {
+  margin-bottom: 24px;
+}
+
+.access-header h1 {
+  font-size: 24px;
+  font-weight: 600;
+  color: #1E293B;
+  margin: 0 0 8px 0;
+}
+
+.access-subtitle {
+  font-size: 14px;
+  color: #64748B;
+  margin: 0;
+}
+
+.access-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 800px;
+}
+
+/* Settings Card */
+.settings-card {
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.settings-card.disabled {
+  opacity: 0.6;
+}
+
+.settings-card-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid #E2E8F0;
+  position: relative;
+}
+
+.settings-card-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1E293B;
+  margin: 0 0 4px 0;
+}
+
+.settings-card-header p {
+  font-size: 13px;
+  color: #64748B;
+  margin: 0;
+}
+
+.coming-soon-badge {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #06B6D4;
+  background: rgba(6, 182, 212, 0.1);
+  padding: 4px 10px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Settings List */
+.settings-list {
+  padding: 8px 0;
+}
+
+.settings-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid #F1F5F9;
+  transition: 150ms ease;
+}
+
+.settings-item:last-child {
+  border-bottom: none;
+}
+
+.settings-item:hover {
+  background: #F8FAFC;
+}
+
+.settings-item-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.settings-item-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #F1F5F9;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.settings-item-icon svg {
+  width: 20px;
+  height: 20px;
+  color: #64748B;
+}
+
+.settings-item-icon.ticker {
+  background: rgba(6, 182, 212, 0.1);
+}
+
+.settings-item-icon.ticker svg {
+  color: #06B6D4;
+}
+
+.settings-item-icon.remediation {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.settings-item-icon.remediation svg {
+  color: #10B981;
+}
+
+.settings-item-icon.chart {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.settings-item-icon.chart svg {
+  color: #F59E0B;
+}
+
+.settings-item-text h3 {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1E293B;
+  margin: 0 0 4px 0;
+}
+
+.settings-item-text p {
+  font-size: 12px;
+  color: #64748B;
+  margin: 0;
+}
+
+/* Toggle Switch */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #CBD5E1;
+  border: 1px solid #94A3B8;
+  border-radius: 26px;
+  transition: 150ms ease;
+}
+
+.toggle-slider::before {
+  position: absolute;
+  content: "";
+  height: 20px;
+  width: 20px;
+  left: 2px;
+  bottom: 2px;
+  background: #FFFFFF;
+  border-radius: 50%;
+  transition: 150ms ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: #06B6D4;
+  border-color: #06B6D4;
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(22px);
+  background: #FFFFFF;
+}
+
+.toggle-switch input:focus + .toggle-slider {
+  box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.2);
+}
+
+/* Settings Card Footer */
+.settings-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  padding: 16px 24px;
+  background: #F8FAFC;
+  border-top: 1px solid #E2E8F0;
+}
+
+.settings-message {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-message.success {
+  color: #10B981;
+}
+
+.settings-message.error {
+  color: #EF4444;
+}
+
+.save-settings-btn {
+  padding: 10px 20px;
+  background: #06B6D4;
+  border: none;
+  border-radius: 6px;
+  color: #FFFFFF;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 150ms ease;
+}
+
+.save-settings-btn:hover {
+  background: #0891B2;
+}
+
+.save-settings-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .access-page {
+    padding: 16px;
+  }
+
+  .settings-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .settings-item-info {
+    width: 100%;
+  }
+
+  .toggle-switch {
+    align-self: flex-end;
+  }
+}

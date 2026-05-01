@@ -1,0 +1,478 @@
+/* CRITICAL: height + overflow: hidden prevents page/sidebar scroll */
+.activity-page-wrapper {
+  height: 100vh;
+  background: #0B0F19;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.activity-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.activity-main {
+  flex: 1;
+  padding: 24px 32px;
+  background: #0B0F19;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header - Fixed */
+.activity-header {
+  margin-bottom: 24px;
+  flex-shrink: 0;
+}
+
+.activity-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: #FFFFFF;
+  margin: 0 0 8px 0;
+}
+
+.activity-subtitle {
+  font-size: 14px;
+  color: #64748B;
+  margin: 0;
+}
+
+/* Stats Row - Fixed */
+.activity-stats-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-shrink: 0;
+}
+
+.stat-card {
+  background: #151C2C;
+  border: 1px solid #1E293B;
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  color: #FFFFFF;
+  margin-bottom: 4px;
+}
+
+.stat-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #94A3B8;
+  margin-bottom: 8px;
+}
+
+.stat-breakdown {
+  font-size: 12px;
+  color: #64748B;
+}
+
+.stat-breakdown .pass {
+  color: #6EE7B7;
+}
+
+.stat-breakdown .fail {
+  color: #FCA5A5;
+}
+
+/* Content Grid - Takes remaining space */
+.activity-content-grid {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Cards */
+.activity-card {
+  background: #151C2C;
+  border: 1px solid #1E293B;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Main Card - Contains scrollable table */
+.main-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #1E293B;
+  background: #1B2336;
+  flex-shrink: 0;
+}
+
+.card-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #FFFFFF;
+  margin: 0;
+}
+
+.card-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Search */
+.activity-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #151C2C;
+  border: 1px solid #2D3748;
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 320px;
+}
+
+.activity-search:focus-within {
+  border-color: #06B6D4;
+}
+
+.activity-search svg {
+  color: #64748B;
+  flex-shrink: 0;
+}
+
+.activity-search input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #E2E8F0;
+  font-size: 13px;
+  width: 100%;
+  font-family: inherit;
+}
+
+.activity-search input::placeholder {
+  color: #64748B;
+}
+
+.filter-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: #151C2C;
+  border: 1px solid #2D3748;
+  border-radius: 8px;
+  color: #94A3B8;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.filter-btn:hover {
+  background: #242D42;
+  color: #E2E8F0;
+  border-color: #3D4A5C;
+}
+
+/* Table Container - THIS IS THE ONLY THING THAT SCROLLS */
+.activity-table-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+.activity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.activity-table thead {
+  background: #1B2336;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.activity-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid #1E293B;
+  white-space: nowrap;
+}
+
+.activity-table tbody tr {
+  border-bottom: 1px solid #1E293B;
+  transition: background 0.15s ease;
+}
+
+.activity-table tbody tr:hover {
+  background: #1B2336;
+}
+
+.activity-table tbody tr:last-child {
+  border-bottom: none;
+}
+
+.activity-table td {
+  padding: 14px 16px;
+  color: #E2E8F0;
+  vertical-align: middle;
+}
+
+.time-cell {
+  color: #94A3B8;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.event-cell {
+  font-weight: 500;
+}
+
+.entity-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.entity-name {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: #06B6D4;
+}
+
+.entity-detail {
+  font-size: 11px;
+  color: #64748B;
+}
+
+.source-cell {
+  color: #94A3B8;
+}
+
+/* Severity Badges */
+.severity-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.severity-badge.critical {
+  background: rgba(220, 38, 38, 0.15);
+  color: #FCA5A5;
+}
+
+.severity-badge.high {
+  background: rgba(234, 88, 12, 0.15);
+  color: #FDBA74;
+}
+
+.severity-badge.medium {
+  background: rgba(217, 119, 6, 0.15);
+  color: #FCD34D;
+}
+
+.severity-badge.low {
+  background: rgba(5, 150, 105, 0.15);
+  color: #6EE7B7;
+}
+
+/* Status Badges */
+.status-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.status-badge.logged {
+  background: rgba(107, 114, 128, 0.15);
+  color: #9CA3AF;
+}
+
+.status-badge.action-needed {
+  background: rgba(234, 88, 12, 0.15);
+  color: #FDBA74;
+}
+
+.status-badge.draft {
+  background: rgba(107, 114, 128, 0.15);
+  color: #9CA3AF;
+}
+
+.status-badge.in-progress {
+  background: rgba(59, 130, 246, 0.15);
+  color: #93C5FD;
+}
+
+.status-badge.validated {
+  background: rgba(5, 150, 105, 0.15);
+  color: #6EE7B7;
+}
+
+.status-badge.pending {
+  background: rgba(217, 119, 6, 0.15);
+  color: #FCD34D;
+}
+
+.status-badge.approved {
+  background: rgba(5, 150, 105, 0.15);
+  color: #6EE7B7;
+}
+
+.status-badge.failed {
+  background: rgba(220, 38, 38, 0.15);
+  color: #FCA5A5;
+}
+
+/* Action Button */
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  padding: 6px 16px;
+  background: transparent;
+  border: 1px solid #2D3748;
+  border-radius: 6px;
+  color: #94A3B8;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.action-btn:hover {
+  background: #06B6D4;
+  border-color: #06B6D4;
+  color: #FFFFFF;
+}
+
+/* Side Card - Most Active Entities */
+.side-card {
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.entities-list {
+  padding: 12px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.entity-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+
+.entity-item:hover {
+  background: #1B2336;
+}
+
+.entity-rank {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 182, 212, 0.1);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #06B6D4;
+}
+
+.entity-asset-name {
+  flex: 1;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: #E2E8F0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entity-count {
+  font-size: 12px;
+  color: #06B6D4;
+  background: rgba(6, 182, 212, 0.1);
+  padding: 4px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .activity-content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .side-card {
+    order: -1;
+    max-height: 200px;
+  }
+
+  .entities-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 8px;
+  }
+}
+
+@media (max-width: 768px) {
+  .activity-main {
+    padding: 16px;
+  }
+
+  .activity-header h1 {
+    font-size: 24px;
+  }
+
+  .activity-stats-row {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-search {
+    min-width: 200px;
+  }
+
+  .card-toolbar {
+    flex-wrap: wrap;
+  }
+}

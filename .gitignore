@@ -1,0 +1,39 @@
+# Dependencies
+**/node_modules/
+**/.venv/
+**/__pycache__/
+
+# Build artifacts
+**/dist/
+**/build/
+**/.next/
+
+# Environment files
+**/.env
+**/.env.local
+**/.env.development
+**/.env.production
+!**/.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# Python tooling
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Lockfile noise during early dev (commit when stable)
+# package-lock.json

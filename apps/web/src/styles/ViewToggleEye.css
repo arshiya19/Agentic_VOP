@@ -1,0 +1,70 @@
+.view-eye-dropdown {
+  position: relative;
+  display: inline-flex;
+  background: #151C2C;
+  border: 1px solid #1E293B;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 9999;
+}
+
+.view-toggle-eye {
+  justify-content: center;
+  cursor: pointer;
+  color: #94a3b8;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  background: #151C2C;
+  border: 1px solid #1E293B;
+  transition: all 0.2s ease;
+  width: 38px;
+  height: 38px;
+}
+
+.view-toggle-eye:hover {
+  background: #1B2336;
+  color: #E2E8F0;
+  border-color: #334155;
+}
+
+.view-toggle-eye.active{
+  background: #1B2336;
+  color: #06B6D4;
+  border-color: #06B6D4;
+}
+.view-eye-menu {
+position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  left: auto;
+  min-width: 140px;
+  background: #151C2C;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+ z-index: 9999;
+    overflow: hidden;
+  animation: columnDropdownFade 0.15s ease;
+}
+
+.view-eye-option {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 8px 10px;
+  color: #e5e7eb;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.view-eye-option:hover {
+  background: #1e293b;
+}
+
+.view-eye-option.active {
+  background: #334155;
+  font-weight: 600;
+}

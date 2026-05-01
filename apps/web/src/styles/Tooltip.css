@@ -1,0 +1,18 @@
+.tooltip-trigger {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tooltip-content {
+  position: fixed;
+  transform: translateX(-50%) translateY(-100%);
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 999999;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+}
