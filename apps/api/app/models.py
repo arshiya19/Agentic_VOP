@@ -29,7 +29,7 @@ class RunCreated(BaseModel):
 class LLMNormalizedIssue(BaseModel):
     """The fields Sub-Agent 1 (LLM) is responsible for producing.
 
-    Used as the input_schema for Anthropic tool_use. The LLM's output is
+    Used as the function-call input_schema for the LLM. The LLM's output is
     guaranteed by the API to match this schema — no JSON parsing required.
 
     Excluded from the LLM's responsibility (added by code):
@@ -67,3 +67,22 @@ class LLMEnrichmentDecision(BaseModel):
     likelihood: float = Field(..., ge=0, le=1)
     impact: float = Field(..., ge=0, le=1)
     remediation_suggestion: str = Field(..., min_length=10, max_length=600)
+
+
+class MasterPlanStep(BaseModel):
+    """One step in the Master Agent's plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["FETCH", "ENRICH"]
+    tool: str | None = None  # required when kind == "FETCH"
+    notes: str | None = None  # 1-line reasoning
+
+
+class MasterPlan(BaseModel):
+    """Master Agent's LLM-produced plan: ordered steps for the run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_summary: str = Field(..., min_length=10, max_length=500)
+    steps: list[MasterPlanStep] = Field(..., min_length=1)

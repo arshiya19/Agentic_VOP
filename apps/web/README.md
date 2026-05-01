@@ -81,7 +81,7 @@ subscriptions, and to the **backend at localhost:8000** to trigger runs.
 | Page | Path | What it does |
 |---|---|---|
 | **Agents** | `/agents` | Live trace of every master + sub-agent step. Subscribes to `agent_trace_events` + `agent_runs` via Supabase Realtime. The 4 KPI cards and the agents panel update in real time. |
-| **Integrations** | `/integrations` | The **"Run a scan"** panel at the top has the scanner cards (today: OSV.dev). Clicking a card + **Fetch findings** triggers a real run via `POST localhost:8000/agents/trigger`. The categories panel below is a static catalog of would-be future integrations. |
+| **Integrations** | `/integrations` | The **"Run a scan"** panel at the top has the scanner cards (today: OSV.dev). Clicking a card + **Fetch findings** triggers a real run via `POST localhost:8000/agents/trigger`. The button stays disabled for 5 seconds after each successful trigger to prevent accidental rapid-clicks creating duplicate runs. The categories panel below is a static catalog of would-be future integrations. |
 | **Login / Signup** | `/login`, `/signup` | Real Supabase Auth. |
 
 **UI shells** (rendered, but not connected to real data yet):
@@ -118,7 +118,7 @@ subscriptions, and to the **backend at localhost:8000** to trigger runs.
 3. Sidebar → **Integrations** → click the **OSV.dev** card → click **Fetch findings**. UI fires a POST to the backend.
 4. Sidebar → **Agents**. Watch the trace events stream in newest-first. The 4 stat cards update live (Active Agents, Tasks In Flight, Completed today, Errors today). Master and both sub-agents in the left panel get green "working" dots while the run is in flight.
 5. After ~5–10 minutes the run reaches `SCAN_COMPLETE`. Stat cards settle.
-6. (Optional) Open Supabase Dashboard → Table Editor → `issues` to see the canonical findings, each with `risk_explanation` and `remediation_suggestion` written by Claude.
+6. (Optional) Open Supabase Dashboard → Table Editor → `issues` to see the canonical findings, each with `risk_explanation` and `remediation_suggestion` written by the LLM.
 
 ## How the Agents page stays live without polling
 

@@ -5,7 +5,7 @@ For each canonical Issue produced in this run:
   2. CISA KEV — actively-exploited flag (catalog download)
   3. NVD     — CVSS v3 vector breakdown + CWE id (per-CVE; rate-limited
                unless NVD_API_KEY is set in env)
-  4. **LLM call** — given the issue + all enrichment data, Claude decides
+  4. **LLM call** — given the issue + all enrichment data, the LLM decides
      derived_risk, risk_explanation, likelihood, impact, remediation_suggestion.
   5. Stamp enriched_at
 
@@ -19,11 +19,12 @@ Deterministic pieces (HTTP calls, DB writes) stay code. Reasoning is LLM.
 from __future__ import annotations
 
 import json
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import httpx
-from anthropic.types import ToolUseBlock
 
 from ..config import settings
 from ..db import supabase_admin
@@ -34,6 +35,34 @@ from .trace import emit_trace
 
 # Cached LLM tool input schema for the Sub-Agent 2 decision call
 _DECISION_SCHEMA = LLMEnrichmentDecision.model_json_schema()
+
+# Tolerant parser for occasional malformed \uXXXX escapes in LLM output.
+_BAD_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
+_ANY_UNICODE_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{0,4}")
+
+
+def _parse_function_args(args_str: str) -> dict:
+    """json.loads with multi-stage repair for malformed \\u escapes."""
+    try:
+        return json.loads(args_str)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(_BAD_UNICODE_ESCAPE.sub(r"\\u0020", args_str))
+    except json.JSONDecodeError:
+        pass
+    return json.loads(_ANY_UNICODE_ESCAPE.sub("", args_str))
+
+
+def _sanitize(value):
+    """Recursively strip Postgres-incompatible NUL bytes from any string fields."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: _sanitize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize(v) for v in value]
+    return value
 
 
 _EPSS_API = "https://api.first.org/data/v1/epss"
@@ -50,7 +79,7 @@ def _llm_decide(
     nvd: dict,
     in_kev: bool,
 ) -> LLMEnrichmentDecision:
-    """Call Claude with tool_use to get the per-issue risk decision."""
+    """Call OpenAI with function calling to get the per-issue risk decision."""
     client = get_client()
 
     payload = {
@@ -72,38 +101,48 @@ def _llm_decide(
 
     params = prompt_row.get("parameters") or {}
 
-    response = client.messages.create(
-        model=prompt_row["model"],
-        max_tokens=int(params.get("max_tokens", 800)),
-        temperature=float(params.get("temperature", 0.2)),
-        system=[
-            {
-                "type": "text",
-                "text": prompt_row["prompt_text"],
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        tools=[
-            {
-                "name": "emit_enrichment_decision",
-                "description": (
-                    "Emit the final risk decision for this issue: derived_risk, "
-                    "risk_explanation, likelihood, impact, remediation_suggestion."
-                ),
-                "input_schema": _DECISION_SCHEMA,
-            }
-        ],
-        tool_choice={"type": "tool", "name": "emit_enrichment_decision"},
-        messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
-    )
+    base_temp = float(params.get("temperature", 0.2))
 
-    tool_block = next(
-        (b for b in response.content if isinstance(b, ToolUseBlock)), None
-    )
-    if tool_block is None:
-        raise ValueError("LLM did not call the emit_enrichment_decision tool")
+    def _build_kwargs(temperature: float) -> dict:
+        return dict(
+            model=prompt_row["model"],
+            max_tokens=int(params.get("max_tokens", 800)),
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": prompt_row["prompt_text"]},
+                {"role": "user", "content": json.dumps(payload, default=str)},
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "emit_enrichment_decision",
+                        "description": (
+                            "Emit the final risk decision for this issue: derived_risk, "
+                            "risk_explanation, likelihood, impact, remediation_suggestion."
+                        ),
+                        "parameters": _DECISION_SCHEMA,
+                    },
+                }
+            ],
+            tool_choice={"type": "function", "function": {"name": "emit_enrichment_decision"}},
+        )
 
-    return LLMEnrichmentDecision(**tool_block.input)
+    # Up to 3 attempts at increasing temperature.
+    attempts = [base_temp, 0.6, 0.9]
+    last_err: Exception | None = None
+    for temperature in attempts:
+        try:
+            response = client.chat.completions.create(**_build_kwargs(temperature))
+            tool_calls = response.choices[0].message.tool_calls or []
+            if not tool_calls:
+                raise ValueError("LLM did not call the emit_enrichment_decision function")
+            parsed = _parse_function_args(tool_calls[0].function.arguments)
+            return LLMEnrichmentDecision(**parsed)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    assert last_err is not None
+    raise last_err
 
 
 def _fetch_nvd_data(cve_ids: list[str], api_key: str | None) -> dict[str, dict]:
@@ -300,68 +339,76 @@ def run_enrich(run_id: str) -> dict:
             f"CISA KEV download failed: {type(e).__name__}: {str(e)[:200]}",
         )
 
-    # 5. Update each issue
+    # 5. Update each issue (parallel LLM decision)
     enriched = 0
     failed = 0
     kev_hits = 0
     epss_hits = 0
 
-    for i, issue in enumerate(issues):
-        try:
-            cve = issue.get("cve_id")
+    workers = max(1, int(settings.llm_parallel_workers or 10))
+    emit_trace(
+        run_id, "sub-agent-2", "MESSAGE",
+        f"Reasoning over {len(issues)} issue(s)…",
+    )
 
-            # Assemble enrichment data fetched above
-            epss = epss_data.get(cve, {}) if cve else {}
-            epss_score = epss.get("epss_score")
-            epss_percentile = epss.get("epss_percentile")
-            if epss_score is not None:
-                epss_hits += 1
+    def _process_one(issue: dict) -> dict:
+        """Per-issue task: assemble enrichment, call LLM, update row. Runs in a worker thread."""
+        cve = issue.get("cve_id")
+        epss = epss_data.get(cve, {}) if cve else {}
+        epss_score = epss.get("epss_score")
+        epss_percentile = epss.get("epss_percentile")
+        in_kev = (cve in kev_set) if cve else False
+        nvd = nvd_data.get(cve, {}) if cve else {}
 
-            in_kev = (cve in kev_set) if cve else False
-            if in_kev:
-                kev_hits += 1
+        decision = _llm_decide(prompt_row, issue, epss, nvd, in_kev)
 
-            nvd = nvd_data.get(cve, {}) if cve else {}
+        update_row = {
+            "epss_score": epss_score,
+            "epss_percentile": epss_percentile,
+            "exploit_in_kev": in_kev,
+            "cwe_id": nvd.get("cwe_id"),
+            "cvss_attack_vector": nvd.get("cvss_attack_vector"),
+            "cvss_attack_complexity": nvd.get("cvss_attack_complexity"),
+            "cvss_privileges_required": nvd.get("cvss_privileges_required"),
+            "cvss_user_interaction": nvd.get("cvss_user_interaction"),
+            "likelihood": decision.likelihood,
+            "impact": decision.impact,
+            "derived_risk": decision.derived_risk,
+            "risk_explanation": decision.risk_explanation,
+            "remediation_suggestion": decision.remediation_suggestion,
+            "enriched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
+        return {"epss_hit": epss_score is not None, "kev_hit": in_kev}
 
-            # LLM decision: derived_risk, explanation, likelihood, impact, remediation
-            decision = _llm_decide(prompt_row, issue, epss, nvd, in_kev)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_one, issue): issue for issue in issues}
+        completed = 0
+        for future in as_completed(futures):
+            issue = futures[future]
+            completed += 1
+            try:
+                result = future.result()
+                enriched += 1
+                if result.get("epss_hit"):
+                    epss_hits += 1
+                if result.get("kev_hit"):
+                    kev_hits += 1
+            except Exception as e:
+                failed += 1
+                if failed <= 3:
+                    emit_trace(
+                        run_id, "sub-agent-2", "ERROR",
+                        f"Issue {issue.get('id')} enrichment failed "
+                        f"({type(e).__name__}): {str(e)[:200]}",
+                    )
 
-            sb.table("issues").update(
-                {
-                    "epss_score": epss_score,
-                    "epss_percentile": epss_percentile,
-                    "exploit_in_kev": in_kev,
-                    "cwe_id": nvd.get("cwe_id"),
-                    "cvss_attack_vector": nvd.get("cvss_attack_vector"),
-                    "cvss_attack_complexity": nvd.get("cvss_attack_complexity"),
-                    "cvss_privileges_required": nvd.get("cvss_privileges_required"),
-                    "cvss_user_interaction": nvd.get("cvss_user_interaction"),
-                    # LLM-decided fields:
-                    "likelihood": decision.likelihood,
-                    "impact": decision.impact,
-                    "derived_risk": decision.derived_risk,
-                    "risk_explanation": decision.risk_explanation,
-                    "remediation_suggestion": decision.remediation_suggestion,
-                    "enriched_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ).eq("id", issue["id"]).execute()
-
-            enriched += 1
-        except Exception as e:
-            failed += 1
-            if failed <= 3:
+            if completed % 20 == 0 and completed < len(issues):
                 emit_trace(
-                    run_id, "sub-agent-2", "ERROR",
-                    f"Issue {issue.get('id')} enrichment failed "
-                    f"({type(e).__name__}): {str(e)[:200]}",
+                    run_id, "sub-agent-2", "MESSAGE",
+                    f"Enriched {completed}/{len(issues)} issues "
+                    f"({enriched} succeeded, {failed} failed so far)",
                 )
-
-        if (i + 1) % 20 == 0 and (i + 1) < len(issues):
-            emit_trace(
-                run_id, "sub-agent-2", "MESSAGE",
-                f"Enriched {i + 1}/{len(issues)} issues "
-                f"({enriched} succeeded, {failed} failed so far)",
-            )
 
     emit_trace(
         run_id, "sub-agent-2", "DONE",

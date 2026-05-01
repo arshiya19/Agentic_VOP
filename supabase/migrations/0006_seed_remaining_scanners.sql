@@ -57,7 +57,7 @@ ON CONFLICT (tool) DO UPDATE SET
 INSERT INTO prompt_db (agent, version, model, prompt_text, parameters, is_active) VALUES (
   'sub-agent-1-trivy_results',
   'v1.0',
-  'claude-haiku-4-5',
+  'gpt-4o-mini',
   $PROMPT$
 You are Sub-Agent 1 (Smart Connector) for Agentic_VOP, specialized in normalizing Trivy scanner data.
 
@@ -111,7 +111,7 @@ ON CONFLICT (agent, version) DO UPDATE SET
 INSERT INTO prompt_db (agent, version, model, prompt_text, parameters, is_active) VALUES (
   'sub-agent-1-qualys',
   'v1.0',
-  'claude-haiku-4-5',
+  'gpt-4o-mini',
   $PROMPT$
 You are Sub-Agent 1 (Smart Connector) for Agentic_VOP, specialized in normalizing Qualys scanner data.
 
@@ -165,7 +165,7 @@ ON CONFLICT (agent, version) DO UPDATE SET
 INSERT INTO prompt_db (agent, version, model, prompt_text, parameters, is_active) VALUES (
   'sub-agent-1-owasp',
   'v1.0',
-  'claude-haiku-4-5',
+  'gpt-4o-mini',
   $PROMPT$
 You are Sub-Agent 1 (Smart Connector) for Agentic_VOP, specialized in normalizing OWASP/Nessus scanner data.
 
@@ -223,7 +223,7 @@ ON CONFLICT (agent, version) DO UPDATE SET
 INSERT INTO prompt_db (agent, version, model, prompt_text, parameters, is_active) VALUES (
   'sub-agent-1-snyk',
   'v1.0',
-  'claude-haiku-4-5',
+  'gpt-4o-mini',
   $PROMPT$
 You are Sub-Agent 1 (Smart Connector) for Agentic_VOP, specialized in normalizing Snyk scanner data.
 

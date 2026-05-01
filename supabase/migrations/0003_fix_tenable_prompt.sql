@@ -1,11 +1,11 @@
 -- =============================================================================
 -- Agentic_VOP — fix Tenable parser prompt: remove source_raw from required output
 -- =============================================================================
--- The earlier prompt asked Claude to emit `source_raw` (the full raw row) inside
--- the JSON. With long multi-line strings (plugin_output, description) Claude
+-- The earlier prompt asked the LLM to emit `source_raw` (the full raw row) inside
+-- the JSON. With long multi-line strings (plugin_output, description) the LLM
 -- occasionally produced unescaped quotes/newlines that broke JSON.parse.
 --
--- New behavior: Claude does NOT emit source_raw. Code attaches it post-parse
+-- New behavior: the LLM does NOT emit source_raw. Code attaches it post-parse
 -- using the raw row we already have in memory. Faster, cheaper, and zero
 -- escape-related failures.
 --

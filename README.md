@@ -5,10 +5,17 @@ normalizes their output into a single canonical schema, enriches every finding w
 real exploit-intelligence (EPSS, CISA KEV, NVD, and others), and serves it through
 a live UI that shows the agents working in real time.
 
-The pipeline is **agent-driven**: a master orchestrator dispatches tasks to two
-specialized sub-agents (a Smart Connector and an Enrichment Specialist), each
-backed by Claude. Per-scanner knowledge is stored in the database — adding a new
-scanner is a SQL `INSERT`, not a code deploy.
+The pipeline is **fully agent-driven**: every agent — Master, Sub-Agent 1
+(Smart Connector), and Sub-Agent 2 (Enrichment Specialist) — has its own
+prompt and reasons via OpenAI function calling. Master plans each run
+dynamically; Sub-Agent 1 normalizes raw scanner output; Sub-Agent 2 reasons
+over EPSS / CISA KEV / NVD signals to produce a per-finding risk score with
+written explanation and remediation. Per-scanner knowledge lives in the
+database, so adding a new scanner is a SQL `INSERT`, not a code deploy.
+
+Sub-agents run their LLM calls in parallel (configurable via
+`LLM_PARALLEL_WORKERS`, default 5) for fast batch throughput, and the
+OpenAI client uses generous retry budgets to absorb rate-limit bursts.
 
 ## Architecture at a glance
 
@@ -71,7 +78,7 @@ Agentic_VOP/
 Three top-level pieces:
 
 - **`apps/api/`** — the brains. Master Agent, Sub-Agent 1, Sub-Agent 2, the
-  Anthropic SDK wrapper, the connectors that talk to external scanners. See
+  OpenAI SDK wrapper, the connectors that talk to external scanners. See
   [apps/api/README.md](apps/api/README.md) for the inside tour.
 
 - **`apps/web/`** — the eyes. Login, sidebar navigation, the **Agents page**
@@ -84,7 +91,7 @@ Three top-level pieces:
 
 ## Quick start (full local pipeline)
 
-You'll need **Supabase** (a free tier project), an **Anthropic API key**, and
+You'll need **Supabase** (a free tier project), an **OpenAI API key**, and
 optionally an **NVD API key** (for faster CVE lookups).
 
 ### 1. Apply the database migrations
@@ -100,7 +107,7 @@ prompts.
 ```
 cd apps/api
 cp .env.example .env
-# Fill in the Supabase URL + service_role key, Anthropic key, NVD key
+# Fill in the Supabase URL + service_role key, OpenAI key, NVD key
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
@@ -132,14 +139,14 @@ Switch to the **Agents** page and watch the trace stream in.
 4. Master dispatches FETCH to **Sub-Agent 1**.
 5. Sub-Agent 1 reads `monitored_packages`, hits `https://api.osv.dev/v1/query`,
    bulk-inserts every raw vulnerability record into `raw_findings`, then loops:
-   for each raw row → calls Claude with the generic Sub-Agent 1 prompt + the
+   for each raw row → calls the LLM with the generic Sub-Agent 1 prompt + the
    per-scanner mapping rules from `schema_mapping` → inserts the canonical
    Issue into `issues`.
 6. Sub-Agent 1 emits FETCH_DONE. Master receives it and dispatches ENRICH to
    **Sub-Agent 2**.
 7. Sub-Agent 2 makes batched lookups to **EPSS** (FIRST.org), downloads the
    **CISA KEV** catalog, and hits **NVD** per CVE. For each Issue, it calls
-   Claude with the assembled enrichment data; Claude returns a structured
+   the LLM with the assembled enrichment data; The LLM returns a structured
    decision (`derived_risk`, `risk_explanation`, `likelihood`, `impact`,
    `remediation_suggestion`).
 8. Sub-Agent 2 emits ENRICH_DONE. Master writes SCAN_COMPLETE and marks the
@@ -154,7 +161,7 @@ the agents working step by step.
 | Service | Used for | Auth required |
 |---|---|---|
 | **Supabase** | Auth, database, real-time pub/sub | URL + anon key (frontend), service_role key (backend) |
-| **Anthropic Claude** | LLM reasoning (Haiku 4.5) for both sub-agents | API key |
+| **OpenAI** | LLM reasoning — `gpt-4o` for Master, `gpt-4o-mini` for Sub-Agent 1 + Sub-Agent 2 | API key |
 | **OSV.dev** | Live source of vulnerabilities | None (public API) |
 | **FIRST.org EPSS** | Exploit probability per CVE | None |
 | **CISA KEV** | Actively-exploited CVE catalog | None |

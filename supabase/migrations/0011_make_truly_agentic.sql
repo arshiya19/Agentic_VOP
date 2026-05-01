@@ -29,7 +29,7 @@ WHERE agent IN (
 INSERT INTO prompt_db (agent, version, model, prompt_text, parameters, is_active) VALUES (
   'sub-agent-1',
   'v1.0',
-  'claude-haiku-4-5',
+  'gpt-4o-mini',
   $PROMPT$
 You are Sub-Agent 1 — Smart Connector for Agentic_VOP.
 
@@ -96,7 +96,7 @@ ON CONFLICT (agent, version) DO UPDATE SET
 INSERT INTO prompt_db (agent, version, model, prompt_text, parameters, is_active) VALUES (
   'sub-agent-2',
   'v1.0',
-  'claude-haiku-4-5',
+  'gpt-4o-mini',
   $PROMPT$
 You are Sub-Agent 2 — Enrichment Specialist for Agentic_VOP.
 

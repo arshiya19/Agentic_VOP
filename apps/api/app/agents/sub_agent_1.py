@@ -5,7 +5,7 @@ Per run:
   2. Fetch raw rows from the scanner (incremental).
   3. **Persist all raw rows verbatim into raw_findings.** This is the audit trail.
   4. For each persisted raw row:
-       a. Call Claude (tool_use) with per-scanner prompt → LLMNormalizedIssue.
+       a. Call the LLM (function calling) with per-scanner prompt → LLMNormalizedIssue.
        b. Insert canonical Issue, with raw_finding_id pointing back to step 3.
   5. On success, advance the watermark.
 
@@ -14,11 +14,12 @@ Why split raw and canonical: replay (re-normalize without re-fetching), audit
 """
 
 import json
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
-from anthropic.types import ToolUseBlock
-
+from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMNormalizedIssue
 from .connectors import fetch_raw_rows
@@ -29,9 +30,50 @@ from .trace import emit_trace
 # Compute the LLM tool input schema once at import time.
 _NORMALIZED_ISSUE_SCHEMA = LLMNormalizedIssue.model_json_schema()
 
+# Matches a \u that isn't followed by exactly 4 hex digits — i.e., a malformed
+# Unicode escape. The LLM emits these very rarely; one bad row would otherwise
+# drop the whole call.
+_BAD_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
+_ANY_UNICODE_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{0,4}")
+
+
+def _parse_function_args(args_str: str) -> dict:
+    """json.loads with multi-stage repair for the malformed \\u escapes the LLM
+    occasionally produces. Tries: (1) as-is, (2) replace bad \\u with safe \\u0020
+    (a space), (3) strip every \\u escape as a last resort.
+    """
+    try:
+        return json.loads(args_str)
+    except json.JSONDecodeError:
+        pass
+    try:
+        # Replace each bad \u with a safe escape for SPACE (\u0020) — preserves
+        # string structure better than just deleting the \u.
+        return json.loads(_BAD_UNICODE_ESCAPE.sub(r"\\u0020", args_str))
+    except json.JSONDecodeError:
+        pass
+    # Last-resort: drop every \u sequence entirely. Loses some characters but
+    # the row still goes through.
+    return json.loads(_ANY_UNICODE_ESCAPE.sub("", args_str))
+
+
+def _sanitize(value: Any) -> Any:
+    """Recursively strip Postgres-incompatible NUL bytes (\\u0000) from a JSON-like structure.
+
+    Some scanners (and downstream LLM output) can include \\x00 in description text;
+    Postgres' text/jsonb types reject it with "unsupported Unicode escape sequence".
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: _sanitize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize(v) for v in value]
+    return value
+
 
 def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
-    """Read raw rows from the connector, normalize each via Claude, insert canonical Issues.
+    """Read raw rows from the connector, normalize each via the LLM, insert canonical Issues.
 
     Returns count of issues successfully inserted.
     """
@@ -90,8 +132,9 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
         return 0
 
     # ------ Step 2: persist raw rows verbatim into raw_findings ------
+    # Sanitize NUL bytes (\u0000) — Postgres' text/jsonb types reject them.
     raw_inserts = [
-        {"source": tool, "agent_run_id": run_id, "raw": row}
+        {"source": tool, "agent_run_id": run_id, "raw": _sanitize(row)}
         for row in raw_rows
     ]
     raw_insert_result = sb.table("raw_findings").insert(raw_inserts).execute()
@@ -129,39 +172,54 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
         f"+ {len(mapping_rules)} mapping rule(s) for {tool}",
     )
 
-    # ------ Step 3: normalize each persisted raw row -> issues ------
+    # ------ Step 3: normalize each persisted raw row -> issues (parallel) ------
     inserted = 0
     failed = 0
     failure_examples: list[str] = []
 
-    for i, persisted in enumerate(persisted_raws):
+    workers = max(1, int(settings.llm_parallel_workers or 10))
+    emit_trace(
+        run_id, "sub-agent-1", "MESSAGE",
+        f"Normalizing {len(persisted_raws)} row(s)…",
+    )
+
+    def _process_one(persisted: dict) -> dict:
+        """Per-row task: LLM-normalize then insert. Runs inside a worker thread."""
         raw_finding_id = persisted["id"]
         raw = persisted["raw"]
-        try:
-            llm_issue = _normalize_row(prompt_row, tool, raw, mapping_rules)
-            _insert_issue(sb, llm_issue, raw_finding_id, run_id)
-            inserted += 1
-        except Exception as e:
-            failed += 1
-            if len(failure_examples) < 3:
-                failure_examples.append(f"{type(e).__name__}: {e}")
-                emit_trace(
-                    run_id, "sub-agent-1", "ERROR",
-                    f"Row {i} failed ({type(e).__name__}): {str(e)[:400]}",
-                    payload={
-                        "row_index": i,
-                        "raw_finding_id": raw_finding_id,
-                        "exception_type": type(e).__name__,
-                        "exception_message": str(e)[:1000],
-                    },
-                )
+        llm_issue = _normalize_row(prompt_row, tool, raw, mapping_rules)
+        _insert_issue(sb, llm_issue, raw_finding_id, run_id)
+        return {"raw_finding_id": raw_finding_id}
 
-        if (i + 1) % 20 == 0 and (i + 1) < len(persisted_raws):
-            emit_trace(
-                run_id, "sub-agent-1", "MESSAGE",
-                f"Processed {i + 1}/{len(persisted_raws)} rows "
-                f"({inserted} succeeded, {failed} failed so far)",
-            )
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_one, p): p for p in persisted_raws}
+        completed = 0
+        for future in as_completed(futures):
+            persisted = futures[future]
+            completed += 1
+            try:
+                future.result()
+                inserted += 1
+            except Exception as e:
+                failed += 1
+                if len(failure_examples) < 3:
+                    failure_examples.append(f"{type(e).__name__}: {e}")
+                    emit_trace(
+                        run_id, "sub-agent-1", "ERROR",
+                        f"Row {persisted['id']} failed ({type(e).__name__}): {str(e)[:400]}",
+                        payload={
+                            "raw_finding_id": persisted["id"],
+                            "exception_type": type(e).__name__,
+                            "exception_message": str(e)[:1000],
+                        },
+                    )
+
+            if completed % 20 == 0 and completed < len(persisted_raws):
+                emit_trace(
+                    run_id, "sub-agent-1", "MESSAGE",
+                    f"Processed {completed}/{len(persisted_raws)} rows "
+                    f"({inserted} succeeded, {failed} failed so far)",
+                )
 
     if failed:
         emit_trace(
@@ -209,7 +267,7 @@ def _normalize_row(
     raw_row: dict,
     mapping_rules: list[dict],
 ) -> LLMNormalizedIssue:
-    """Call Claude with tool_use to normalize one raw row to a canonical Issue.
+    """Call OpenAI with function calling to normalize one raw row to a canonical Issue.
 
     The LLM receives:
       - source_scanner (tool name, e.g., "osv")
@@ -229,38 +287,49 @@ def _normalize_row(
 
     params = prompt_row.get("parameters") or {}
 
-    response = client.messages.create(
-        model=prompt_row["model"],
-        max_tokens=int(params.get("max_tokens", 2000)),
-        temperature=float(params.get("temperature", 0.1)),
-        system=[
-            {
-                "type": "text",
-                "text": prompt_row["prompt_text"],
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        tools=[
-            {
-                "name": "emit_canonical_issue",
-                "description": (
-                    "Emit one normalized canonical Issue produced from a single raw scanner row. "
-                    "Call this exactly once per row, with the normalized fields populated."
-                ),
-                "input_schema": _NORMALIZED_ISSUE_SCHEMA,
-            }
-        ],
-        tool_choice={"type": "tool", "name": "emit_canonical_issue"},
-        messages=[{"role": "user", "content": user_message}],
-    )
+    base_temp = float(params.get("temperature", 0.1))
 
-    tool_block = next(
-        (b for b in response.content if isinstance(b, ToolUseBlock)), None
-    )
-    if tool_block is None:
-        raise ValueError("LLM did not call the emit_canonical_issue tool")
+    def _build_kwargs(temperature: float) -> dict:
+        return dict(
+            model=prompt_row["model"],
+            max_tokens=int(params.get("max_tokens", 2000)),
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": prompt_row["prompt_text"]},
+                {"role": "user", "content": user_message},
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "emit_canonical_issue",
+                        "description": (
+                            "Emit one normalized canonical Issue produced from a single raw scanner row. "
+                            "Call this exactly once per row, with the normalized fields populated."
+                        ),
+                        "parameters": _NORMALIZED_ISSUE_SCHEMA,
+                    },
+                }
+            ],
+            tool_choice={"type": "function", "function": {"name": "emit_canonical_issue"}},
+        )
 
-    return LLMNormalizedIssue(**tool_block.input)
+    # Up to 3 attempts: first at low temp, retries at higher temp so the LLM
+    # samples differently and breaks out of any deterministic bad-output loop.
+    attempts = [base_temp, 0.6, 0.9]
+    last_err: Exception | None = None
+    for temperature in attempts:
+        try:
+            response = client.chat.completions.create(**_build_kwargs(temperature))
+            tool_calls = response.choices[0].message.tool_calls or []
+            if not tool_calls:
+                raise ValueError("LLM did not call the emit_canonical_issue function")
+            parsed = _parse_function_args(tool_calls[0].function.arguments)
+            return LLMNormalizedIssue(**parsed)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    assert last_err is not None
+    raise last_err
 
 
 def _insert_issue(
@@ -284,4 +353,5 @@ def _insert_issue(
         "raw_finding_id": raw_finding_id,
         "agent_run_id": run_id,
     }
-    sb.table("issues").insert(row).execute()
+    # Sanitize NUL bytes from any string field (some scanners emit them via the LLM).
+    sb.table("issues").insert(_sanitize(row)).execute()

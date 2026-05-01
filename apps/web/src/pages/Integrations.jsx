@@ -172,11 +172,14 @@ export default function Integrations() {
         ok: true,
         message: `Run triggered (${data.event_id}) — status ${data.status}. Open the Agents page to watch progress.`,
       })
+      // Keep the button disabled for an extra 5 seconds after a successful
+      // trigger so rapid follow-up clicks can't create duplicate runs.
+      setTimeout(() => setIsTriggering(false), 5000)
+      return
     } catch (err) {
       setLastResult({ ok: false, message: `Failed to trigger: ${err.message}` })
-    } finally {
-      setIsTriggering(false)
     }
+    setIsTriggering(false)
   }
 
   const allTools = useMemo(() => {
