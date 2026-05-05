@@ -346,7 +346,7 @@ export default function Validation() {
     setStatusOverrides(prev => ({ ...prev, [issueId]: 'Action Needed' }))
   }
 
-  const handleRetry = (issueId) => {
+  const handleRetry = (issueId) => { // eslint-disable-line no-unused-vars
     // Wire to validation retry endpoint when ready
   }
 

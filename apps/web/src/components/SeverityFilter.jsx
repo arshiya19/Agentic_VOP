@@ -212,6 +212,7 @@ export default function SeverityFilter({
 }
 
 // Helper for chip display text — used by Issues page.
+// eslint-disable-next-line react-refresh/only-export-components
 export function getSeverityChipText(value, data, field = 'severity') {
   const allKeys = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
 

@@ -742,7 +742,7 @@ export default function Remediation() {
                                   const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 }
                                   item.issues?.forEach(issue => {
                                     const sev = issue.severity?.toUpperCase()
-                                    if (counts.hasOwnProperty(sev)) counts[sev]++
+                                    if (Object.prototype.hasOwnProperty.call(counts, sev)) counts[sev]++
                                   })
 
                                   // Render in priority order: C, H, M, L - only show non-zero
@@ -756,7 +756,7 @@ export default function Remediation() {
                                   // Filter to only show severities that exist
                                   const existing = order.filter(({ key }) => counts[key] > 0)
 
-                                  return existing.map(({ key, letter, color }, idx) => (
+                                  return existing.map(({ key, letter, color }) => (
                                     <span
                                       key={key}
                                       className="severity-badge-group"

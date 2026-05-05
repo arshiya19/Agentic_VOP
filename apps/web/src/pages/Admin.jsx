@@ -23,11 +23,11 @@ export default function Admin() {
     if (fileInput) fileInput.value = ''
   }
 
-  const deleteFile = async (_name) => {}
+  const deleteFile = async (_name) => {} // eslint-disable-line no-unused-vars
 
   const switchNamespace = async () => {}
 
-  const saveLLMConfig = async (_cfg) => {}
+  const saveLLMConfig = async (_cfg) => {} // eslint-disable-line no-unused-vars
 
   return (
     <>

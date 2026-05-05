@@ -252,6 +252,7 @@ function formatColumnLabel(key) {
 /**
  * Hook for easy column visibility management
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function useColumnVisibility(data, excludeColumns = ['id', 'uuid', 'created_at', 'updated_at'], defaultHidden = []) {
   const [visibleColumns, setVisibleColumns] = useState([])
 
