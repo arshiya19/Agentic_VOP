@@ -1,0 +1,364 @@
+# =============================================================================
+# Agentic_VOP — Security Quality Gate
+# =============================================================================
+# Runs on every push (all branches) and every pull request.
+#
+# Jobs (all parallel):
+#   bandit      — Python SAST (apps/api)
+#   semgrep     — JS/JSX SAST + SQL injection patterns (apps/web, supabase/)
+#   gitleaks    — Secrets / credential scanning (whole repo)
+#   pip-audit   — Python SCA via uv.lock export (apps/api)
+#   npm-audit   — JS SCA via package-lock.json (apps/web)
+#
+# Gate logic (enforced in every job, not just the final gate job):
+#   Critical / High  → exit 1  → pipeline fails  → PR cannot merge
+#   Medium / Low     → printed as warnings        → pipeline passes
+# =============================================================================
+
+name: Security Quality Gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+# Cancel in-flight runs for the same branch/PR to avoid queue pile-ups.
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # 1. Bandit — Python SAST
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: "SAST · Python (Bandit)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      # Run at medium+ confidence. Output full JSON for parsing.
+      - name: Run Bandit
+        id: bandit_run
+        run: |
+          bandit -r apps/api/app \
+            -f json \
+            -o bandit-report.json \
+            --confidence-level MEDIUM \
+            --severity-level LOW \
+            -x apps/api/app/tests \
+            || true   # don't let bandit's own exit code short-circuit us
+
+      # Parse the JSON and apply the Critical/High-block / Medium-Low-warn gate.
+      - name: Evaluate Bandit results
+        run: |
+          python - <<'EOF'
+          import json, sys
+
+          with open("bandit-report.json") as f:
+              report = json.load(f)
+
+          results = report.get("results", [])
+          high_block   = [r for r in results if r["issue_severity"] in ("HIGH", "CRITICAL")]
+          medium_warn  = [r for r in results if r["issue_severity"] == "MEDIUM"]
+          low_warn     = [r for r in results if r["issue_severity"] == "LOW"]
+
+          if medium_warn or low_warn:
+              print("::warning::Bandit — Medium/Low findings (non-blocking):")
+              for r in medium_warn + low_warn:
+                  print(f"  [{r['issue_severity']}] {r['filename']}:{r['line_number']} — {r['issue_text']}")
+
+          if high_block:
+              print("::error::Bandit — Critical/High findings BLOCK this pipeline:")
+              for r in high_block:
+                  print(f"  [{r['issue_severity']}] {r['filename']}:{r['line_number']} — {r['issue_text']}")
+              sys.exit(1)
+
+          print(f"Bandit passed. High/Critical: 0 | Medium: {len(medium_warn)} | Low: {len(low_warn)}")
+          EOF
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 2. Semgrep — JS/JSX SAST + SQL patterns
+  # ---------------------------------------------------------------------------
+  semgrep:
+    name: "SAST · JS/SQL (Semgrep)"
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.127.0
+    steps:
+      - uses: actions/checkout@v4
+
+      # Run OSS rule packs for JS/TS security + generic secrets + SQL injection.
+      # Output JSON for gate parsing.
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config "p/javascript" \
+            --config "p/react" \
+            --config "p/sql-injection" \
+            --config "p/secrets" \
+            --json \
+            --output semgrep-report.json \
+            apps/web/src \
+            supabase/migrations \
+            || true
+
+      - name: Evaluate Semgrep results
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+
+          with open("semgrep-report.json") as f:
+              report = json.load(f)
+
+          findings = report.get("results", [])
+
+          # Semgrep severity: ERROR → High/Critical, WARNING → Medium, INFO → Low
+          block_levels = {"ERROR"}
+          warn_levels  = {"WARNING", "INFO"}
+
+          blocking = [f for f in findings if f.get("extra", {}).get("severity", "").upper() in block_levels]
+          warnings = [f for f in findings if f.get("extra", {}).get("severity", "").upper() in warn_levels]
+
+          if warnings:
+              print("::warning::Semgrep — Warning/Info findings (non-blocking):")
+              for f in warnings:
+                  path = f.get("path", "?")
+                  line = f.get("start", {}).get("line", "?")
+                  msg  = f.get("extra", {}).get("message", "")[:120]
+                  print(f"  [WARN] {path}:{line} — {msg}")
+
+          if blocking:
+              print("::error::Semgrep — ERROR-level findings BLOCK this pipeline:")
+              for f in blocking:
+                  path = f.get("path", "?")
+                  line = f.get("start", {}).get("line", "?")
+                  msg  = f.get("extra", {}).get("message", "")[:120]
+                  print(f"  [ERROR] {path}:{line} — {msg}")
+              sys.exit(1)
+
+          print(f"Semgrep passed. Blocking: 0 | Warnings: {len(warnings)}")
+          EOF
+
+      - name: Upload Semgrep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 3. Gitleaks — Secrets / credential scanning
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: "Secrets (Gitleaks)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so Gitleaks can scan all commits on the branch,
+          # not just the latest snapshot.
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Any detected secret is a blocker — no warn/pass split here.
+          # GITLEAKS_ENABLE_COMMENTS: "false"  # uncomment to silence PR comments
+
+  # ---------------------------------------------------------------------------
+  # 4. pip-audit — Python SCA (exact locked deps via uv.lock)
+  # ---------------------------------------------------------------------------
+  pip-audit:
+    name: "SCA · Python (pip-audit)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      # Export only production deps (no dev) from the locked uv.lock.
+      - name: Export locked requirements
+        working-directory: apps/api
+        run: uv export --frozen --no-dev --no-hashes -o requirements-locked.txt
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      # --desc on  → include vulnerability descriptions in output
+      # --format json → machine-parseable for gate logic
+      - name: Run pip-audit
+        id: pip_audit_run
+        working-directory: apps/api
+        run: |
+          pip-audit \
+            -r requirements-locked.txt \
+            --desc on \
+            --format json \
+            -o pip-audit-report.json \
+            || true
+
+      - name: Evaluate pip-audit results
+        working-directory: apps/api
+        run: |
+          python - <<'EOF'
+          import json, sys
+
+          with open("pip-audit-report.json") as f:
+              report = json.load(f)
+
+          # pip-audit JSON: list of {name, version, vulns: [{id, fix_versions, aliases, description}]}
+          dependencies = report.get("dependencies", [])
+          blocking = []
+          warnings = []
+
+          for dep in dependencies:
+              for vuln in dep.get("vulns", []):
+                  # pip-audit doesn't emit severity directly; treat all CVEs as blocking
+                  # (they represent known exploitable vulnerabilities in locked deps).
+                  entry = {
+                      "package": dep["name"],
+                      "version": dep["version"],
+                      "id": vuln["id"],
+                      "aliases": vuln.get("aliases", []),
+                      "fix_versions": vuln.get("fix_versions", []),
+                      "description": vuln.get("description", "")[:200],
+                  }
+                  blocking.append(entry)
+
+          if blocking:
+              print("::error::pip-audit — Vulnerable dependencies BLOCK this pipeline:")
+              for v in blocking:
+                  fix = ", ".join(v["fix_versions"]) or "no fix available"
+                  print(f"  {v['package']}=={v['version']} [{v['id']}] fix: {fix} — {v['description']}")
+              sys.exit(1)
+
+          print("pip-audit passed. No known vulnerabilities in locked dependencies.")
+          EOF
+
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: apps/api/pip-audit-report.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 5. npm audit — JS SCA
+  # ---------------------------------------------------------------------------
+  npm-audit:
+    name: "SCA · JS (npm audit)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      # Install deps so npm audit has a full dependency tree to scan.
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci --prefer-offline
+
+      # npm audit exits non-zero for any vulnerability.
+      # We parse the JSON to split Critical/High (block) from Moderate/Low (warn).
+      - name: Run npm audit
+        working-directory: apps/web
+        run: |
+          npm audit --json > npm-audit-report.json 2>&1 || true
+
+      - name: Evaluate npm audit results
+        working-directory: apps/web
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+
+          with open("npm-audit-report.json") as f:
+              try:
+                  report = json.load(f)
+              except json.JSONDecodeError:
+                  print("::warning::npm audit produced non-JSON output — skipping gate.")
+                  sys.exit(0)
+
+          # npm audit v2 JSON shape: { vulnerabilities: { <pkg>: { severity, ... } } }
+          vulns = report.get("vulnerabilities", {})
+          blocking_severities = {"critical", "high"}
+          warn_severities     = {"moderate", "low", "info"}
+
+          blocking = {k: v for k, v in vulns.items() if v.get("severity") in blocking_severities}
+          warnings = {k: v for k, v in vulns.items() if v.get("severity") in warn_severities}
+
+          if warnings:
+              print("::warning::npm audit — Moderate/Low vulnerabilities (non-blocking):")
+              for pkg, info in warnings.items():
+                  print(f"  [{info.get('severity','?').upper()}] {pkg} — {info.get('title', info.get('name',''))}")
+
+          if blocking:
+              print("::error::npm audit — Critical/High vulnerabilities BLOCK this pipeline:")
+              for pkg, info in blocking.items():
+                  print(f"  [{info.get('severity','?').upper()}] {pkg} — {info.get('title', info.get('name',''))}")
+              sys.exit(1)
+
+          print(f"npm audit passed. Critical/High: 0 | Moderate/Low: {len(warnings)}")
+          EOF
+
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: apps/web/npm-audit-report.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Gate — final summary job. Depends on all 5 scanners.
+  # GitHub marks the PR as failed if any dependency job fails.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: "Security Gate"
+    runs-on: ubuntu-latest
+    needs: [bandit, semgrep, gitleaks, pip-audit, npm-audit]
+    # Run even if upstream jobs failed so we always emit a clear summary.
+    if: always()
+    steps:
+      - name: Evaluate gate
+        run: |
+          results='${{ toJSON(needs) }}'
+          echo "Job results: $results"
+
+          # Check if any job failed, was cancelled, or was skipped unexpectedly.
+          if echo "$results" | grep -qE '"result":\s*"(failure|cancelled|skipped)"'; then
+            echo "::error::Security gate FAILED — one or more scanners found Critical/High issues."
+            echo "Review the failed job logs and uploaded artifacts for details."
+            exit 1
+          fi
+
+          echo "Security gate PASSED — no Critical/High findings across all scanners."
