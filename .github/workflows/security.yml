@@ -55,8 +55,8 @@ jobs:
           bandit -r apps/api/app \
             -f json \
             -o bandit-report.json \
-            --confidence-level MEDIUM \
-            --severity-level LOW \
+            --confidence-level medium \
+            --severity-level low \
             --exit-zero \
             -x apps/api/app/tests
 
