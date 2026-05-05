@@ -17,7 +17,7 @@ def get_client() -> OpenAI:
     if _client is None:
         _client = OpenAI(
             api_key=settings.openai_api_key,
-            max_retries=10,    # default is 2; 10 covers most TPM bursts
+            max_retries=10,  # default is 2; 10 covers most TPM bursts
             timeout=120.0,
         )
     return _client

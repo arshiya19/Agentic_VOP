@@ -27,13 +27,10 @@ _DEFAULT_SCAN_LIMIT = 5  # cap per run so demos don't take forever
 
 def _headers() -> dict[str, str]:
     if not settings.tenable_access_key or not settings.tenable_secret_key:
-        raise RuntimeError(
-            "Missing TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY in environment"
-        )
+        raise RuntimeError("Missing TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY in environment")
     return {
         "X-ApiKeys": (
-            f"accessKey={settings.tenable_access_key}; "
-            f"secretKey={settings.tenable_secret_key}"
+            f"accessKey={settings.tenable_access_key}; secretKey={settings.tenable_secret_key}"
         ),
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -93,11 +90,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
 
         # Apply watermark — only scans whose last_modification_date is newer
         if cutoff_epoch is not None:
-            scans = [
-                s
-                for s in scans
-                if (s.get("last_modification_date") or 0) > cutoff_epoch
-            ]
+            scans = [s for s in scans if (s.get("last_modification_date") or 0) > cutoff_epoch]
 
         scans = scans[:scan_limit]
 

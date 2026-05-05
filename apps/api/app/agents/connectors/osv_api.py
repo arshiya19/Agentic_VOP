@@ -35,14 +35,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
     """Query OSV for every monitored package; return one record per vulnerability."""
     sb = supabase_admin()
 
-    packages = (
-        sb.table("monitored_packages")
-        .select("*")
-        .eq("enabled", True)
-        .execute()
-        .data
-        or []
-    )
+    packages = sb.table("monitored_packages").select("*").eq("enabled", True).execute().data or []
 
     if not packages:
         return []

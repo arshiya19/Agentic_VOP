@@ -88,7 +88,9 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
 
     mode = "incremental" if last_fetched_at else "initial"
     emit_trace(
-        run_id, "sub-agent-1", "MESSAGE",
+        run_id,
+        "sub-agent-1",
+        "MESSAGE",
         f"Connecting to {tool} via connector={connector_type} "
         f"({mode}{f' — since {last_fetched_at}' if last_fetched_at else ' — fetching all rows'})",
     )
@@ -98,24 +100,30 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
         raw_rows = fetch_raw_rows(tool, registry_entry, last_fetched_at)
     except Exception as e:
         emit_trace(
-            run_id, "sub-agent-1", "ERROR",
+            run_id,
+            "sub-agent-1",
+            "ERROR",
             f"Connector failed for {tool} ({type(e).__name__}): {str(e)[:300]}",
         )
         raise
 
     emit_trace(
-        run_id, "sub-agent-1", "MESSAGE",
+        run_id,
+        "sub-agent-1",
+        "MESSAGE",
         f"Fetched {len(raw_rows)} raw rows from {tool}",
     )
 
     if not raw_rows:
         # Still advance the watermark so the next run also looks for new rows.
-        sb.table("connection_registry").update(
-            {"last_fetched_at": fetch_started_at}
-        ).eq("tool", tool).execute()
+        sb.table("connection_registry").update({"last_fetched_at": fetch_started_at}).eq(
+            "tool", tool
+        ).execute()
 
         emit_trace(
-            run_id, "sub-agent-1", "DONE",
+            run_id,
+            "sub-agent-1",
+            "DONE",
             "FETCH_DONE — no new rows since last fetch",
             payload={
                 "from": "sub-agent-1",
@@ -134,14 +142,15 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
     # ------ Step 2: persist raw rows verbatim into raw_findings ------
     # Sanitize NUL bytes (\u0000) — Postgres' text/jsonb types reject them.
     raw_inserts = [
-        {"source": tool, "agent_run_id": run_id, "raw": _sanitize(row)}
-        for row in raw_rows
+        {"source": tool, "agent_run_id": run_id, "raw": _sanitize(row)} for row in raw_rows
     ]
     raw_insert_result = sb.table("raw_findings").insert(raw_inserts).execute()
     persisted_raws: list[dict] = raw_insert_result.data or []
 
     emit_trace(
-        run_id, "sub-agent-1", "MESSAGE",
+        run_id,
+        "sub-agent-1",
+        "MESSAGE",
         f"Persisted {len(persisted_raws)} raw rows to raw_findings",
     )
 
@@ -167,7 +176,9 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
     )
 
     emit_trace(
-        run_id, "sub-agent-1", "MESSAGE",
+        run_id,
+        "sub-agent-1",
+        "MESSAGE",
         f"Loaded prompt {prompt_row['agent']}@{prompt_row['version']} ({prompt_row['model']}) "
         f"+ {len(mapping_rules)} mapping rule(s) for {tool}",
     )
@@ -179,7 +190,9 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
 
     workers = max(1, int(settings.llm_parallel_workers or 10))
     emit_trace(
-        run_id, "sub-agent-1", "MESSAGE",
+        run_id,
+        "sub-agent-1",
+        "MESSAGE",
         f"Normalizing {len(persisted_raws)} row(s)…",
     )
 
@@ -205,7 +218,9 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
                 if len(failure_examples) < 3:
                     failure_examples.append(f"{type(e).__name__}: {e}")
                     emit_trace(
-                        run_id, "sub-agent-1", "ERROR",
+                        run_id,
+                        "sub-agent-1",
+                        "ERROR",
                         f"Row {persisted['id']} failed ({type(e).__name__}): {str(e)[:400]}",
                         payload={
                             "raw_finding_id": persisted["id"],
@@ -216,20 +231,26 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
 
             if completed % 20 == 0 and completed < len(persisted_raws):
                 emit_trace(
-                    run_id, "sub-agent-1", "MESSAGE",
+                    run_id,
+                    "sub-agent-1",
+                    "MESSAGE",
                     f"Processed {completed}/{len(persisted_raws)} rows "
                     f"({inserted} succeeded, {failed} failed so far)",
                 )
 
     if failed:
         emit_trace(
-            run_id, "sub-agent-1", "MESSAGE",
+            run_id,
+            "sub-agent-1",
+            "MESSAGE",
             f"Completed normalization: {inserted} succeeded, {failed} failed. "
             f"Examples: {'; '.join(failure_examples)}",
         )
     else:
         emit_trace(
-            run_id, "sub-agent-1", "MESSAGE",
+            run_id,
+            "sub-agent-1",
+            "MESSAGE",
             f"Completed normalization: {inserted}/{len(persisted_raws)} rows normalized cleanly",
         )
 
@@ -237,12 +258,14 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
     # Only do this if we successfully processed at least some rows — if the entire
     # batch failed, leave the watermark alone so a retry sees the same data.
     if inserted > 0:
-        sb.table("connection_registry").update(
-            {"last_fetched_at": fetch_started_at}
-        ).eq("tool", tool).execute()
+        sb.table("connection_registry").update({"last_fetched_at": fetch_started_at}).eq(
+            "tool", tool
+        ).execute()
 
     emit_trace(
-        run_id, "sub-agent-1", "DONE",
+        run_id,
+        "sub-agent-1",
+        "DONE",
         f"FETCH_DONE — {len(persisted_raws)} raw / {inserted} canonical",
         payload={
             "from": "sub-agent-1",
@@ -332,9 +355,7 @@ def _normalize_row(
     raise last_err
 
 
-def _insert_issue(
-    sb, llm_issue: LLMNormalizedIssue, raw_finding_id: int, run_id: str
-) -> None:
+def _insert_issue(sb, llm_issue: LLMNormalizedIssue, raw_finding_id: int, run_id: str) -> None:
     """Insert one new canonical Issue. Points back to the raw_findings row by FK."""
     row: dict[str, Any] = {
         "source": llm_issue.source,
@@ -349,7 +370,9 @@ def _insert_issue(
         "solution": llm_issue.solution,
         "asset_identity": llm_issue.asset_identity,
         "package": llm_issue.package,
-        "first_detected": llm_issue.first_detected.isoformat() if llm_issue.first_detected else None,
+        "first_detected": llm_issue.first_detected.isoformat()
+        if llm_issue.first_detected
+        else None,
         "raw_finding_id": raw_finding_id,
         "agent_run_id": run_id,
     }

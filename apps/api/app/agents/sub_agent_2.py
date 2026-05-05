@@ -67,8 +67,7 @@ def _sanitize(value):
 
 _EPSS_API = "https://api.first.org/data/v1/epss"
 _KEV_CATALOG_URL = (
-    "https://www.cisa.gov/sites/default/files/feeds/"
-    "known_exploited_vulnerabilities.json"
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 )
 _NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
@@ -227,24 +226,21 @@ def run_enrich(run_id: str) -> dict:
     )
 
     # 1. Pull issues for this run
-    issues = (
-        sb.table("issues")
-        .select("*")
-        .eq("agent_run_id", run_id)
-        .execute()
-        .data
-        or []
-    )
+    issues = sb.table("issues").select("*").eq("agent_run_id", run_id).execute().data or []
 
     emit_trace(
-        run_id, "sub-agent-2", "MESSAGE",
+        run_id,
+        "sub-agent-2",
+        "MESSAGE",
         f"Loaded {len(issues)} canonical Issues to enrich. "
         f"Using prompt {prompt_row['agent']}@{prompt_row['version']} ({prompt_row['model']})",
     )
 
     if not issues:
         emit_trace(
-            run_id, "sub-agent-2", "DONE",
+            run_id,
+            "sub-agent-2",
+            "DONE",
             "ENRICH_DONE — no issues to enrich",
             payload={
                 "from": "sub-agent-2",
@@ -264,7 +260,9 @@ def run_enrich(run_id: str) -> dict:
             cve_ids.add(c)
 
     emit_trace(
-        run_id, "sub-agent-2", "MESSAGE",
+        run_id,
+        "sub-agent-2",
+        "MESSAGE",
         f"Collected {len(cve_ids)} unique CVE id(s) to look up",
     )
 
@@ -285,15 +283,21 @@ def run_enrich(run_id: str) -> dict:
                             continue
                         epss_data[cve] = {
                             "epss_score": float(entry["epss"]) if entry.get("epss") else None,
-                            "epss_percentile": float(entry["percentile"]) if entry.get("percentile") else None,
+                            "epss_percentile": float(entry["percentile"])
+                            if entry.get("percentile")
+                            else None,
                         }
             emit_trace(
-                run_id, "sub-agent-2", "MESSAGE",
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
                 f"EPSS returned data for {len(epss_data)} CVE(s)",
             )
         except Exception as e:
             emit_trace(
-                run_id, "sub-agent-2", "ERROR",
+                run_id,
+                "sub-agent-2",
+                "ERROR",
                 f"EPSS lookup failed: {type(e).__name__}: {str(e)[:200]}",
             )
 
@@ -310,12 +314,16 @@ def run_enrich(run_id: str) -> dict:
         try:
             nvd_data = _fetch_nvd_data(list(cve_ids), nvd_key)
             emit_trace(
-                run_id, "sub-agent-2", "MESSAGE",
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
                 f"NVD returned data for {len(nvd_data)} CVE(s)",
             )
         except Exception as e:
             emit_trace(
-                run_id, "sub-agent-2", "ERROR",
+                run_id,
+                "sub-agent-2",
+                "ERROR",
                 f"NVD lookup failed: {type(e).__name__}: {str(e)[:200]}",
             )
 
@@ -331,12 +339,16 @@ def run_enrich(run_id: str) -> dict:
                     if cve:
                         kev_set.add(cve)
         emit_trace(
-            run_id, "sub-agent-2", "MESSAGE",
+            run_id,
+            "sub-agent-2",
+            "MESSAGE",
             f"CISA KEV catalog loaded ({len(kev_set)} actively-exploited CVEs)",
         )
     except Exception as e:
         emit_trace(
-            run_id, "sub-agent-2", "ERROR",
+            run_id,
+            "sub-agent-2",
+            "ERROR",
             f"CISA KEV download failed: {type(e).__name__}: {str(e)[:200]}",
         )
 
@@ -348,7 +360,9 @@ def run_enrich(run_id: str) -> dict:
 
     workers = max(1, int(settings.llm_parallel_workers or 10))
     emit_trace(
-        run_id, "sub-agent-2", "MESSAGE",
+        run_id,
+        "sub-agent-2",
+        "MESSAGE",
         f"Reasoning over {len(issues)} issue(s)…",
     )
 
@@ -399,20 +413,26 @@ def run_enrich(run_id: str) -> dict:
                 failed += 1
                 if failed <= 3:
                     emit_trace(
-                        run_id, "sub-agent-2", "ERROR",
+                        run_id,
+                        "sub-agent-2",
+                        "ERROR",
                         f"Issue {issue.get('id')} enrichment failed "
                         f"({type(e).__name__}): {str(e)[:200]}",
                     )
 
             if completed % 20 == 0 and completed < len(issues):
                 emit_trace(
-                    run_id, "sub-agent-2", "MESSAGE",
+                    run_id,
+                    "sub-agent-2",
+                    "MESSAGE",
                     f"Enriched {completed}/{len(issues)} issues "
                     f"({enriched} succeeded, {failed} failed so far)",
                 )
 
     emit_trace(
-        run_id, "sub-agent-2", "DONE",
+        run_id,
+        "sub-agent-2",
+        "DONE",
         f"ENRICH_DONE — {enriched} issues enriched "
         f"(EPSS hits: {epss_hits}, KEV hits: {kev_hits}, NVD hits: {len(nvd_data)})",
         payload={
