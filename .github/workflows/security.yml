@@ -47,6 +47,8 @@ jobs:
         run: pip install bandit[toml]
 
       # Run at medium+ confidence. Output full JSON for parsing.
+      # --exit-zero ensures Bandit always writes the JSON report and exits 0
+      # regardless of findings — gate logic below handles the blocking decision.
       - name: Run Bandit
         id: bandit_run
         run: |
@@ -55,16 +57,22 @@ jobs:
             -o bandit-report.json \
             --confidence-level MEDIUM \
             --severity-level LOW \
-            -x apps/api/app/tests \
-            || true   # don't let bandit's own exit code short-circuit us
+            --exit-zero \
+            -x apps/api/app/tests
 
       # Parse the JSON and apply the Critical/High-block / Medium-Low-warn gate.
       - name: Evaluate Bandit results
         run: |
           python - <<'EOF'
-          import json, sys
+          import json, sys, os
 
-          with open("bandit-report.json") as f:
+          report_path = "bandit-report.json"
+          if not os.path.exists(report_path) or os.path.getsize(report_path) == 0:
+              print("::error::bandit-report.json is missing or empty — Bandit likely failed to run.")
+              print("Check the 'Run Bandit' step output above for the actual error.")
+              sys.exit(1)
+
+          with open(report_path) as f:
               report = json.load(f)
 
           results = report.get("results", [])
