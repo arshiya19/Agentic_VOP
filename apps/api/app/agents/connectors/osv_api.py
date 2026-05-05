@@ -68,7 +68,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
                 if resp.status_code != 200:
                     continue
                 vulns = resp.json().get("vulns", []) or []
-            except Exception:
+            except Exception:  # nosec B110 — intentional: skip failed package queries, continue to next package
                 continue
 
             for v in vulns:

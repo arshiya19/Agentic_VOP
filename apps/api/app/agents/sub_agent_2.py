@@ -72,6 +72,7 @@ _KEV_CATALOG_URL = (
 )
 _NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
+
 def _llm_decide(
     prompt_row: dict,
     issue: dict,
@@ -141,7 +142,7 @@ def _llm_decide(
             return LLMEnrichmentDecision(**parsed)
         except Exception as e:  # noqa: BLE001
             last_err = e
-    assert last_err is not None
+    assert last_err is not None  # nosec B101 — type narrowing only; loop always sets last_err before this line
     raise last_err
 
 
@@ -203,7 +204,7 @@ def _fetch_nvd_data(cve_ids: list[str], api_key: str | None) -> dict[str, dict]:
                     "cvss_privileges_required": (cvss or {}).get("privilegesRequired"),
                     "cvss_user_interaction": (cvss or {}).get("userInteraction"),
                 }
-            except Exception:
+            except Exception:  # nosec B110 — intentional: skip individual CVE NVD fetch failures, continue to next CVE
                 pass
             time.sleep(delay)
 

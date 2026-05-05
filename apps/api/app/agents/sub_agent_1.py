@@ -328,7 +328,7 @@ def _normalize_row(
             return LLMNormalizedIssue(**parsed)
         except Exception as e:  # noqa: BLE001
             last_err = e
-    assert last_err is not None
+    assert last_err is not None  # nosec B101 — type narrowing only; loop always sets last_err before this line
     raise last_err
 
 

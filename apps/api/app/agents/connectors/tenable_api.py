@@ -60,8 +60,9 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
     cutoff_epoch = _parse_watermark(last_fetched_at)
 
     # Nessus typically uses a self-signed cert on localhost.
-    # `verify=False` mirrors the original integration; do not change for production.
-    client = httpx.Client(verify=False, timeout=60, headers=_headers())
+    # verify=False is intentional here — Nessus on localhost uses a self-signed
+    # cert by design. This connector is never used against public endpoints.
+    client = httpx.Client(verify=False, timeout=60, headers=_headers())  # nosec B501
 
     plugin_cache: dict[int, dict] = {}
 
@@ -82,7 +83,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
             plugin_cache[plugin_id] = plugin_data
             time.sleep(0.05)  # gentle on the local Nessus
             return plugin_data
-        except Exception:
+        except Exception:  # nosec B110 — intentional: cache empty result and continue on any plugin fetch error
             plugin_cache[plugin_id] = {}
             return {}
 
@@ -142,7 +143,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
                         outputs = vuln_resp.json().get("outputs", []) or []
                         if not outputs:
                             continue
-                    except Exception:
+                    except Exception:  # nosec B110 — intentional: skip individual vuln fetch failures, continue scan
                         continue
 
                     plugin_info = get_plugin_details(plugin_id)
