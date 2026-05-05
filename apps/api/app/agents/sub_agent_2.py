@@ -22,7 +22,7 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime
 
 import httpx
 
@@ -204,7 +204,7 @@ def _fetch_nvd_data(cve_ids: list[str], api_key: str | None) -> dict[str, dict]:
                     "cvss_privileges_required": (cvss or {}).get("privilegesRequired"),
                     "cvss_user_interaction": (cvss or {}).get("userInteraction"),
                 }
-            except Exception:  # nosec B110 — intentional: skip individual CVE NVD fetch failures, continue to next CVE
+            except Exception:  # nosec B110 — intentional: skip individual CVE NVD fetch failures, continue to next CVE  # noqa: S110
                 pass
             time.sleep(delay)
 
@@ -377,7 +377,7 @@ def run_enrich(run_id: str) -> dict:
             "derived_risk": decision.derived_risk,
             "risk_explanation": decision.risk_explanation,
             "remediation_suggestion": decision.remediation_suggestion,
-            "enriched_at": datetime.now(timezone.utc).isoformat(),
+            "enriched_at": datetime.now(datetime.UTC).isoformat(),
         }
         sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
         return {"epss_hit": epss_score is not None, "kev_hit": in_kev}

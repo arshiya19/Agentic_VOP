@@ -22,7 +22,7 @@ Trigger payload conventions:
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 
 from ..db import supabase_admin
 from ..models import MasterPlan
@@ -220,7 +220,7 @@ def run_master(run_id: str) -> None:
         sb.table("agent_runs").update(
             {
                 "status": "completed",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(datetime.UTC).isoformat(),
                 "summary": {
                     "plan": plan.model_dump(),
                     "total_findings": total_inserted,
@@ -256,7 +256,7 @@ def run_master(run_id: str) -> None:
         sb.table("agent_runs").update(
             {
                 "status": "failed",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(datetime.UTC).isoformat(),
             }
         ).eq("run_id", run_id).execute()
 

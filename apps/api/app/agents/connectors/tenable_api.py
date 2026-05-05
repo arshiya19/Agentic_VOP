@@ -14,7 +14,7 @@ whose `last_modification_date` is strictly newer than the watermark.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 import httpx
 
@@ -62,7 +62,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
     # Nessus typically uses a self-signed cert on localhost.
     # verify=False is intentional here — Nessus on localhost uses a self-signed
     # cert by design. This connector is never used against public endpoints.
-    client = httpx.Client(verify=False, timeout=60, headers=_headers())  # nosec B501
+    client = httpx.Client(verify=False, timeout=60, headers=_headers())  # nosec B501  # noqa: S501
 
     plugin_cache: dict[int, dict] = {}
 
@@ -83,7 +83,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
             plugin_cache[plugin_id] = plugin_data
             time.sleep(0.05)  # gentle on the local Nessus
             return plugin_data
-        except Exception:  # nosec B110 — intentional: cache empty result and continue on any plugin fetch error
+        except Exception:  # nosec B110 — intentional: cache empty result and continue on any plugin fetch error  # noqa: S112
             plugin_cache[plugin_id] = {}
             return {}
 
@@ -113,9 +113,9 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
             info = details.get("info", {}) or {}
             scan_start = info.get("scan_start")
             scan_date = (
-                datetime.fromtimestamp(scan_start, tz=timezone.utc).strftime("%Y-%m-%d")
+                datetime.fromtimestamp(scan_start, tz=datetime.UTC).strftime("%Y-%m-%d")
                 if scan_start
-                else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                else datetime.now(datetime.UTC).strftime("%Y-%m-%d")
             )
 
             hosts = details.get("hosts", []) or []
@@ -143,7 +143,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
                         outputs = vuln_resp.json().get("outputs", []) or []
                         if not outputs:
                             continue
-                    except Exception:  # nosec B110 — intentional: skip individual vuln fetch failures, continue scan
+                    except Exception:  # nosec B110 — intentional: skip individual vuln fetch failures, continue scan  # noqa: S112
                         continue
 
                     plugin_info = get_plugin_details(plugin_id)
