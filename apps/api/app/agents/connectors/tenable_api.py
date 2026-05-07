@@ -16,6 +16,10 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 
+import httpx
+
+from ...config import settings
+
 
 _DEFAULT_BASE_URL = "https://localhost:8834"
 _DEFAULT_SCAN_LIMIT = 5  # cap per run so demos don't take forever
