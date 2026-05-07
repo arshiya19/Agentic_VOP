@@ -1,0 +1,87 @@
+# =============================================================================
+# Agentic_VOP — Linting / Code Quality Gate
+# =============================================================================
+# Runs on every push (all branches) and every pull request.
+#
+# Jobs (parallel):
+#   ruff    — Python linting + formatting check (apps/api)
+#   eslint  — JavaScript/JSX linting (apps/web)
+#
+# Both jobs are blocking — any lint error fails the pipeline.
+# This is intentional: lint errors left unaddressed accumulate into
+# harder-to-fix bugs and obscure real security findings.
+# =============================================================================
+
+name: Lint
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # 1. Ruff — Python linting + format check
+  # ---------------------------------------------------------------------------
+  ruff:
+    name: "Lint · Python (Ruff)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Install dev dependencies (includes ruff) from the lockfile.
+      - name: Install dev dependencies
+        working-directory: apps/api
+        run: uv sync --frozen
+
+      # Check 1: lint rules (E, W, F, B, S, UP — configured in pyproject.toml)
+      - name: Ruff lint
+        working-directory: apps/api
+        run: uv run ruff check .
+
+      # Check 2: formatting — fails if any file would be reformatted.
+      # Keeps diffs clean and avoids style noise in PRs.
+      - name: Ruff format check
+        working-directory: apps/api
+        run: uv run ruff format --check .
+
+  # ---------------------------------------------------------------------------
+  # 2. ESLint — JavaScript / JSX linting
+  # ---------------------------------------------------------------------------
+  eslint:
+    name: "Lint · JS/JSX (ESLint)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci --prefer-offline
+
+      # eslint.config.js already enforces:
+      #   - js.configs.recommended  (undefined vars, syntax errors, etc.)
+      #   - react-hooks rules       (exhaustive-deps, rules-of-hooks)
+      #   - react-refresh rules     (component export hygiene)
+      #   - no-unused-vars as error
+      - name: ESLint
+        working-directory: apps/web
+        run: npm run lint

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,7 +55,7 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
         return RunCreated(**existing.data[0])
 
     # Layer 2 — same-scanners in-flight within the dedup window
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=_DUPLICATE_WINDOW_SECONDS)
+    cutoff = datetime.now(UTC) - timedelta(seconds=_DUPLICATE_WINDOW_SECONDS)
     recent = (
         sb.table("agent_runs")
         .select("run_id, event_id, status, targets, started_at")

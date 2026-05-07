@@ -8,6 +8,7 @@ const AuthContext = createContext({})
 const BYPASS_AUTH =
   import.meta.env.DEV && import.meta.env.VITE_BYPASS_AUTH === 'true'
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => {
   const context = useContext(AuthContext)
   if (!context) {
@@ -17,32 +18,6 @@ export const useAuth = () => {
 }
 
 export const AuthProvider = ({ children }) => {
-  if (BYPASS_AUTH) {
-    if (typeof window !== 'undefined') {
-      const path = window.location.pathname
-      if (path === '/' || path === '/login' || path === '/signup') {
-        window.location.replace('/admin/dashboard')
-      }
-    }
-    const value = {
-      user: { id: 'dev-user', email: 'dev@local' },
-      userRole: 'admin',
-      loading: false,
-      signUp: async () => {
-        window.location.href = '/admin/dashboard'
-        return { data: null, error: null }
-      },
-      signIn: async () => {
-        window.location.href = '/admin/dashboard'
-        return { data: null, error: null }
-      },
-      signOut: async () => {
-        window.location.href = '/login'
-      },
-    }
-    return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-  }
-
   const [user, setUser] = useState(null)
   const [userRole, setUserRole] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -50,6 +25,7 @@ export const AuthProvider = ({ children }) => {
   const lastFetchRef = useRef(0)
 
   useEffect(() => {
+    if (BYPASS_AUTH) return
     let mounted = true
 
     const initializeAuth = async () => {
@@ -154,6 +130,7 @@ export const AuthProvider = ({ children }) => {
   }
 
   useEffect(() => {
+    if (BYPASS_AUTH) return
     const handleFocus = () => {
       debouncedRefreshSession()
     }
@@ -279,6 +256,32 @@ export const AuthProvider = ({ children }) => {
     setUserRole(null)
 
     window.location.href = '/login'
+  }
+
+  if (BYPASS_AUTH) {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname
+      if (path === '/' || path === '/login' || path === '/signup') {
+        window.location.replace('/admin/dashboard')
+      }
+    }
+    const bypassValue = {
+      user: { id: 'dev-user', email: 'dev@local' },
+      userRole: 'admin',
+      loading: false,
+      signUp: async () => {
+        window.location.href = '/admin/dashboard'
+        return { data: null, error: null }
+      },
+      signIn: async () => {
+        window.location.href = '/admin/dashboard'
+        return { data: null, error: null }
+      },
+      signOut: async () => {
+        window.location.href = '/login'
+      },
+    }
+    return <AuthContext.Provider value={bypassValue}>{children}</AuthContext.Provider>
   }
 
   if (loading) {

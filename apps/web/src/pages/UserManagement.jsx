@@ -7,7 +7,7 @@ export default function UserManagement() {
   const [users] = useState([])
   const [editingUser, setEditingUser] = useState(null)
 
-  const updateUserRole = (_userId, _newRole) => {
+  const updateUserRole = (_userId, _newRole) => { // eslint-disable-line no-unused-vars
     setEditingUser(null)
   }
 

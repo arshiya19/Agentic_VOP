@@ -11,7 +11,7 @@ whose `modified` timestamp is strictly newer than the watermark.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 import httpx
 
@@ -35,14 +35,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
     """Query OSV for every monitored package; return one record per vulnerability."""
     sb = supabase_admin()
 
-    packages = (
-        sb.table("monitored_packages")
-        .select("*")
-        .eq("enabled", True)
-        .execute()
-        .data
-        or []
-    )
+    packages = sb.table("monitored_packages").select("*").eq("enabled", True).execute().data or []
 
     if not packages:
         return []
@@ -68,7 +61,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
                 if resp.status_code != 200:
                     continue
                 vulns = resp.json().get("vulns", []) or []
-            except Exception:
+            except Exception:  # nosec B110 — intentional: skip failed package queries, continue to next package  # noqa: S112
                 continue
 
             for v in vulns:

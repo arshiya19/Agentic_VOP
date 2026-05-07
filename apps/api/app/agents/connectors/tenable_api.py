@@ -14,7 +14,7 @@ whose `last_modification_date` is strictly newer than the watermark.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -27,13 +27,10 @@ _DEFAULT_SCAN_LIMIT = 5  # cap per run so demos don't take forever
 
 def _headers() -> dict[str, str]:
     if not settings.tenable_access_key or not settings.tenable_secret_key:
-        raise RuntimeError(
-            "Missing TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY in environment"
-        )
+        raise RuntimeError("Missing TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY in environment")
     return {
         "X-ApiKeys": (
-            f"accessKey={settings.tenable_access_key}; "
-            f"secretKey={settings.tenable_secret_key}"
+            f"accessKey={settings.tenable_access_key}; secretKey={settings.tenable_secret_key}"
         ),
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -60,8 +57,9 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
     cutoff_epoch = _parse_watermark(last_fetched_at)
 
     # Nessus typically uses a self-signed cert on localhost.
-    # `verify=False` mirrors the original integration; do not change for production.
-    client = httpx.Client(verify=False, timeout=60, headers=_headers())
+    # verify=False is intentional here — Nessus on localhost uses a self-signed
+    # cert by design. This connector is never used against public endpoints.
+    client = httpx.Client(verify=False, timeout=60, headers=_headers())  # nosec B501  # noqa: S501
 
     plugin_cache: dict[int, dict] = {}
 
@@ -82,7 +80,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
             plugin_cache[plugin_id] = plugin_data
             time.sleep(0.05)  # gentle on the local Nessus
             return plugin_data
-        except Exception:
+        except Exception:  # nosec B110 — intentional: cache empty result and continue on any plugin fetch error  # noqa: S112
             plugin_cache[plugin_id] = {}
             return {}
 
@@ -92,11 +90,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
 
         # Apply watermark — only scans whose last_modification_date is newer
         if cutoff_epoch is not None:
-            scans = [
-                s
-                for s in scans
-                if (s.get("last_modification_date") or 0) > cutoff_epoch
-            ]
+            scans = [s for s in scans if (s.get("last_modification_date") or 0) > cutoff_epoch]
 
         scans = scans[:scan_limit]
 
@@ -112,9 +106,9 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
             info = details.get("info", {}) or {}
             scan_start = info.get("scan_start")
             scan_date = (
-                datetime.fromtimestamp(scan_start, tz=timezone.utc).strftime("%Y-%m-%d")
+                datetime.fromtimestamp(scan_start, tz=UTC).strftime("%Y-%m-%d")
                 if scan_start
-                else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                else datetime.now(UTC).strftime("%Y-%m-%d")
             )
 
             hosts = details.get("hosts", []) or []
@@ -142,7 +136,7 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
                         outputs = vuln_resp.json().get("outputs", []) or []
                         if not outputs:
                             continue
-                    except Exception:
+                    except Exception:  # nosec B110 — intentional: skip individual vuln fetch failures, continue scan  # noqa: S112
                         continue
 
                     plugin_info = get_plugin_details(plugin_id)

@@ -22,7 +22,7 @@ Trigger payload conventions:
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..db import supabase_admin
 from ..models import MasterPlan
@@ -59,14 +59,7 @@ def run_master(run_id: str) -> None:
         emit_trace(run_id, "master", "DISPATCH", "Run started, planning")
 
         # 2. Load run + Master prompt + available connectors
-        run = (
-            sb.table("agent_runs")
-            .select("*")
-            .eq("run_id", run_id)
-            .single()
-            .execute()
-            .data
-        )
+        run = sb.table("agent_runs").select("*").eq("run_id", run_id).single().execute().data
 
         prompt_row = (
             sb.table("prompt_db")
@@ -99,7 +92,9 @@ def run_master(run_id: str) -> None:
         plan = _llm_plan(prompt_row, run, available_tools)
 
         emit_trace(
-            run_id, "master", "MESSAGE",
+            run_id,
+            "master",
+            "MESSAGE",
             f"Plan ({len(plan.steps)} step(s)): {plan.plan_summary}",
             payload={"plan": plan.model_dump()},
         )
@@ -117,33 +112,33 @@ def run_master(run_id: str) -> None:
                 tool = step.tool
                 if not tool:
                     emit_trace(
-                        run_id, "master", "ERROR",
+                        run_id,
+                        "master",
+                        "ERROR",
                         f"{step_label}: FETCH step missing 'tool', skipping",
                     )
                     continue
 
                 registry_result = (
-                    sb.table("connection_registry")
-                    .select("*")
-                    .eq("tool", tool)
-                    .limit(1)
-                    .execute()
+                    sb.table("connection_registry").select("*").eq("tool", tool).limit(1).execute()
                 )
                 registry_row = (
-                    registry_result.data[0]
-                    if registry_result and registry_result.data
-                    else None
+                    registry_result.data[0] if registry_result and registry_result.data else None
                 )
                 if not registry_row:
                     emit_trace(
-                        run_id, "master", "ERROR",
+                        run_id,
+                        "master",
+                        "ERROR",
                         f"{step_label}: no connector for tool '{tool}', skipping",
                     )
                     per_scanner[tool] = {"error": "no connector", "inserted": 0}
                     continue
 
                 emit_trace(
-                    run_id, "master", "DISPATCH",
+                    run_id,
+                    "master",
+                    "DISPATCH",
                     f"{step_label}: FETCH from {tool} — {step.notes or ''}",
                     payload={
                         "action": "FETCH",
@@ -162,15 +157,18 @@ def run_master(run_id: str) -> None:
                     total_inserted += inserted
                 except Exception as e:
                     emit_trace(
-                        run_id, "master", "ERROR",
-                        f"Sub-Agent 1 failed for tool '{tool}': "
-                        f"{type(e).__name__}: {str(e)[:300]}",
+                        run_id,
+                        "master",
+                        "ERROR",
+                        f"Sub-Agent 1 failed for tool '{tool}': {type(e).__name__}: {str(e)[:300]}",
                     )
                     per_scanner[tool] = {"error": str(e)[:200], "inserted": 0}
                     continue
 
                 emit_trace(
-                    run_id, "master", "MESSAGE",
+                    run_id,
+                    "master",
+                    "MESSAGE",
                     f"Received FETCH_DONE for {tool} — "
                     f"{per_scanner[tool]['inserted']} canonical Issues",
                     payload={
@@ -183,7 +181,9 @@ def run_master(run_id: str) -> None:
 
             elif step.kind == "ENRICH":
                 emit_trace(
-                    run_id, "master", "DISPATCH",
+                    run_id,
+                    "master",
+                    "DISPATCH",
                     f"{step_label}: ENRICH — {step.notes or ''}",
                     payload={
                         "action": "ENRICH",
@@ -198,13 +198,17 @@ def run_master(run_id: str) -> None:
                     enrich_result = sub_agent_2.run_enrich(run_id)
                 except Exception as e:
                     emit_trace(
-                        run_id, "master", "ERROR",
+                        run_id,
+                        "master",
+                        "ERROR",
                         f"Sub-Agent 2 failed: {type(e).__name__}: {str(e)[:300]}",
                     )
                     enrich_result = {"enriched": 0, "error": str(e)[:200]}
 
                 emit_trace(
-                    run_id, "master", "MESSAGE",
+                    run_id,
+                    "master",
+                    "MESSAGE",
                     f"Received ENRICH_DONE — {enrich_result.get('enriched', 0)} issues enriched "
                     f"(EPSS: {enrich_result.get('epss_hits', 0)}, "
                     f"KEV: {enrich_result.get('kev_hits', 0)}, "
@@ -220,7 +224,7 @@ def run_master(run_id: str) -> None:
         sb.table("agent_runs").update(
             {
                 "status": "completed",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
                 "summary": {
                     "plan": plan.model_dump(),
                     "total_findings": total_inserted,
@@ -234,7 +238,9 @@ def run_master(run_id: str) -> None:
         ).eq("run_id", run_id).execute()
 
         emit_trace(
-            run_id, "master", "MESSAGE",
+            run_id,
+            "master",
+            "MESSAGE",
             f"SCAN_COMPLETE — {total_inserted} findings, "
             f"{enrich_result.get('enriched', 0)} enriched.",
             payload={
@@ -250,13 +256,15 @@ def run_master(run_id: str) -> None:
 
     except Exception as e:
         emit_trace(
-            run_id, "master", "ERROR",
+            run_id,
+            "master",
+            "ERROR",
             f"Run failed: {type(e).__name__}: {str(e)[:300]}",
         )
         sb.table("agent_runs").update(
             {
                 "status": "failed",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
             }
         ).eq("run_id", run_id).execute()
 

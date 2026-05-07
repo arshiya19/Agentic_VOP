@@ -26,3 +26,25 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names)
+    "B",   # flake8-bugbear (likely bugs and bad practices)
+    "S",   # flake8-bandit subset (security-adjacent patterns)
+    "UP",  # pyupgrade (modern Python idioms)
+]
+ignore = [
+    "S101",  # assert usage — acceptable in tests
+    "S603",  # subprocess without shell=True — used intentionally nowhere yet
+    "E501",  # line too long — handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S"]  # silence security rules in test files

@@ -5,8 +5,8 @@ from ..db import supabase_admin
 
 def emit_trace(
     run_id: str,
-    agent: str,                         # "master" | "sub-agent-1" | "sub-agent-2" | "system"
-    event_type: str,                    # "DISPATCH" | "MESSAGE" | "DONE" | "ERROR"
+    agent: str,  # "master" | "sub-agent-1" | "sub-agent-2" | "system"
+    event_type: str,  # "DISPATCH" | "MESSAGE" | "DONE" | "ERROR"
     message: str,
     payload: dict[str, Any] | None = None,
 ) -> None:
