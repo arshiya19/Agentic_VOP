@@ -14,11 +14,7 @@ whose `last_modification_date` is strictly newer than the watermark.
 from __future__ import annotations
 
 import time
-from datetime import datetime
-
-import httpx
-
-from ...config import settings
+from datetime import UTC, datetime
 
 
 _DEFAULT_BASE_URL = "https://localhost:8834"
@@ -106,9 +102,9 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
             info = details.get("info", {}) or {}
             scan_start = info.get("scan_start")
             scan_date = (
-                datetime.fromtimestamp(scan_start, tz=datetime.UTC).strftime("%Y-%m-%d")
+                datetime.fromtimestamp(scan_start, tz=UTC).strftime("%Y-%m-%d")
                 if scan_start
-                else datetime.now(datetime.UTC).strftime("%Y-%m-%d")
+                else datetime.now(UTC).strftime("%Y-%m-%d")
             )
 
             hosts = details.get("hosts", []) or []

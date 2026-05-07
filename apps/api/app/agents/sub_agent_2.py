@@ -22,7 +22,7 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import UTC, datetime
 
 import httpx
 
@@ -391,7 +391,7 @@ def run_enrich(run_id: str) -> dict:
             "derived_risk": decision.derived_risk,
             "risk_explanation": decision.risk_explanation,
             "remediation_suggestion": decision.remediation_suggestion,
-            "enriched_at": datetime.now(datetime.UTC).isoformat(),
+            "enriched_at": datetime.now(UTC).isoformat(),
         }
         sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
         return {"epss_hit": epss_score is not None, "kev_hit": in_kev}

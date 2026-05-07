@@ -16,7 +16,7 @@ Why split raw and canonical: replay (re-normalize without re-fetching), audit
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from ..config import settings
@@ -81,7 +81,7 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
     sb = supabase_admin()
 
     last_fetched_at = registry_entry.get("last_fetched_at")
-    fetch_started_at = datetime.now(datetime.UTC).isoformat()
+    fetch_started_at = datetime.now(UTC).isoformat()
 
     metadata = registry_entry.get("metadata") or {}
     connector_type = metadata.get("connector_type", "supabase_stub")
