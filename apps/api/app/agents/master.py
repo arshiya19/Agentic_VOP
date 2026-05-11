@@ -300,7 +300,9 @@ def run_master(run_id: str) -> None:
         ).eq("run_id", run_id).execute()
 
 
-def _llm_plan(run_id: str, prompt_row: dict, run: dict, available_tools: list[dict]) -> tuple[MasterPlan, dict]:
+def _llm_plan(
+    run_id: str, prompt_row: dict, run: dict, available_tools: list[dict]
+) -> tuple[MasterPlan, dict]:
     """Call OpenAI with function calling to produce a structured MasterPlan.
     Returns (MasterPlan, usage_dict).
     """
