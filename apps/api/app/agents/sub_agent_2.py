@@ -29,7 +29,7 @@ import httpx
 from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMEnrichmentDecision
-from .llm import get_client
+from .llm import get_llm
 from .trace import emit_trace
 
 
@@ -73,14 +73,17 @@ _NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 
 def _llm_decide(
+    run_id: str,
     prompt_row: dict,
     issue: dict,
     epss: dict,
     nvd: dict,
     in_kev: bool,
-) -> LLMEnrichmentDecision:
-    """Call OpenAI with function calling to get the per-issue risk decision."""
-    client = get_client()
+) -> tuple[LLMEnrichmentDecision, dict]:
+    """Call OpenAI with function calling to get the per-issue risk decision.
+    Returns (LLMEnrichmentDecision, usage_dict).
+    """
+    client = get_llm(run_id, "sub-agent-2")
 
     payload = {
         "issue": {
@@ -138,10 +141,11 @@ def _llm_decide(
             if not tool_calls:
                 raise ValueError("LLM did not call the emit_enrichment_decision function")
             parsed = _parse_function_args(tool_calls[0].function.arguments)
-            return LLMEnrichmentDecision(**parsed)
+            usage = client.chat.completions.extract_usage(response)
+            return LLMEnrichmentDecision(**parsed), usage
         except Exception as e:  # noqa: BLE001
             last_err = e
-    assert last_err is not None  # nosec B101 — type narrowing only; loop always sets last_err before this line
+    assert last_err is not None  # nosec B101
     raise last_err
 
 
@@ -357,6 +361,8 @@ def run_enrich(run_id: str) -> dict:
     failed = 0
     kev_hits = 0
     epss_hits = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
 
     workers = max(1, int(settings.llm_parallel_workers or 10))
     emit_trace(
@@ -375,7 +381,7 @@ def run_enrich(run_id: str) -> dict:
         in_kev = (cve in kev_set) if cve else False
         nvd = nvd_data.get(cve, {}) if cve else {}
 
-        decision = _llm_decide(prompt_row, issue, epss, nvd, in_kev)
+        decision, usage = _llm_decide(run_id, prompt_row, issue, epss, nvd, in_kev)
 
         update_row = {
             "epss_score": epss_score,
@@ -394,7 +400,7 @@ def run_enrich(run_id: str) -> dict:
             "enriched_at": datetime.now(UTC).isoformat(),
         }
         sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
-        return {"epss_hit": epss_score is not None, "kev_hit": in_kev}
+        return {"epss_hit": epss_score is not None, "kev_hit": in_kev, "usage": usage}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, issue): issue for issue in issues}
@@ -409,6 +415,9 @@ def run_enrich(run_id: str) -> dict:
                     epss_hits += 1
                 if result.get("kev_hit"):
                     kev_hits += 1
+                usage = result.get("usage") or {}
+                total_prompt_tokens += usage.get("prompt_tokens", 0)
+                total_completion_tokens += usage.get("completion_tokens", 0)
             except Exception as e:
                 failed += 1
                 if failed <= 3:
@@ -428,6 +437,22 @@ def run_enrich(run_id: str) -> dict:
                     f"Enriched {completed}/{len(issues)} issues "
                     f"({enriched} succeeded, {failed} failed so far)",
                 )
+
+    emit_trace(
+        run_id,
+        "sub-agent-2",
+        "MESSAGE",
+        f"Sub-Agent 2 token summary — prompt: {total_prompt_tokens}, "
+        f"completion: {total_completion_tokens}, "
+        f"total: {total_prompt_tokens + total_completion_tokens}",
+        payload={
+            "event_subtype": "TOKEN_SUMMARY",
+            "agent": "sub-agent-2",
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+        },
+    )
 
     emit_trace(
         run_id,
@@ -467,4 +492,7 @@ def run_enrich(run_id: str) -> dict:
         "kev_hits": kev_hits,
         "epss_hits": epss_hits,
         "nvd_hits": len(nvd_data),
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
+        "total_tokens": total_prompt_tokens + total_completion_tokens,
     }

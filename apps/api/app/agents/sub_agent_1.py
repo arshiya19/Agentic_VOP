@@ -23,7 +23,7 @@ from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMNormalizedIssue
 from .connectors import fetch_raw_rows
-from .llm import get_client
+from .llm import get_llm
 from .trace import emit_trace
 
 
@@ -72,10 +72,10 @@ def _sanitize(value: Any) -> Any:
     return value
 
 
-def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
+def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
     """Read raw rows from the connector, normalize each via the LLM, insert canonical Issues.
 
-    Returns count of issues successfully inserted.
+    Returns (count of issues inserted, token_totals dict).
     """
 
     sb = supabase_admin()
@@ -137,7 +137,7 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
                 "watermark_after": fetch_started_at,
             },
         )
-        return 0
+        return 0, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     # ------ Step 2: persist raw rows verbatim into raw_findings ------
     # Sanitize NUL bytes (\u0000) — Postgres' text/jsonb types reject them.
@@ -196,13 +196,16 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
         f"Normalizing {len(persisted_raws)} row(s)…",
     )
 
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+
     def _process_one(persisted: dict) -> dict:
         """Per-row task: LLM-normalize then insert. Runs inside a worker thread."""
         raw_finding_id = persisted["id"]
         raw = persisted["raw"]
-        llm_issue = _normalize_row(prompt_row, tool, raw, mapping_rules)
+        llm_issue, usage = _normalize_row(run_id, prompt_row, tool, raw, mapping_rules)
         _insert_issue(sb, llm_issue, raw_finding_id, run_id)
-        return {"raw_finding_id": raw_finding_id}
+        return {"raw_finding_id": raw_finding_id, "usage": usage}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, p): p for p in persisted_raws}
@@ -211,8 +214,11 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
             persisted = futures[future]
             completed += 1
             try:
-                future.result()
+                result = future.result()
                 inserted += 1
+                usage = result.get("usage") or {}
+                total_prompt_tokens += usage.get("prompt_tokens", 0)
+                total_completion_tokens += usage.get("completion_tokens", 0)
             except Exception as e:
                 failed += 1
                 if len(failure_examples) < 3:
@@ -254,6 +260,22 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
             f"Completed normalization: {inserted}/{len(persisted_raws)} rows normalized cleanly",
         )
 
+    emit_trace(
+        run_id,
+        "sub-agent-1",
+        "MESSAGE",
+        f"Sub-Agent 1 token summary — prompt: {total_prompt_tokens}, "
+        f"completion: {total_completion_tokens}, "
+        f"total: {total_prompt_tokens + total_completion_tokens}",
+        payload={
+            "event_subtype": "TOKEN_SUMMARY",
+            "agent": "sub-agent-1",
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+        },
+    )
+
     # Advance watermark so the next run only fetches rows created after this point.
     # Only do this if we successfully processed at least some rows — if the entire
     # batch failed, leave the watermark alone so a retry sees the same data.
@@ -281,23 +303,24 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> int:
             "correlation_id": f"corr-{run_id[:8]}",
         },
     )
-    return inserted
+    return inserted, {
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
+        "total_tokens": total_prompt_tokens + total_completion_tokens,
+    }
 
 
 def _normalize_row(
+    run_id: str,
     prompt_row: dict,
     tool: str,
     raw_row: dict,
     mapping_rules: list[dict],
-) -> LLMNormalizedIssue:
+) -> tuple[LLMNormalizedIssue, dict]:
     """Call OpenAI with function calling to normalize one raw row to a canonical Issue.
-
-    The LLM receives:
-      - source_scanner (tool name, e.g., "osv")
-      - raw_row (the scanner's raw output)
-      - mapping_rules (per-scanner translation rules from schema_mapping)
+    Returns (LLMNormalizedIssue, usage_dict).
     """
-    client = get_client()
+    client = get_llm(run_id, "sub-agent-1")
 
     user_message = json.dumps(
         {
@@ -348,10 +371,11 @@ def _normalize_row(
             if not tool_calls:
                 raise ValueError("LLM did not call the emit_canonical_issue function")
             parsed = _parse_function_args(tool_calls[0].function.arguments)
-            return LLMNormalizedIssue(**parsed)
+            usage = client.chat.completions.extract_usage(response)
+            return LLMNormalizedIssue(**parsed), usage
         except Exception as e:  # noqa: BLE001
             last_err = e
-    assert last_err is not None  # nosec B101 — type narrowing only; loop always sets last_err before this line
+    assert last_err is not None  # nosec B101
     raise last_err
 
 

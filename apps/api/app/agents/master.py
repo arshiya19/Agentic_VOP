@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from ..db import supabase_admin
 from ..models import MasterPlan
 from . import sub_agent_1, sub_agent_2
-from .llm import get_client
+from .llm import get_llm
 from .trace import emit_trace
 
 
@@ -89,7 +89,7 @@ def run_master(run_id: str) -> None:
         ]
 
         # 3. LLM call to produce the plan
-        plan = _llm_plan(prompt_row, run, available_tools)
+        plan, master_usage = _llm_plan(run_id, prompt_row, run, available_tools)
 
         emit_trace(
             run_id,
@@ -104,6 +104,7 @@ def run_master(run_id: str) -> None:
         per_scanner: dict[str, dict] = {}
         total_inserted = 0
         enrich_result: dict = {}
+        sa1_tokens: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         for i, step in enumerate(plan.steps):
             step_label = f"Step {i + 1}/{len(plan.steps)}"
@@ -152,9 +153,12 @@ def run_master(run_id: str) -> None:
                 )
 
                 try:
-                    inserted = sub_agent_1.run_fetch(run_id, tool, registry_row)
+                    inserted, sa1_tok = sub_agent_1.run_fetch(run_id, tool, registry_row)
                     per_scanner[tool] = {"inserted": inserted}
                     total_inserted += inserted
+                    sa1_tokens["prompt_tokens"] += sa1_tok.get("prompt_tokens", 0)
+                    sa1_tokens["completion_tokens"] += sa1_tok.get("completion_tokens", 0)
+                    sa1_tokens["total_tokens"] += sa1_tok.get("total_tokens", 0)
                 except Exception as e:
                     emit_trace(
                         run_id,
@@ -237,6 +241,33 @@ def run_master(run_id: str) -> None:
             }
         ).eq("run_id", run_id).execute()
 
+        sa2_tokens = {
+            "prompt_tokens": enrich_result.get("prompt_tokens", 0),
+            "completion_tokens": enrich_result.get("completion_tokens", 0),
+            "total_tokens": enrich_result.get("total_tokens", 0),
+        }
+
+        emit_trace(
+            run_id,
+            "master",
+            "MESSAGE",
+            f"Token consumption summary — "
+            f"Master: {master_usage.get('total_tokens', 0)} | "
+            f"Sub-Agent 1: {sa1_tokens['total_tokens']} | "
+            f"Sub-Agent 2: {sa2_tokens['total_tokens']}",
+            payload={
+                "event_subtype": "TOKEN_SUMMARY",
+                "master": master_usage,
+                "sub_agent_1": sa1_tokens,
+                "sub_agent_2": sa2_tokens,
+                "grand_total": (
+                    master_usage.get("total_tokens", 0)
+                    + sa1_tokens["total_tokens"]
+                    + sa2_tokens["total_tokens"]
+                ),
+            },
+        )
+
         emit_trace(
             run_id,
             "master",
@@ -269,9 +300,13 @@ def run_master(run_id: str) -> None:
         ).eq("run_id", run_id).execute()
 
 
-def _llm_plan(prompt_row: dict, run: dict, available_tools: list[dict]) -> MasterPlan:
-    """Call OpenAI with function calling to produce a structured MasterPlan."""
-    client = get_client()
+def _llm_plan(
+    run_id: str, prompt_row: dict, run: dict, available_tools: list[dict]
+) -> tuple[MasterPlan, dict]:
+    """Call OpenAI with function calling to produce a structured MasterPlan.
+    Returns (MasterPlan, usage_dict).
+    """
+    client = get_llm(run_id, "master")
 
     user_payload = {
         "trigger": {
@@ -314,4 +349,5 @@ def _llm_plan(prompt_row: dict, run: dict, available_tools: list[dict]) -> Maste
         raise ValueError("Master LLM did not call emit_master_plan")
 
     parsed = _parse_function_args(tool_calls[0].function.arguments)
-    return MasterPlan(**parsed)
+    usage = client.chat.completions.extract_usage(response)
+    return MasterPlan(**parsed), usage
