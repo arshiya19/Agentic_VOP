@@ -1,12 +1,13 @@
-"""Sub-Agent 2 — Enrichment Specialist (LLM-driven decisions).
+"""Sub-Agent 2 — Enrichment Specialist (LangChain-powered decisions).
 
 For each canonical Issue produced in this run:
   1. EPSS    — exploit probability (FIRST.org public API, batched)
   2. CISA KEV — actively-exploited flag (catalog download)
   3. NVD     — CVSS v3 vector breakdown + CWE id (per-CVE; rate-limited
                unless NVD_API_KEY is set in env)
-  4. **LLM call** — given the issue + all enrichment data, the LLM decides
-     derived_risk, risk_explanation, likelihood, impact, remediation_suggestion.
+  4. LLM call (ChatOpenAI.with_structured_output) — given the issue + all
+     enrichment data, the LLM decides derived_risk, risk_explanation,
+     likelihood, impact, remediation_suggestion.
   5. Stamp enriched_at
 
 Why LLM here: the same finding on a payments service vs a sandbox should
@@ -18,40 +19,25 @@ Deterministic pieces (HTTP calls, DB writes) stay code. Reasoning is LLM.
 
 from __future__ import annotations
 
-import json
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
 import httpx
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMEnrichmentDecision
-from .llm import get_llm
+from .llm import get_chat_llm
 from .trace import emit_trace
 
 
-# Cached LLM tool input schema for the Sub-Agent 2 decision call
-_DECISION_SCHEMA = LLMEnrichmentDecision.model_json_schema()
-
-# Tolerant parser for occasional malformed \uXXXX escapes in LLM output.
-_BAD_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
-_ANY_UNICODE_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{0,4}")
-
-
-def _parse_function_args(args_str: str) -> dict:
-    """json.loads with multi-stage repair for malformed \\u escapes."""
-    try:
-        return json.loads(args_str)
-    except json.JSONDecodeError:
-        pass
-    try:
-        return json.loads(_BAD_UNICODE_ESCAPE.sub(r"\\u0020", args_str))
-    except json.JSONDecodeError:
-        pass
-    return json.loads(_ANY_UNICODE_ESCAPE.sub("", args_str))
+_EPSS_API = "https://api.first.org/data/v1/epss"
+_KEV_CATALOG_URL = (
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+)
+_NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 
 def _sanitize(value):
@@ -65,13 +51,6 @@ def _sanitize(value):
     return value
 
 
-_EPSS_API = "https://api.first.org/data/v1/epss"
-_KEV_CATALOG_URL = (
-    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-)
-_NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-
-
 def _llm_decide(
     run_id: str,
     prompt_row: dict,
@@ -79,11 +58,14 @@ def _llm_decide(
     epss: dict,
     nvd: dict,
     in_kev: bool,
-) -> tuple[LLMEnrichmentDecision, dict]:
-    """Call OpenAI with function calling to get the per-issue risk decision.
-    Returns (LLMEnrichmentDecision, usage_dict).
+) -> LLMEnrichmentDecision:
+    """Call ChatOpenAI with structured output for the per-issue risk decision.
+
+    Retries up to 3 times with escalating temperature (base → 0.6 → 0.9).
     """
-    client = get_llm(run_id, "sub-agent-2")
+    params = prompt_row.get("parameters") or {}
+    base_temp = float(params.get("temperature", 0.2))
+    max_tokens = int(params.get("max_tokens", 800))
 
     payload = {
         "issue": {
@@ -102,49 +84,28 @@ def _llm_decide(
         },
     }
 
-    params = prompt_row.get("parameters") or {}
-
-    base_temp = float(params.get("temperature", 0.2))
-
-    def _build_kwargs(temperature: float) -> dict:
-        return dict(
-            model=prompt_row["model"],
-            max_tokens=int(params.get("max_tokens", 800)),
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": prompt_row["prompt_text"]},
-                {"role": "user", "content": json.dumps(payload, default=str)},
-            ],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "emit_enrichment_decision",
-                        "description": (
-                            "Emit the final risk decision for this issue: derived_risk, "
-                            "risk_explanation, likelihood, impact, remediation_suggestion."
-                        ),
-                        "parameters": _DECISION_SCHEMA,
-                    },
-                }
-            ],
-            tool_choice={"type": "function", "function": {"name": "emit_enrichment_decision"}},
-        )
-
-    # Up to 3 attempts at increasing temperature.
     attempts = [base_temp, 0.6, 0.9]
     last_err: Exception | None = None
+
     for temperature in attempts:
         try:
-            response = client.chat.completions.create(**_build_kwargs(temperature))
-            tool_calls = response.choices[0].message.tool_calls or []
-            if not tool_calls:
-                raise ValueError("LLM did not call the emit_enrichment_decision function")
-            parsed = _parse_function_args(tool_calls[0].function.arguments)
-            usage = client.chat.completions.extract_usage(response)
-            return LLMEnrichmentDecision(**parsed), usage
+            llm = get_chat_llm(
+                run_id=run_id,
+                agent="sub-agent-2",
+                model=prompt_row["model"],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            structured_llm = llm.with_structured_output(LLMEnrichmentDecision)
+            return structured_llm.invoke(
+                [
+                    SystemMessage(content=prompt_row["prompt_text"]),
+                    HumanMessage(content=str(payload)),
+                ]
+            )
         except Exception as e:  # noqa: BLE001
             last_err = e
+
     assert last_err is not None  # nosec B101
     raise last_err
 
@@ -361,8 +322,6 @@ def run_enrich(run_id: str) -> dict:
     failed = 0
     kev_hits = 0
     epss_hits = 0
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
 
     workers = max(1, int(settings.llm_parallel_workers or 10))
     emit_trace(
@@ -381,7 +340,7 @@ def run_enrich(run_id: str) -> dict:
         in_kev = (cve in kev_set) if cve else False
         nvd = nvd_data.get(cve, {}) if cve else {}
 
-        decision, usage = _llm_decide(run_id, prompt_row, issue, epss, nvd, in_kev)
+        decision = _llm_decide(run_id, prompt_row, issue, epss, nvd, in_kev)
 
         update_row = {
             "epss_score": epss_score,
@@ -400,7 +359,7 @@ def run_enrich(run_id: str) -> dict:
             "enriched_at": datetime.now(UTC).isoformat(),
         }
         sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
-        return {"epss_hit": epss_score is not None, "kev_hit": in_kev, "usage": usage}
+        return {"epss_hit": epss_score is not None, "kev_hit": in_kev}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, issue): issue for issue in issues}
@@ -415,9 +374,6 @@ def run_enrich(run_id: str) -> dict:
                     epss_hits += 1
                 if result.get("kev_hit"):
                     kev_hits += 1
-                usage = result.get("usage") or {}
-                total_prompt_tokens += usage.get("prompt_tokens", 0)
-                total_completion_tokens += usage.get("completion_tokens", 0)
             except Exception as e:
                 failed += 1
                 if failed <= 3:
@@ -437,22 +393,6 @@ def run_enrich(run_id: str) -> dict:
                     f"Enriched {completed}/{len(issues)} issues "
                     f"({enriched} succeeded, {failed} failed so far)",
                 )
-
-    emit_trace(
-        run_id,
-        "sub-agent-2",
-        "MESSAGE",
-        f"Sub-Agent 2 token summary — prompt: {total_prompt_tokens}, "
-        f"completion: {total_completion_tokens}, "
-        f"total: {total_prompt_tokens + total_completion_tokens}",
-        payload={
-            "event_subtype": "TOKEN_SUMMARY",
-            "agent": "sub-agent-2",
-            "prompt_tokens": total_prompt_tokens,
-            "completion_tokens": total_completion_tokens,
-            "total_tokens": total_prompt_tokens + total_completion_tokens,
-        },
-    )
 
     emit_trace(
         run_id,
@@ -486,13 +426,16 @@ def run_enrich(run_id: str) -> dict:
         },
     )
 
+    # Token totals: per-call TOKEN_USAGE events are emitted by the
+    # _TokenUsageCallback in llm.py. The aggregate here is best-effort
+    # zeros — the Agents page shows per-call usage already.
     return {
         "enriched": enriched,
         "failed": failed,
         "kev_hits": kev_hits,
         "epss_hits": epss_hits,
         "nvd_hits": len(nvd_data),
-        "prompt_tokens": total_prompt_tokens,
-        "completion_tokens": total_completion_tokens,
-        "total_tokens": total_prompt_tokens + total_completion_tokens,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
     }
