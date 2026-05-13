@@ -84,14 +84,7 @@ def _load_context_node(state: MasterState) -> dict:
     sb.table("agent_runs").update({"status": "running"}).eq("run_id", run_id).execute()
     emit_trace(run_id, "master", "DISPATCH", "Run started, planning")
 
-    run = (
-        sb.table("agent_runs")
-        .select("*")
-        .eq("run_id", run_id)
-        .single()
-        .execute()
-        .data
-    )
+    run = sb.table("agent_runs").select("*").eq("run_id", run_id).single().execute().data
     prompt_row = (
         sb.table("prompt_db")
         .select("*")
@@ -176,7 +169,10 @@ def _plan_node(state: MasterState) -> dict:
 
     # Token usage is emitted via the callback in get_chat_llm; we still
     # carry an empty dict here so the summarize node has a stable shape.
-    return {"plan": plan, "plan_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+    return {
+        "plan": plan,
+        "plan_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
 
 
 def _route_after_dispatch(state: MasterState) -> str:
@@ -388,8 +384,7 @@ def _summarize_node(state: MasterState) -> dict:
         run_id,
         "master",
         "MESSAGE",
-        f"SCAN_COMPLETE — {total_inserted} findings, "
-        f"{enrich_result.get('enriched', 0)} enriched.",
+        f"SCAN_COMPLETE — {total_inserted} findings, {enrich_result.get('enriched', 0)} enriched.",
         payload={
             "event_type": "SCAN_COMPLETE",
             "scan_id": run_id,

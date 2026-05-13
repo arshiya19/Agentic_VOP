@@ -17,6 +17,8 @@ dependencies = [
     "langchain-core>=0.3.0",
     "langchain-openai>=0.2.0",
     "langgraph>=0.2.0",
+    # Pinned to remediate CVE-2026-44431 and CVE-2026-44432 (cross-origin redirect leak + streaming-API issue).
+    "urllib3>=2.7.0",
 ]
 
 [tool.uv]
