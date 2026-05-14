@@ -9,6 +9,11 @@ class Settings(BaseSettings):
 
     openai_api_key: str
 
+    # Optional provider keys — required only when the corresponding model
+    # provider is selected in prompt_db.parameters.provider for any agent.
+    anthropic_api_key: str = ""
+    google_api_key: str = ""
+
     # Tenable / Nessus (only required if any tool uses connector_type="tenable_api")
     tenable_access_key: str = ""
     tenable_secret_key: str = ""

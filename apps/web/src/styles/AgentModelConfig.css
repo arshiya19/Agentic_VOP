@@ -1,0 +1,242 @@
+/* Model Configuration modal — opened from the gear button on the Agents page */
+
+.amc-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 14, 0.7);
+  backdrop-filter: blur(2px);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.amc-modal {
+  background: #0F1729;
+  border: 1px solid #1F2A44;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 720px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  color: #E5E7EB;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.amc-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid #1F2A44;
+  gap: 16px;
+}
+
+.amc-header h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #F8FAFC;
+}
+
+.amc-sub {
+  margin: 0;
+  font-size: 13px;
+  color: #94A3B8;
+  line-height: 1.4;
+}
+
+.amc-close {
+  background: transparent;
+  border: none;
+  color: #94A3B8;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.amc-close:hover { color: #F8FAFC; }
+
+.amc-banner {
+  padding: 10px 24px;
+  font-size: 13px;
+  border-bottom: 1px solid #1F2A44;
+}
+.amc-banner-err { background: rgba(239, 68, 68, 0.08); color: #FCA5A5; }
+.amc-banner-ok { background: rgba(34, 197, 94, 0.08); color: #86EFAC; }
+
+.amc-body {
+  padding: 16px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.amc-loading {
+  color: #94A3B8;
+  font-size: 14px;
+  padding: 24px 0;
+  text-align: center;
+}
+
+.amc-agent-row {
+  border: 1px solid #1F2A44;
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: #0B1325;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.amc-agent-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.amc-agent-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #F8FAFC;
+}
+
+.amc-agent-recommended {
+  font-size: 12px;
+  color: #94A3B8;
+}
+
+.amc-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #67E8F9;
+  font-size: 12px;
+}
+
+.amc-select-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.amc-select {
+  background: #0B0F19;
+  color: #E5E7EB;
+  border: 1px solid #2A3656;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+.amc-select:focus { border-color: #67E8F9; }
+.amc-select option:disabled { color: #475569; }
+
+.amc-row-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.amc-pill {
+  display: inline-block;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  width: fit-content;
+  line-height: 1.4;
+}
+.amc-pill-ok {
+  background: rgba(34, 197, 94, 0.08);
+  border-color: rgba(34, 197, 94, 0.25);
+  color: #86EFAC;
+}
+.amc-pill-warn {
+  background: rgba(234, 179, 8, 0.08);
+  border-color: rgba(234, 179, 8, 0.3);
+  color: #FCD34D;
+}
+.amc-pill-err {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #FCA5A5;
+}
+
+.amc-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 24px;
+  border-top: 1px solid #1F2A44;
+}
+
+.amc-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+.amc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.amc-btn-ghost {
+  background: transparent;
+  color: #94A3B8;
+  border-color: #2A3656;
+}
+.amc-btn-ghost:hover:not(:disabled) {
+  background: #0B0F19;
+  color: #E5E7EB;
+}
+.amc-btn-primary {
+  background: #06B6D4;
+  color: #042A33;
+  border-color: #06B6D4;
+}
+.amc-btn-primary:hover:not(:disabled) {
+  background: #22D3EE;
+  border-color: #22D3EE;
+}
+
+/* Gear button used to open the modal from the Agents-side-card header */
+.amc-trigger {
+  background: transparent;
+  border: 1px solid #1F2A44;
+  border-radius: 8px;
+  color: #94A3B8;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: inherit;
+}
+.amc-trigger:hover {
+  border-color: #2A3656;
+  color: #E5E7EB;
+}
+
+/* Icon-only variant — fits inside the narrow Agents-side-card header without
+   pushing the role tabs off-screen. */
+.amc-trigger-icon {
+  padding: 4px;
+  width: 26px;
+  height: 26px;
+  justify-content: center;
+}
+
+/* Group title + gear together on the left so the role tabs stay aligned right. */
+.agents-card-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}

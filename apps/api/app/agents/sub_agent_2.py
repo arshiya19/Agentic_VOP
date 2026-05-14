@@ -29,7 +29,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMEnrichmentDecision
-from .llm import get_chat_llm
+from .llm import invoke_structured_with_retry
 from .trace import emit_trace
 
 
@@ -61,11 +61,14 @@ def _llm_decide(
 ) -> LLMEnrichmentDecision:
     """Call ChatOpenAI with structured output for the per-issue risk decision.
 
-    Retries up to 3 times with escalating temperature (base → 0.6 → 0.9).
+    Tiered retry — escalate temperature first, then escalate the model on the
+    final attempt for issues the small model can't reason about.
     """
     params = prompt_row.get("parameters") or {}
     base_temp = float(params.get("temperature", 0.2))
     max_tokens = int(params.get("max_tokens", 800))
+    primary_model = prompt_row["model"]
+    fallback_model = params.get("fallback_model", "gpt-4o")
 
     payload = {
         "issue": {
@@ -84,30 +87,20 @@ def _llm_decide(
         },
     }
 
-    attempts = [base_temp, 0.6, 0.9]
-    last_err: Exception | None = None
-
-    for temperature in attempts:
-        try:
-            llm = get_chat_llm(
-                run_id=run_id,
-                agent="sub-agent-2",
-                model=prompt_row["model"],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            structured_llm = llm.with_structured_output(LLMEnrichmentDecision)
-            return structured_llm.invoke(
-                [
-                    SystemMessage(content=prompt_row["prompt_text"]),
-                    HumanMessage(content=str(payload)),
-                ]
-            )
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-
-    assert last_err is not None  # nosec B101
-    raise last_err
+    return invoke_structured_with_retry(
+        run_id=run_id,
+        agent="sub-agent-2",
+        schema=LLMEnrichmentDecision,
+        messages=[
+            SystemMessage(content=prompt_row["prompt_text"]),
+            HumanMessage(content=str(payload)),
+        ],
+        attempts=[
+            (base_temp, primary_model, max_tokens),
+            (0.6, primary_model, max_tokens),
+            (0.3, fallback_model, max_tokens),
+        ],
+    )
 
 
 def _fetch_nvd_data(cve_ids: list[str], api_key: str | None) -> dict[str, dict]:

@@ -1,12 +1,15 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import MultiSelectFilter from '../components/MultiSelectFilter'
+import ScannerEndpointModal from '../components/ScannerEndpointModal'
 import '../styles/Integrations.css'
+import '../styles/AgentModelConfig.css' // reuse .amc-banner-* helpers
 
-// Scanners with a real, wired connector.
-// More get added here as we build live connectors for each.
-const SCANNERS = [
+// Built-in scanners that always show in "Run a scan" even before any
+// custom registration. Anything else added by the user via the modal
+// appears here dynamically (driven by /admin/scanners).
+const BUILTIN_SCANNERS = [
   { tool: 'osv', label: 'OSV.dev' },
 ]
 
@@ -38,6 +41,7 @@ const INTEGRATION_CATALOG = [
     apiTool('checkmarx-appsec', 'Checkmarx'),
     oauthTool('github-dependabot-appsec', 'Github Dependabot'),
     oauthTool('hackerone-appsec', 'Hackerone'),
+    apiTool('owasp-zap-appsec', 'OWASP ZAP'),
     apiTool('snyk-appsec', 'Snyk'),
     apiTool('veracode-appsec', 'Veracode'),
   ]},
@@ -55,6 +59,7 @@ const INTEGRATION_CATALOG = [
     apiTool('iac-scanning-cloud', 'Checkov (IaC Scanning)'),
     apiTool('paloalto-cloud', 'Prisma Cloud (Palo Alto)'),
     apiTool('tenable-cloud', 'Tenable Cloud Security'),
+    apiTool('trivy-cloud', 'Trivy'),
     apiTool('wiz-cloud', 'Wiz'),
   ]},
   { category: 'DSPM / DLP', tools: [
@@ -131,6 +136,63 @@ export default function Integrations() {
   const [selectedScanners, setSelectedScanners] = useState(new Set())
   const [isTriggering, setIsTriggering] = useState(false)
   const [lastResult, setLastResult] = useState(null)
+
+  // Registered scanners (from /admin/scanners). Used to:
+  //  - Show a "configured" dot on integration cards.
+  //  - Build the dynamic SCANNERS list in the Run-a-scan card.
+  //  - Decide whether the modal renders in "create" or "edit" mode.
+  const [registeredScanners, setRegisteredScanners] = useState([])
+
+  // Page-level success toast — surfaced after the modal saves and closes.
+  const [toast, setToast] = useState(null)
+
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 3500)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  const refreshRegisteredScanners = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/admin/scanners`)
+      if (!res.ok) return
+      const data = await res.json()
+      setRegisteredScanners(data.scanners || [])
+    } catch {
+      // Backend may not be up yet on first paint — fail silently and the
+      // BUILTIN_SCANNERS fallback keeps the page functional.
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshRegisteredScanners()
+  }, [refreshRegisteredScanners])
+
+  // Merge built-ins with the registered set (registered wins on tool collision).
+  // Label resolution: prefer catalog's display name when the slug matches a
+  // catalog entry, otherwise fall back to the raw tool slug.
+  const SCANNERS = useMemo(() => {
+    const catalogNameById = new Map()
+    for (const group of INTEGRATION_CATALOG) {
+      for (const tool of group.tools) catalogNameById.set(tool.id, tool.name)
+    }
+    const map = new Map(BUILTIN_SCANNERS.map((s) => [s.tool, s]))
+    for (const s of registeredScanners) {
+      if (s.enabled) {
+        map.set(s.tool, {
+          tool: s.tool,
+          label: catalogNameById.get(s.tool) || s.tool,
+        })
+      }
+    }
+    return Array.from(map.values())
+  }, [registeredScanners])
+
+  const registeredByTool = useMemo(() => {
+    const m = new Map()
+    for (const s of registeredScanners) m.set(s.tool, s)
+    return m
+  }, [registeredScanners])
 
   const toggleScanner = (tool) => {
     setSelectedScanners((prev) => {
@@ -378,23 +440,33 @@ export default function Integrations() {
               </div>
 
               <div className="integration-grid-modern">
-                {filteredTools.map(tool => (
-                  <div
-                    key={tool.id}
-                    className="integration-card-modern"
-                    onClick={() => setSelectedTool(tool)}
-                  >
-                    <div className="integration-card-name">
-                      {tool.name}
-                    </div>
-
-                    {searchTerm && (
-                      <div className="integration-category-badge">
-                        {tool.category}
+                {filteredTools.map(tool => {
+                  const configured = registeredByTool.has(tool.id)
+                  return (
+                    <div
+                      key={tool.id}
+                      className="integration-card-modern"
+                      onClick={() => setSelectedTool(tool)}
+                      style={{ position: 'relative' }}
+                    >
+                      {configured && (
+                        <span
+                          className="integration-configured-dot"
+                          title="Endpoint configured"
+                        />
+                      )}
+                      <div className="integration-card-name">
+                        {tool.name}
                       </div>
-                    )}
-                  </div>
-                ))}
+
+                      {searchTerm && (
+                        <div className="integration-category-badge">
+                          {tool.category}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           </div>
@@ -402,44 +474,30 @@ export default function Integrations() {
       </div>
 
       {selectedTool && (
-        <div
-          className="integration-modal-overlay"
-          onClick={() => setSelectedTool(null)}
-        >
-          <div
-            className="integration-modal"
-            onClick={(e) => e.stopPropagation()}
+        <ScannerEndpointModal
+          tool={selectedTool}
+          existing={registeredByTool.get(selectedTool.id) || null}
+          onClose={() => setSelectedTool(null)}
+          onSaved={(message) => {
+            setToast({ kind: 'ok', message })
+            refreshRegisteredScanners()
+          }}
+        />
+      )}
+
+      {toast && (
+        <div className={`integrations-toast integrations-toast-${toast.kind}`} role="status">
+          <span className="integrations-toast-icon" aria-hidden>
+            {toast.kind === 'ok' ? '✓' : '!'}
+          </span>
+          <span>{toast.message}</span>
+          <button
+            className="integrations-toast-close"
+            onClick={() => setToast(null)}
+            aria-label="Dismiss"
           >
-            <h2>{selectedTool.name}</h2>
-            <p>{selectedTool.description}</p>
-
-            {selectedTool.authType === 'api' && (
-              <div className="integration-form">
-                {selectedTool.fields?.map(field => (
-                  <input
-                    key={field.key}
-                    type={field.type}
-                    placeholder={field.label}
-                  />
-                ))}
-              </div>
-            )}
-
-            <div className="integration-modal-actions">
-              {selectedTool.authType === 'oauth' && (
-                <button className="connect-btn-modern">
-                  Connect with OAuth
-                </button>
-              )}
-
-              <button
-                className="integration-close-btn"
-                onClick={() => setSelectedTool(null)}
-              >
-                Close
-              </button>
-            </div>
-          </div>
+            ×
+          </button>
         </div>
       )}
     </>

@@ -29,7 +29,7 @@ from langgraph.graph import END, START, StateGraph
 from ..db import supabase_admin
 from ..models import MasterPlan
 from . import sub_agent_1, sub_agent_2
-from .llm import get_chat_llm
+from .llm import invoke_structured_with_retry
 from .trace import emit_trace
 
 
@@ -129,14 +129,9 @@ def _plan_node(state: MasterState) -> dict:
     run_id = state["run_id"]
     prompt_row = state["prompt_row"]
     params = prompt_row.get("parameters") or {}
-
-    llm = get_chat_llm(
-        run_id=run_id,
-        agent="master",
-        model=prompt_row["model"],
-        temperature=float(params.get("temperature", 0.1)),
-        max_tokens=int(params.get("max_tokens", 1000)),
-    )
+    base_temp = float(params.get("temperature", 0.1))
+    max_tokens = int(params.get("max_tokens", 1000))
+    primary_model = prompt_row["model"]
 
     user_payload: dict[str, Any] = {
         "trigger": {
@@ -148,15 +143,22 @@ def _plan_node(state: MasterState) -> dict:
         "available_tools": state["available_tools"],
     }
 
-    # Use structured output to bind MasterPlan as the response schema.
-    # include_raw=True so we can read token usage from the raw response
-    # if we ever need it directly (the callback already emits TOKEN_USAGE).
-    structured_llm = llm.with_structured_output(MasterPlan, include_raw=False)
-    plan: MasterPlan = structured_llm.invoke(
-        [
+    # MasterPlan is a tiny schema (summary + steps), so failures here are
+    # almost always transient API errors (429 / 5xx / timeout). Two attempts
+    # at the same model is enough — no need to escalate to a smarter one
+    # since gpt-4o is already the configured model.
+    plan: MasterPlan = invoke_structured_with_retry(
+        run_id=run_id,
+        agent="master",
+        schema=MasterPlan,
+        messages=[
             SystemMessage(content=prompt_row["prompt_text"]),
             HumanMessage(content=str(user_payload)),
-        ]
+        ],
+        attempts=[
+            (base_temp, primary_model, max_tokens),
+            (base_temp, primary_model, max_tokens),
+        ],
     )
 
     emit_trace(

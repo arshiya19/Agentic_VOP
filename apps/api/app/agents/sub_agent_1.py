@@ -32,7 +32,7 @@ from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMNormalizedIssue
 from .connectors import fetch_raw_rows
-from .llm import get_chat_llm
+from .llm import invoke_structured_with_retry
 from .trace import emit_trace
 
 
@@ -82,7 +82,7 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
 
     # ------ Step 1: fetch raw rows from the connector ------
     try:
-        raw_rows = fetch_raw_rows(tool, registry_entry, last_fetched_at)
+        raw_rows = fetch_raw_rows(tool, registry_entry, last_fetched_at, run_id=run_id)
     except Exception as e:
         emit_trace(
             run_id,
@@ -185,6 +185,10 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
         raw_finding_id = persisted["id"]
         raw = persisted["raw"]
         llm_issue = _normalize_row(run_id, prompt_row, tool, raw, mapping_rules)
+        # Authoritative: the source on an issue must match the tool that
+        # produced it, regardless of what the LLM returned. This is the
+        # single source of truth for "where this finding came from".
+        llm_issue.source = tool
         _insert_issue(sb, llm_issue, raw_finding_id, run_id)
         return {"raw_finding_id": raw_finding_id}
 
@@ -297,43 +301,23 @@ def _normalize_row(
         "mapping_rules": mapping_rules,
     }
 
-    # (temperature, model) per attempt: two cheap shots, then one smart shot.
-    attempts = [
-        (base_temp, primary_model),
-        (0.6, primary_model),
-        (0.3, fallback_model),
-    ]
-    last_err: Exception | None = None
-
-    for temperature, model in attempts:
-        try:
-            llm = get_chat_llm(
-                run_id=run_id,
-                agent="sub-agent-1",
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            structured_llm = llm.with_structured_output(
-                LLMNormalizedIssue, method="function_calling"
-            )
-            result = structured_llm.invoke(
-                [
-                    SystemMessage(content=prompt_row["prompt_text"]),
-                    HumanMessage(content=str(user_payload)),
-                ]
-            )
-            if result is None:
-                raise ValueError(
-                    "LLM did not invoke the structured-output tool "
-                    "(likely hit max_tokens responding in prose)"
-                )
-            return result
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-
-    assert last_err is not None  # nosec B101
-    raise last_err
+    # Per-attempt completion budget grows on each retry — gnarly OSV advisories
+    # (e.g. 10k-token prompts with huge affected-version arrays) sometimes need
+    # more room than the base config to finish the structured-output tool call.
+    return invoke_structured_with_retry(
+        run_id=run_id,
+        agent="sub-agent-1",
+        schema=LLMNormalizedIssue,
+        messages=[
+            SystemMessage(content=prompt_row["prompt_text"]),
+            HumanMessage(content=str(user_payload)),
+        ],
+        attempts=[
+            (base_temp, primary_model, max_tokens),
+            (0.6, primary_model, max_tokens + 2000),
+            (0.3, fallback_model, max_tokens + 4000),
+        ],
+    )
 
 
 def _insert_issue(sb, llm_issue: LLMNormalizedIssue, raw_finding_id: int, run_id: str) -> None:
