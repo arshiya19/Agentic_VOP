@@ -10,7 +10,18 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "python-dotenv>=1.0.1",
-    "openai>=1.50.0",
+    # LangChain + LangGraph stack — replaces direct OpenAI SDK usage.
+    #   langchain-core    → base abstractions (messages, prompts, runnables)
+    #   langchain-openai  → ChatOpenAI wrapper (pulls in `openai` transitively)
+    #   langgraph         → state-machine framework for the Master agent
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.2.0",
+    "langchain-google-genai>=2.0.0",
+    "langgraph>=0.2.0",
+    # Pinned to remediate CVE-2026-44431 and CVE-2026-44432 (cross-origin redirect leak + streaming-API issue).
+    "urllib3>=2.7.0",
+    "python-multipart>=0.0.28",
 ]
 
 [tool.uv]

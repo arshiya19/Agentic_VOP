@@ -39,7 +39,10 @@ class LLMNormalizedIssue(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["tenable", "trivy", "qualys", "owasp", "snyk", "osv"]
+    # Open string so user-registered scanners (via the Integrations page) work.
+    # Sub-Agent 1 overrides this with the actual tool slug after the LLM call,
+    # so the value the LLM returns here is advisory only.
+    source: str
     source_vuln_id: str
     cve_id: str | None = None
     all_cves: list[str] = []

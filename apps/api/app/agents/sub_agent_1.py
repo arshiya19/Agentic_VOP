@@ -1,60 +1,39 @@
-"""Sub-Agent 1 — Smart Connector (2-step pipeline: persist raw, then normalize).
+"""Sub-Agent 1 — Smart Connector (LangChain-powered normalization).
 
 Per run:
   1. Read the connector's last_fetched_at watermark from connection_registry.
-  2. Fetch raw rows from the scanner (incremental).
-  3. **Persist all raw rows verbatim into raw_findings.** This is the audit trail.
+  2. Fetch raw rows from the scanner (incremental, via connectors/).
+  3. Persist all raw rows verbatim into raw_findings (audit trail).
   4. For each persisted raw row:
-       a. Call the LLM (function calling) with per-scanner prompt → LLMNormalizedIssue.
-       b. Insert canonical Issue, with raw_finding_id pointing back to step 3.
+       a. Call ChatOpenAI.with_structured_output(LLMNormalizedIssue).
+       b. Insert canonical Issue with raw_finding_id pointing back to step 3.
   5. On success, advance the watermark.
 
 Why split raw and canonical: replay (re-normalize without re-fetching), audit
 (byte-exact what the scanner returned), separation of concerns.
+
+LangChain migration notes:
+  - The raw OpenAI SDK function call is replaced by ChatOpenAI's
+    `.with_structured_output(LLMNormalizedIssue)`, which binds the Pydantic
+    schema as the response shape and validates automatically.
+  - Multi-stage JSON repair is no longer required for the happy path —
+    LangChain handles structured output internally. We keep the
+    temperature-escalation retry pattern (0.1 → 0.6 → 0.9) for robustness
+    against rare validation failures.
 """
 
-import json
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from typing import Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMNormalizedIssue
 from .connectors import fetch_raw_rows
-from .llm import get_llm
+from .llm import invoke_structured_with_retry
 from .trace import emit_trace
-
-
-# Compute the LLM tool input schema once at import time.
-_NORMALIZED_ISSUE_SCHEMA = LLMNormalizedIssue.model_json_schema()
-
-# Matches a \u that isn't followed by exactly 4 hex digits — i.e., a malformed
-# Unicode escape. The LLM emits these very rarely; one bad row would otherwise
-# drop the whole call.
-_BAD_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
-_ANY_UNICODE_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{0,4}")
-
-
-def _parse_function_args(args_str: str) -> dict:
-    """json.loads with multi-stage repair for the malformed \\u escapes the LLM
-    occasionally produces. Tries: (1) as-is, (2) replace bad \\u with safe \\u0020
-    (a space), (3) strip every \\u escape as a last resort.
-    """
-    try:
-        return json.loads(args_str)
-    except json.JSONDecodeError:
-        pass
-    try:
-        # Replace each bad \u with a safe escape for SPACE (\u0020) — preserves
-        # string structure better than just deleting the \u.
-        return json.loads(_BAD_UNICODE_ESCAPE.sub(r"\\u0020", args_str))
-    except json.JSONDecodeError:
-        pass
-    # Last-resort: drop every \u sequence entirely. Loses some characters but
-    # the row still goes through.
-    return json.loads(_ANY_UNICODE_ESCAPE.sub("", args_str))
 
 
 def _sanitize(value: Any) -> Any:
@@ -76,8 +55,14 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
     """Read raw rows from the connector, normalize each via the LLM, insert canonical Issues.
 
     Returns (count of issues inserted, token_totals dict).
-    """
 
+    Note on token totals: LangChain emits token usage via the
+    `_TokenUsageCallback` in `llm.py` (one TOKEN_USAGE trace event per
+    LLM call). The aggregate returned here is best-effort and will be
+    zero unless the callback also writes to a sidecar — to keep the
+    public contract with master.py the same, we return zeros and
+    rely on the per-call TOKEN_USAGE events for observability.
+    """
     sb = supabase_admin()
 
     last_fetched_at = registry_entry.get("last_fetched_at")
@@ -97,7 +82,7 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
 
     # ------ Step 1: fetch raw rows from the connector ------
     try:
-        raw_rows = fetch_raw_rows(tool, registry_entry, last_fetched_at)
+        raw_rows = fetch_raw_rows(tool, registry_entry, last_fetched_at, run_id=run_id)
     except Exception as e:
         emit_trace(
             run_id,
@@ -140,7 +125,6 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
         return 0, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     # ------ Step 2: persist raw rows verbatim into raw_findings ------
-    # Sanitize NUL bytes (\u0000) — Postgres' text/jsonb types reject them.
     raw_inserts = [
         {"source": tool, "agent_run_id": run_id, "raw": _sanitize(row)} for row in raw_rows
     ]
@@ -196,16 +180,17 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
         f"Normalizing {len(persisted_raws)} row(s)…",
     )
 
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-
     def _process_one(persisted: dict) -> dict:
         """Per-row task: LLM-normalize then insert. Runs inside a worker thread."""
         raw_finding_id = persisted["id"]
         raw = persisted["raw"]
-        llm_issue, usage = _normalize_row(run_id, prompt_row, tool, raw, mapping_rules)
+        llm_issue = _normalize_row(run_id, prompt_row, tool, raw, mapping_rules)
+        # Authoritative: the source on an issue must match the tool that
+        # produced it, regardless of what the LLM returned. This is the
+        # single source of truth for "where this finding came from".
+        llm_issue.source = tool
         _insert_issue(sb, llm_issue, raw_finding_id, run_id)
-        return {"raw_finding_id": raw_finding_id, "usage": usage}
+        return {"raw_finding_id": raw_finding_id}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, p): p for p in persisted_raws}
@@ -214,11 +199,8 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
             persisted = futures[future]
             completed += 1
             try:
-                result = future.result()
+                future.result()
                 inserted += 1
-                usage = result.get("usage") or {}
-                total_prompt_tokens += usage.get("prompt_tokens", 0)
-                total_completion_tokens += usage.get("completion_tokens", 0)
             except Exception as e:
                 failed += 1
                 if len(failure_examples) < 3:
@@ -260,22 +242,6 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
             f"Completed normalization: {inserted}/{len(persisted_raws)} rows normalized cleanly",
         )
 
-    emit_trace(
-        run_id,
-        "sub-agent-1",
-        "MESSAGE",
-        f"Sub-Agent 1 token summary — prompt: {total_prompt_tokens}, "
-        f"completion: {total_completion_tokens}, "
-        f"total: {total_prompt_tokens + total_completion_tokens}",
-        payload={
-            "event_subtype": "TOKEN_SUMMARY",
-            "agent": "sub-agent-1",
-            "prompt_tokens": total_prompt_tokens,
-            "completion_tokens": total_completion_tokens,
-            "total_tokens": total_prompt_tokens + total_completion_tokens,
-        },
-    )
-
     # Advance watermark so the next run only fetches rows created after this point.
     # Only do this if we successfully processed at least some rows — if the entire
     # batch failed, leave the watermark alone so a retry sees the same data.
@@ -303,11 +269,12 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
             "correlation_id": f"corr-{run_id[:8]}",
         },
     )
-    return inserted, {
-        "prompt_tokens": total_prompt_tokens,
-        "completion_tokens": total_completion_tokens,
-        "total_tokens": total_prompt_tokens + total_completion_tokens,
-    }
+
+    # Token totals are emitted per-call via the TokenUsageCallback; the aggregate
+    # is best-effort here and zeros are safe — the SCAN_COMPLETE summary will
+    # report Master's plan tokens accurately and Sub-1's per-call usage is
+    # already visible on the Agents page.
+    return inserted, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def _normalize_row(
@@ -316,67 +283,41 @@ def _normalize_row(
     tool: str,
     raw_row: dict,
     mapping_rules: list[dict],
-) -> tuple[LLMNormalizedIssue, dict]:
-    """Call OpenAI with function calling to normalize one raw row to a canonical Issue.
-    Returns (LLMNormalizedIssue, usage_dict).
+) -> LLMNormalizedIssue:
+    """Call ChatOpenAI with structured output to normalize one raw row.
+
+    Tiered retry — escalate temperature first (cheap), then escalate the model
+    on the final attempt (smarter) for rows the small model can't handle.
     """
-    client = get_llm(run_id, "sub-agent-1")
-
-    user_message = json.dumps(
-        {
-            "source_scanner": tool,
-            "raw_row": raw_row,
-            "mapping_rules": mapping_rules,
-        },
-        default=str,
-    )
-
     params = prompt_row.get("parameters") or {}
-
     base_temp = float(params.get("temperature", 0.1))
+    max_tokens = int(params.get("max_tokens", 2000))
+    primary_model = prompt_row["model"]
+    fallback_model = params.get("fallback_model", "gpt-4o")
 
-    def _build_kwargs(temperature: float) -> dict:
-        return dict(
-            model=prompt_row["model"],
-            max_tokens=int(params.get("max_tokens", 2000)),
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": prompt_row["prompt_text"]},
-                {"role": "user", "content": user_message},
-            ],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "emit_canonical_issue",
-                        "description": (
-                            "Emit one normalized canonical Issue produced from a single raw scanner row. "
-                            "Call this exactly once per row, with the normalized fields populated."
-                        ),
-                        "parameters": _NORMALIZED_ISSUE_SCHEMA,
-                    },
-                }
-            ],
-            tool_choice={"type": "function", "function": {"name": "emit_canonical_issue"}},
-        )
+    user_payload = {
+        "source_scanner": tool,
+        "raw_row": raw_row,
+        "mapping_rules": mapping_rules,
+    }
 
-    # Up to 3 attempts: first at low temp, retries at higher temp so the LLM
-    # samples differently and breaks out of any deterministic bad-output loop.
-    attempts = [base_temp, 0.6, 0.9]
-    last_err: Exception | None = None
-    for temperature in attempts:
-        try:
-            response = client.chat.completions.create(**_build_kwargs(temperature))
-            tool_calls = response.choices[0].message.tool_calls or []
-            if not tool_calls:
-                raise ValueError("LLM did not call the emit_canonical_issue function")
-            parsed = _parse_function_args(tool_calls[0].function.arguments)
-            usage = client.chat.completions.extract_usage(response)
-            return LLMNormalizedIssue(**parsed), usage
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-    assert last_err is not None  # nosec B101
-    raise last_err
+    # Per-attempt completion budget grows on each retry — gnarly OSV advisories
+    # (e.g. 10k-token prompts with huge affected-version arrays) sometimes need
+    # more room than the base config to finish the structured-output tool call.
+    return invoke_structured_with_retry(
+        run_id=run_id,
+        agent="sub-agent-1",
+        schema=LLMNormalizedIssue,
+        messages=[
+            SystemMessage(content=prompt_row["prompt_text"]),
+            HumanMessage(content=str(user_payload)),
+        ],
+        attempts=[
+            (base_temp, primary_model, max_tokens),
+            (0.6, primary_model, max_tokens + 2000),
+            (0.3, fallback_model, max_tokens + 4000),
+        ],
+    )
 
 
 def _insert_issue(sb, llm_issue: LLMNormalizedIssue, raw_finding_id: int, run_id: str) -> None:

@@ -312,6 +312,244 @@
   color: white;
 }
 
+/* Scanner-Endpoint Modal extras (reuses .integration-modal layout) */
+.sem-label {
+  display: block;
+  font-size: 12px;
+  color: #94A3B8;
+  margin: 12px 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.sem-method-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.sem-method-btn {
+  background: transparent;
+  color: #94A3B8;
+  border: 1px solid var(--border-color);
+  padding: 6px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+}
+.sem-method-btn.active {
+  background: #06B6D4;
+  color: #042A33;
+  border-color: #06B6D4;
+}
+
+.sem-headers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sem-header-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+.sem-header-row input {
+  margin-bottom: 0 !important; /* override .integration-form input default */
+}
+.sem-header-remove {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: #94A3B8;
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  font-size: 16px;
+  line-height: 1;
+}
+.sem-header-remove:hover { color: #F87171; border-color: #F87171; }
+.sem-add-header {
+  background: transparent;
+  border: 1px dashed var(--border-color);
+  color: #94A3B8;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  align-self: flex-start;
+  margin-top: 4px;
+  font-family: inherit;
+}
+.sem-add-header:hover { color: #67E8F9; border-color: #67E8F9; }
+
+.sem-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: #CBD5E1;
+  cursor: pointer;
+}
+
+/* Stop .integration-form's `width: 100%` from stretching the checkbox
+   and shoving the label text into a vertical wrap. */
+.sem-checkbox-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+/* One-line helper text shown below each field label. */
+.sem-help {
+  display: block;
+  font-size: 11px;
+  color: #64748B;
+  margin: -2px 0 6px;
+  line-height: 1.35;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Source-type tab strip (API vs File) above the form */
+.sem-source-tabs {
+  display: inline-flex;
+  background: #0B0F19;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 3px;
+  margin: 4px 0 16px;
+}
+.sem-source-tab {
+  background: transparent;
+  border: none;
+  color: #94A3B8;
+  padding: 6px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.sem-source-tab.active {
+  background: #06B6D4;
+  color: #042A33;
+  font-weight: 500;
+}
+.sem-source-tab:hover:not(.active) {
+  color: #E5E7EB;
+}
+
+/* File upload dropzone */
+.sem-dropzone {
+  border: 1.5px dashed #2A3656;
+  border-radius: 10px;
+  padding: 28px 16px;
+  text-align: center;
+  cursor: pointer;
+  color: #94A3B8;
+  background: rgba(11, 15, 25, 0.4);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.sem-dropzone:hover,
+.sem-dropzone.over {
+  border-color: #67E8F9;
+  background: rgba(103, 232, 249, 0.04);
+  color: #E5E7EB;
+}
+.sem-dropzone-icon {
+  font-size: 22px;
+  margin-bottom: 8px;
+  color: #67E8F9;
+}
+.sem-dropzone-hint {
+  font-size: 14px;
+  font-weight: 500;
+  color: #CBD5E1;
+  margin-bottom: 4px;
+}
+.sem-dropzone-meta {
+  font-size: 11px;
+  color: #64748B;
+  letter-spacing: 0.04em;
+}
+.sem-dropzone-filename {
+  font-size: 14px;
+  font-weight: 500;
+  color: #E5E7EB;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+/* "Configured" badge on integration cards (when the tool has a registry row) */
+.integration-configured-dot {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22C55E;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+
+/* Page-level toast — shown after the scanner modal saves and closes */
+.integrations-toast {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px 12px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  min-width: 280px;
+  max-width: 520px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  animation: integrationsToastIn 0.18s ease-out;
+}
+.integrations-toast-ok {
+  background: #0E3A2B;
+  border: 1px solid #16A34A;
+  color: #BBF7D0;
+}
+.integrations-toast-err {
+  background: #3B0E1F;
+  border: 1px solid #DC2626;
+  color: #FECACA;
+}
+.integrations-toast-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  font-weight: 700;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.integrations-toast-close {
+  background: transparent;
+  border: none;
+  color: inherit;
+  opacity: 0.7;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  margin-left: 4px;
+}
+.integrations-toast-close:hover { opacity: 1; }
+@keyframes integrationsToastIn {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 /* Meta */
 .integration-meta {
   font-size: 12px;
