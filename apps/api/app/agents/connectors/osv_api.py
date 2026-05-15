@@ -16,6 +16,7 @@ from datetime import datetime
 import httpx
 
 from ...db import supabase_admin
+from ..http_utils import request_with_retry
 
 
 _OSV_QUERY_URL = "https://api.osv.dev/v1/query"
@@ -31,7 +32,9 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
-def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict]:
+def fetch(
+    registry_entry: dict, last_fetched_at: str | None = None, *, run_id: str | None = None
+) -> list[dict]:
     """Query OSV for every monitored package; return one record per vulnerability."""
     sb = supabase_admin()
 
@@ -48,7 +51,9 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
     with httpx.Client(timeout=30) as client:
         for pkg in packages:
             try:
-                resp = client.post(
+                resp = request_with_retry(
+                    client,
+                    "POST",
                     base_url,
                     json={
                         "package": {
@@ -57,9 +62,10 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
                         },
                         "version": pkg["version"],
                     },
+                    timeout=30,
+                    run_id=run_id,
+                    agent="sub-agent-1",
                 )
-                if resp.status_code != 200:
-                    continue
                 vulns = resp.json().get("vulns", []) or []
             except Exception:  # nosec B110 — intentional: skip failed package queries, continue to next package  # noqa: S112
                 continue
