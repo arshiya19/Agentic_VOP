@@ -9,7 +9,7 @@ This simulates network errors and verifies retries succeed.
 """
 
 import httpx
-import uuid
+
 from app.agents.http_utils import request_with_retry
 
 
@@ -29,12 +29,12 @@ class SimulatedFlakeyServer:
             if self.attempt == 1:
                 # Socket read timeout (Windows-like error)
                 error = httpx.ReadError("[WinError 10035] Socket timeout")
-                print(f"FAIL (ReadError)")
+                print("FAIL (ReadError)")
                 raise error
             elif self.attempt == 2:
                 # Connection timeout
                 error = httpx.ConnectError("Connection refused")
-                print(f"FAIL (ConnectError)")
+                print("FAIL (ConnectError)")
                 raise error
             else:
                 # Generic timeout
@@ -127,9 +127,9 @@ def test_retry_logic():
     client3 = UnauthorizedClient()
     try:
         resp = request_with_retry(client3, "GET", "https://api.example.com/test")
-        print(f"\n✗ FAILED: Should have raised exception immediately")
+        print("\n✗ FAILED: Should have raised exception immediately")
     except httpx.HTTPStatusError:
-        print(f"\n✓ PASSED: Non-retryable error raised immediately (1 attempt only)")
+        print("\n✓ PASSED: Non-retryable error raised immediately (1 attempt only)")
         print(f"  Total attempts: {client3.attempt}")
 
     print("\n" + "=" * 60)
