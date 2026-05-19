@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
+from .http_utils import request_with_retry
 
 from ..config import settings
 from ..db import supabase_admin
@@ -103,7 +104,9 @@ def _llm_decide(
     )
 
 
-def _fetch_nvd_data(cve_ids: list[str], api_key: str | None) -> dict[str, dict]:
+def _fetch_nvd_data(
+    cve_ids: list[str], api_key: str | None, run_id: str | None = None
+) -> dict[str, dict]:
     """For each CVE, fetch NVD data: CWE id + CVSS v3 vector breakdown.
 
     Throttle: 0.06s between calls with key (~50 req / 30s allowed),
@@ -118,11 +121,15 @@ def _fetch_nvd_data(cve_ids: list[str], api_key: str | None) -> dict[str, dict]:
     with httpx.Client(timeout=30, headers=headers) as client:
         for cve in cve_ids:
             try:
-                resp = client.get(_NVD_API, params={"cveId": cve})
-                if resp.status_code != 200:
-                    time.sleep(delay)
-                    continue
-
+                resp = request_with_retry(
+                    client,
+                    "GET",
+                    _NVD_API,
+                    params={"cveId": cve},
+                    timeout=30,
+                    run_id=run_id,
+                    agent="sub-agent-2",
+                )
                 vulns = resp.json().get("vulnerabilities", []) or []
                 if not vulns:
                     time.sleep(delay)
@@ -230,21 +237,25 @@ def run_enrich(run_id: str) -> dict:
         emit_trace(run_id, "sub-agent-2", "MESSAGE", "Querying EPSS (FIRST.org)…")
         try:
             with httpx.Client(timeout=30) as client:
-                resp = client.get(
+                resp = request_with_retry(
+                    client,
+                    "GET",
                     _EPSS_API,
                     params={"cve": ",".join(list(cve_ids)[:100])},
+                    timeout=30,
+                    run_id=run_id,
+                    agent="sub-agent-2",
                 )
-                if resp.status_code == 200:
-                    for entry in resp.json().get("data", []) or []:
-                        cve = entry.get("cve")
-                        if not cve:
-                            continue
-                        epss_data[cve] = {
-                            "epss_score": float(entry["epss"]) if entry.get("epss") else None,
-                            "epss_percentile": float(entry["percentile"])
-                            if entry.get("percentile")
-                            else None,
-                        }
+                for entry in resp.json().get("data", []) or []:
+                    cve = entry.get("cve")
+                    if not cve:
+                        continue
+                    epss_data[cve] = {
+                        "epss_score": float(entry["epss"]) if entry.get("epss") else None,
+                        "epss_percentile": float(entry["percentile"])
+                        if entry.get("percentile")
+                        else None,
+                    }
             emit_trace(
                 run_id,
                 "sub-agent-2",
@@ -270,7 +281,7 @@ def run_enrich(run_id: str) -> dict:
         )
         emit_trace(run_id, "sub-agent-2", "MESSAGE", f"Querying NVD ({speed_note})…")
         try:
-            nvd_data = _fetch_nvd_data(list(cve_ids), nvd_key)
+            nvd_data = _fetch_nvd_data(list(cve_ids), nvd_key, run_id=run_id)
             emit_trace(
                 run_id,
                 "sub-agent-2",
@@ -290,12 +301,13 @@ def run_enrich(run_id: str) -> dict:
     emit_trace(run_id, "sub-agent-2", "MESSAGE", "Downloading CISA KEV catalog…")
     try:
         with httpx.Client(timeout=30) as client:
-            resp = client.get(_KEV_CATALOG_URL)
-            if resp.status_code == 200:
-                for entry in resp.json().get("vulnerabilities", []) or []:
-                    cve = entry.get("cveID")
-                    if cve:
-                        kev_set.add(cve)
+            resp = request_with_retry(
+                client, "GET", _KEV_CATALOG_URL, timeout=30, run_id=run_id, agent="sub-agent-2"
+            )
+            for entry in resp.json().get("vulnerabilities", []) or []:
+                cve = entry.get("cveID")
+                if cve:
+                    kev_set.add(cve)
         emit_trace(
             run_id,
             "sub-agent-2",
@@ -419,16 +431,34 @@ def run_enrich(run_id: str) -> dict:
         },
     )
 
-    # Token totals: per-call TOKEN_USAGE events are emitted by the
-    # _TokenUsageCallback in llm.py. The aggregate here is best-effort
-    # zeros — the Agents page shows per-call usage already.
+    # Aggregate token usage from all TOKEN_USAGE trace events emitted during this run
+    token_events = (
+        sb.table("agent_trace_events")
+        .select("payload")
+        .eq("run_id", run_id)
+        .eq("agent", "sub-agent-2")
+        .execute()
+        .data
+        or []
+    )
+
+    total_prompt = 0
+    total_completion = 0
+    total_tokens_sum = 0
+    for event in token_events:
+        payload = event.get("payload") or {}
+        if payload.get("event_subtype") == "TOKEN_USAGE":
+            total_prompt += payload.get("prompt_tokens", 0)
+            total_completion += payload.get("completion_tokens", 0)
+            total_tokens_sum += payload.get("total_tokens", 0)
+
     return {
         "enriched": enriched,
         "failed": failed,
         "kev_hits": kev_hits,
         "epss_hits": epss_hits,
         "nvd_hits": len(nvd_data),
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
+        "prompt_tokens": total_prompt,
+        "completion_tokens": total_completion,
+        "total_tokens": total_tokens_sum,
     }

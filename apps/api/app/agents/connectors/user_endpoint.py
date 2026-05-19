@@ -32,6 +32,7 @@ from ._shape_utils import (
     persist_response_path,
     try_simple_extract,
 )
+from ..http_utils import request_with_retry
 
 
 def fetch(
@@ -54,10 +55,26 @@ def fetch(
 
     with httpx.Client(timeout=timeout_sec) as client:
         if method == "POST":
-            resp = client.post(endpoint, headers=headers, json=body)
+            resp = request_with_retry(
+                client,
+                "POST",
+                endpoint,
+                headers=headers,
+                json=body,
+                timeout=timeout_sec,
+                run_id=run_id,
+                agent="sub-agent-1",
+            )
         else:
-            resp = client.get(endpoint, headers=headers)
-        resp.raise_for_status()
+            resp = request_with_retry(
+                client,
+                "GET",
+                endpoint,
+                headers=headers,
+                timeout=timeout_sec,
+                run_id=run_id,
+                agent="sub-agent-1",
+            )
         try:
             payload = resp.json()
         except ValueError as e:

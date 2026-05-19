@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 import httpx
 
 from ...config import settings
+from ..http_utils import request_with_retry
 
 
 _DEFAULT_BASE_URL = "https://localhost:8834"
@@ -48,7 +49,9 @@ def _parse_watermark(last_fetched_at: str | None) -> float | None:
         return None
 
 
-def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict]:
+def fetch(
+    registry_entry: dict, last_fetched_at: str | None = None, *, run_id: str | None = None
+) -> list[dict]:
     """Hit Nessus and return raw vulnerability records ready for Sub-Agent 1."""
     base_url = registry_entry.get("endpoint") or _DEFAULT_BASE_URL
     metadata = registry_entry.get("metadata") or {}
@@ -67,10 +70,14 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
         if plugin_id in plugin_cache:
             return plugin_cache[plugin_id]
         try:
-            resp = client.get(f"{base_url}/plugins/plugin/{plugin_id}")
-            if resp.status_code != 200:
-                plugin_cache[plugin_id] = {}
-                return {}
+            resp = request_with_retry(
+                client,
+                "GET",
+                f"{base_url}/plugins/plugin/{plugin_id}",
+                timeout=60,
+                run_id=run_id,
+                agent="sub-agent-1",
+            )
             attributes = resp.json().get("attributes", []) or []
             plugin_data = {
                 a.get("attribute_name"): a.get("attribute_value")
@@ -86,7 +93,19 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
 
     try:
         # 1. List scans
-        scans = client.get(f"{base_url}/scans").json().get("scans", []) or []
+        scans = (
+            request_with_retry(
+                client,
+                "GET",
+                f"{base_url}/scans",
+                timeout=60,
+                run_id=run_id,
+                agent="sub-agent-1",
+            )
+            .json()
+            .get("scans", [])
+            or []
+        )
 
         # Apply watermark — only scans whose last_modification_date is newer
         if cutoff_epoch is not None:
@@ -102,7 +121,14 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
                 continue
 
             # 2. Scan details
-            details = client.get(f"{base_url}/scans/{scan_id}").json()
+            details = request_with_retry(
+                client,
+                "GET",
+                f"{base_url}/scans/{scan_id}",
+                timeout=60,
+                run_id=run_id,
+                agent="sub-agent-1",
+            ).json()
             info = details.get("info", {}) or {}
             scan_start = info.get("scan_start")
             scan_date = (
@@ -127,12 +153,14 @@ def fetch(registry_entry: dict, last_fetched_at: str | None = None) -> list[dict
 
                     # 3. Per-host vulnerability details
                     try:
-                        vuln_resp = client.get(
+                        vuln_resp = request_with_retry(
+                            client,
+                            "GET",
                             f"{base_url}/scans/{scan_id}/hosts/{host_id}/plugins/{plugin_id}",
                             timeout=30,
+                            run_id=run_id,
+                            agent="sub-agent-1",
                         )
-                        if vuln_resp.status_code != 200:
-                            continue
                         outputs = vuln_resp.json().get("outputs", []) or []
                         if not outputs:
                             continue

@@ -20,8 +20,11 @@ equivalent) is tracked separately, including parallel worker calls in
 Sub-Agent 1 / Sub-Agent 2.
 """
 
+import time
+from .trace import emit_trace  # noqa: PLC0415
 from typing import Any
 
+import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -102,6 +105,32 @@ class _TokenUsageCallback(BaseCallbackHandler):
         }
 
 
+_RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+_FATAL_LLM_ERROR_PHRASES = (
+    "invalid api key",
+    "unauthorized",
+    "permission",
+    "forbidden",
+    "authentication failed",
+    "not found",
+    "model not found",
+    "invalid model",
+    "unsupported model",
+    "unknown provider",
+    "invalid request",
+)
+
+
+def _is_fatal_llm_error(exc: Exception) -> bool:
+    """Classify obvious non-retryable LLM errors so we fail fast."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code if exc.response is not None else None
+        return status is not None and status not in _RETRYABLE_HTTP_STATUS_CODES
+
+    msg = str(exc).lower()
+    return any(phrase in msg for phrase in _FATAL_LLM_ERROR_PHRASES)
+
+
 def invoke_structured_with_retry(
     *,
     run_id: str,
@@ -128,7 +157,7 @@ def invoke_structured_with_retry(
     to opt into strict mode for schemas without free-form objects.
     """
     last_err: Exception | None = None
-    for temperature, model, max_tokens in attempts:
+    for idx, (temperature, model, max_tokens) in enumerate(attempts, start=1):
         try:
             llm = get_chat_llm(
                 run_id=run_id,
@@ -146,7 +175,19 @@ def invoke_structured_with_retry(
                 )
             return result
         except Exception as e:  # noqa: BLE001
-            last_err = e
+            emit_trace(
+                run_id,
+                agent,
+                "MESSAGE",
+                f"LLM retry {idx}/{len(attempts)} "
+                f"({model}, temp={temperature}): "
+                f"{type(e).__name__}: {str(e)[:120]}",
+            )
+            if _is_fatal_llm_error(e):
+                raise e
+            if idx >= len(attempts):
+                break
+            time.sleep(0.5 * idx)
 
     assert last_err is not None  # nosec B101
     raise last_err

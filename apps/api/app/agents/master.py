@@ -34,6 +34,47 @@ from .trace import emit_trace
 
 
 # ============================================================================
+# Helper: Token aggregation
+# ============================================================================
+
+
+def _aggregate_tokens_for_agent(run_id: str, agent: str) -> dict:
+    """Aggregate all TOKEN_USAGE events from trace for a given agent.
+
+    Returns {prompt_tokens, completion_tokens, total_tokens} summed across
+    all LLM calls emitted by this agent during the run.
+    """
+    sb = supabase_admin()
+
+    events = (
+        sb.table("agent_trace_events")
+        .select("payload")
+        .eq("run_id", run_id)
+        .eq("agent", agent)
+        .execute()
+        .data
+        or []
+    )
+
+    total_prompt = 0
+    total_completion = 0
+    total_tokens_sum = 0
+
+    for event in events:
+        payload = event.get("payload") or {}
+        if payload.get("event_subtype") == "TOKEN_USAGE":
+            total_prompt += payload.get("prompt_tokens", 0)
+            total_completion += payload.get("completion_tokens", 0)
+            total_tokens_sum += payload.get("total_tokens", 0)
+
+    return {
+        "prompt_tokens": total_prompt,
+        "completion_tokens": total_completion,
+        "total_tokens": total_tokens_sum,
+    }
+
+
+# ============================================================================
 # Graph state
 # ============================================================================
 
@@ -336,8 +377,6 @@ def _summarize_node(state: MasterState) -> dict:
     total_inserted = state["total_inserted"]
     per_scanner = state["per_scanner"]
     enrich_result = state["enrich_result"]
-    sa1_tokens = state["sa1_tokens"]
-    plan_usage = state["plan_usage"]
 
     sb.table("agent_runs").update(
         {
@@ -355,27 +394,26 @@ def _summarize_node(state: MasterState) -> dict:
         }
     ).eq("run_id", run_id).execute()
 
-    sa2_tokens = {
-        "prompt_tokens": enrich_result.get("prompt_tokens", 0),
-        "completion_tokens": enrich_result.get("completion_tokens", 0),
-        "total_tokens": enrich_result.get("total_tokens", 0),
-    }
+    # Aggregate actual token usage from all trace events for each agent
+    master_tokens = _aggregate_tokens_for_agent(run_id, "master")
+    sa1_tokens = _aggregate_tokens_for_agent(run_id, "sub-agent-1")
+    sa2_tokens = _aggregate_tokens_for_agent(run_id, "sub-agent-2")
 
     emit_trace(
         run_id,
         "master",
         "MESSAGE",
         f"Token consumption summary — "
-        f"Master: {plan_usage.get('total_tokens', 0)} | "
+        f"Master: {master_tokens['total_tokens']} | "
         f"Sub-Agent 1: {sa1_tokens['total_tokens']} | "
         f"Sub-Agent 2: {sa2_tokens['total_tokens']}",
         payload={
             "event_subtype": "TOKEN_SUMMARY",
-            "master": plan_usage,
+            "master": master_tokens,
             "sub_agent_1": sa1_tokens,
             "sub_agent_2": sa2_tokens,
             "grand_total": (
-                plan_usage.get("total_tokens", 0)
+                master_tokens["total_tokens"]
                 + sa1_tokens["total_tokens"]
                 + sa2_tokens["total_tokens"]
             ),
