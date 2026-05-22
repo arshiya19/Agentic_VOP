@@ -41,6 +41,7 @@ from typing import Any
 from ...db import supabase_admin
 from ._shape_utils import (
     infer_response_path,
+    parse_sarif,
     persist_response_path,
     try_simple_extract,
 )
@@ -76,37 +77,8 @@ def _parse_csv(content: bytes) -> list[dict]:
 
 
 def _parse_sarif(content: bytes) -> list[dict]:
-    """Flatten SARIF: emit one row per `runs[].results[]` entry, decorated
-    with the tool name + rule metadata so Sub-Agent 1 has full context.
-    """
-    sarif = json.loads(content.decode("utf-8", errors="replace"))
-    rows: list[dict] = []
-    for run in sarif.get("runs", []) or []:
-        tool_block = (run.get("tool") or {}).get("driver") or {}
-        tool_name = tool_block.get("name")
-        rules_by_id = {r.get("id"): r for r in tool_block.get("rules", []) if r.get("id")}
-
-        for result in run.get("results", []) or []:
-            rule_id = result.get("ruleId")
-            rule = rules_by_id.get(rule_id) or {}
-            rows.append(
-                {
-                    "sarif_tool": tool_name,
-                    "sarif_rule_id": rule_id,
-                    "sarif_rule_name": rule.get("name"),
-                    "sarif_rule_short_description": (rule.get("shortDescription") or {}).get(
-                        "text"
-                    ),
-                    "sarif_rule_full_description": (rule.get("fullDescription") or {}).get("text"),
-                    "sarif_rule_help_uri": rule.get("helpUri"),
-                    "sarif_level": result.get("level"),
-                    "sarif_message": (result.get("message") or {}).get("text"),
-                    "sarif_locations": result.get("locations", []),
-                    "sarif_properties": result.get("properties", {}),
-                    "sarif_partial_fingerprints": result.get("partialFingerprints", {}),
-                }
-            )
-    return rows
+    """Flatten SARIF — delegates to the shared implementation in _shape_utils."""
+    return parse_sarif(content)
 
 
 def _parse_json(
