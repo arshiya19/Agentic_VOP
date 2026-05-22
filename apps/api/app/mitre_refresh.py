@@ -339,15 +339,9 @@ def _parse_capec_consequences(ap) -> list[dict]:
     for c in ap.iterfind("capec:Consequences/capec:Consequence", _CAPEC_NS):
         out.append(
             {
-                "scope": [
-                    s
-                    for s in (_text(s) for s in c.iterfind("capec:Scope", _CAPEC_NS))
-                    if s
-                ],
+                "scope": [s for s in (_text(s) for s in c.iterfind("capec:Scope", _CAPEC_NS)) if s],
                 "impact": [
-                    i
-                    for i in (_text(i) for i in c.iterfind("capec:Impact", _CAPEC_NS))
-                    if i
+                    i for i in (_text(i) for i in c.iterfind("capec:Impact", _CAPEC_NS)) if i
                 ],
                 "note": _text(c.find("capec:Note", _CAPEC_NS)),
             }
