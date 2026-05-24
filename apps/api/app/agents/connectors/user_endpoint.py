@@ -54,11 +54,13 @@ from ._shape_utils import (
 from ..http_utils import request_with_retry
 
 
-_ZIP_CONTENT_TYPES = frozenset({
-    "application/zip",
-    "application/x-zip-compressed",
-    "application/octet-stream",
-})
+_ZIP_CONTENT_TYPES = frozenset(
+    {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/octet-stream",
+    }
+)
 
 _DEFAULT_EXTRACT_PATTERN = "*.json"
 _DEFAULT_MAX_ZIP_BYTES = 100 * 1024 * 1024  # 100 MB
@@ -166,8 +168,7 @@ def _handle_zip_response(
         payload = json.loads(file_content.decode("utf-8", errors="replace"))
     except (json.JSONDecodeError, ValueError) as e:
         raise ValueError(
-            f"user_endpoint connector: extracted file '{filename}' from ZIP "
-            f"is not valid JSON."
+            f"user_endpoint connector: extracted file '{filename}' from ZIP is not valid JSON."
         ) from e
 
     response_path = metadata.get("response_path")
@@ -180,7 +181,8 @@ def _extract_matching_file(zf: zipfile.ZipFile, pattern: str) -> tuple[bytes, st
     """
     # Filter out directories and match against the pattern
     candidates = sorted(
-        name for name in zf.namelist()
+        name
+        for name in zf.namelist()
         if not name.endswith("/") and fnmatch.fnmatch(name.split("/")[-1], pattern)
     )
 

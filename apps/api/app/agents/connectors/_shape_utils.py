@@ -213,7 +213,6 @@ def persist_response_path(tool: str, path: str) -> None:
         return
 
 
-
 # ----------------------------------------------------------------------------
 # SARIF flattener — shared by file_upload and user_endpoint (ZIP extraction)
 # ----------------------------------------------------------------------------
