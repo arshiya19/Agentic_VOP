@@ -82,7 +82,7 @@ def fetch(
     response_path = metadata.get("response_path")
     timeout_sec = int(registry_entry.get("timeout_sec") or 60)
 
-    with httpx.Client(timeout=timeout_sec) as client:
+    with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
         if method == "POST":
             resp = request_with_retry(
                 client,
