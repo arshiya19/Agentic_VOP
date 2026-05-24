@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
+import { useDashboardData } from '../hooks/useDashboardData'
 import {
   AreaChart,
   Area,
@@ -22,15 +23,39 @@ const ActivityIcon = () => (
 
 export default function Dashboard() {
   const [showCveTicker] = useState(true)
-  const [latestCves] = useState([])
-  const [remediatedRange, setRemediatedRange] = useState('14d')
+  const [riskReducedRange, setRiskReducedRange] = useState('14d')
+
+  const { stats, latestCves, topRiskDrivers, chartData } =
+    useDashboardData(riskReducedRange)
+
+  const { Critical = 0, High = 0, Medium = 0 } = stats.severityBreakdown || {}
 
   const statCards = [
-    { title: 'Risk Exposure', value: '—', details: '' },
-    { title: 'Requiring Action', value: '—', details: '' },
-    { title: 'Ready-to-Remediate', value: '—', details: '' },
-    { title: 'Validated', value: '—', details: '' },
-    { title: 'Remediated', value: '—', isRemediated: true, details: '' },
+    {
+      title: 'Risk Exposure',
+      value: stats.total,
+      details: `${Critical} Critical · ${High} High · ${Medium} Medium`,
+    },
+    {
+      title: 'Requiring Action',
+      value: stats.requiringAction,
+      details: 'Critical or High severity',
+    },
+    {
+      title: 'Ready-to-Remediate',
+      value: stats.readyToRemediate,
+      details: 'With AI-suggested fix',
+    },
+    {
+      title: 'Validated',
+      value: stats.validated ?? '—',
+      details: 'Confidence score: not tracked yet',
+    },
+    {
+      title: 'Remediated',
+      value: stats.remediated ?? '—',
+      details: 'MTTR: not tracked yet',
+    },
   ]
 
   return (
@@ -41,25 +66,8 @@ export default function Dashboard() {
         <main className="dashboard-main dashboard-dark">
           <div className="stat-cards-row">
             {statCards.map((card, index) => (
-              <div key={index} className={`stat-card ${card.isRemediated ? 'remediated-card' : ''}`}>
-                {card.isRemediated ? (
-                  <div className="stat-card-header-row">
-                    <div className="stat-card-title">{card.title}</div>
-                    <div className="remediated-toggles">
-                      {['14d', '30d', '90d'].map((range) => (
-                        <button
-                          key={range}
-                          className={`rem-toggle ${remediatedRange === range ? 'active' : ''}`}
-                          onClick={() => setRemediatedRange(range)}
-                        >
-                          {range === '14d' ? '14D' : range === '30d' ? '30D' : '3M'}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="stat-card-title">{card.title}</div>
-                )}
+              <div key={index} className="stat-card">
+                <div className="stat-card-title">{card.title}</div>
                 <div className="stat-card-body">
                   <span className="stat-card-value">{card.value}</span>
                 </div>
@@ -71,8 +79,12 @@ export default function Dashboard() {
           {showCveTicker && <CVETicker cves={latestCves} />}
 
           <div className="dashboard-grid">
-            <TopRiskDrivers />
-            <RiskReduced />
+            <TopRiskDrivers data={topRiskDrivers} />
+            <RiskReduced
+              chartData={chartData}
+              timeRange={riskReducedRange}
+              setTimeRange={setRiskReducedRange}
+            />
           </div>
 
           <div className="exposure-map-card">
@@ -105,6 +117,10 @@ export default function Dashboard() {
 
 function CVETicker({ cves }) {
   if (!cves || cves.length === 0) return null
+  // Duplicate the list so the CSS marquee (translateX 0 → -50%) loops
+  // seamlessly — when the first copy scrolls off the left, the second
+  // copy is already taking its place on the right.
+  const loopedCves = [...cves, ...cves]
   return (
     <div className="cve-ticker-wrapper">
       <div className="cve-ticker-label">
@@ -112,11 +128,13 @@ function CVETicker({ cves }) {
         <span>Latest CVEs</span>
       </div>
       <div className="cve-ticker-container">
-        <div className="cve-ticker-track static">
-          {cves.map((cve, index) => (
+        <div className="cve-ticker-track">
+          {loopedCves.map((cve, index) => (
             <div
               key={cve.id + '-' + index}
-              className={'cve-ticker-item severity-' + cve.severity}
+              className={
+                'cve-ticker-item severity-' + (cve.severity || '').toLowerCase()
+              }
             >
               <span className="severity-dot"></span>
               <span className="cve-id">{cve.id}</span>
@@ -129,10 +147,9 @@ function CVETicker({ cves }) {
   )
 }
 
-function TopRiskDrivers() {
+function TopRiskDrivers({ data = [] }) {
   const navigate = useNavigate()
   const [viewMode, setViewMode] = useState('issues')
-  const [data] = useState([])
 
   const handleViewIssues = (item) => {
     navigate(`/issues?search=${encodeURIComponent(item.cve)}`)
@@ -217,7 +234,15 @@ function TopRiskDrivers() {
                           {viewMode === 'issues' ? item.total_affected : item.criticals}
                         </div>
                         <div className="impact-details">
-                          <span>{viewMode === 'issues' ? 'issues' : 'critical CVEs'}</span>
+                          <span>
+                            {viewMode === 'issues'
+                              ? item.total_affected === 1
+                                ? 'issue'
+                                : 'issues'
+                              : item.criticals === 1
+                                ? 'critical CVE'
+                                : 'critical CVEs'}
+                          </span>
                         </div>
                       </div>
                     </td>
@@ -250,9 +275,7 @@ function TopRiskDrivers() {
   )
 }
 
-function RiskReduced() {
-  const [timeRange, setTimeRange] = useState('14d')
-  const [chartData] = useState([])
+function RiskReduced({ chartData = [], timeRange = '14d', setTimeRange = () => {} }) {
   const [topFixes] = useState([])
 
   return (
@@ -288,7 +311,7 @@ function RiskReduced() {
               axisLine={false}
               tickLine={false}
               width={45}
-              tickFormatter={(value) => `${Math.round(value / 1000)}k`}
+              tickFormatter={(value) => (value >= 1000 ? `${Math.round(value / 1000)}k` : value)}
             />
             <Tooltip contentStyle={{ background: '#151C2C', border: '1px solid #334155', borderRadius: '8px', color: '#fff' }} />
             <Area type="monotone" dataKey="exposure" stroke="#ef4444" fillOpacity={0.15} />
