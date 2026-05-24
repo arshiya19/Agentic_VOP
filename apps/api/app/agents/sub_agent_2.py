@@ -310,7 +310,13 @@ def run_enrich(run_id: str) -> dict:
     mitre_capec_by_id: dict[str, dict] = {}
     mitre_attack_by_id: dict[str, dict] = {}
 
+    # CWE ids come from TWO places — NVD (for CVE-having findings) and Sub-Agent 1
+    # (for SAST-style findings that have a CWE but no CVE). We union them so MITRE
+    # enrichment fires for both kinds of issues.
     cwe_ids_seen = {row.get("cwe_id") for row in nvd_data.values() if row.get("cwe_id")}
+    for issue in issues:
+        if issue.get("cwe_id"):
+            cwe_ids_seen.add(issue["cwe_id"])
     if cwe_ids_seen:
         try:
             cwe_rows = (
@@ -454,7 +460,10 @@ def run_enrich(run_id: str) -> dict:
         epss_percentile = epss.get("epss_percentile")
         in_kev = (cve in kev_set) if cve else False
         nvd = nvd_data.get(cve, {}) if cve else {}
-        cwe_id = nvd.get("cwe_id")
+        # Prefer the NVD-derived CWE (authoritative, comes from the official
+        # CVE↔CWE mapping). Fall back to Sub-Agent 1's CWE when the finding
+        # has no CVE (SAST findings, code-level weaknesses).
+        cwe_id = nvd.get("cwe_id") or issue.get("cwe_id")
 
         # Assemble the chained MITRE payload for this issue:
         #   cwe   → the single CWE row matched by nvd.cwe_id

@@ -200,12 +200,6 @@
   border-color: #06B6D4;
 }
 
-.remediated-card .stat-card-details {
-  font-size: 14px;
-  color: #FFFFFF !important;
-  font-weight: 500;
-}
-
 /* CVE Ticker */
 .cve-ticker-wrapper {
   display: flex;
