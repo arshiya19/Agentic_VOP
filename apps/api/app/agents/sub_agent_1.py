@@ -349,6 +349,10 @@ def _insert_issue(sb, llm_issue: LLMNormalizedIssue, raw_finding_id: int, run_id
         "source_vuln_id": llm_issue.source_vuln_id,
         "cve_id": llm_issue.cve_id,
         "all_cves": llm_issue.all_cves,
+        # Persist any CWE id Sub-Agent 1 pulled out of the raw row (e.g. for SAST
+        # findings that have no CVE). Sub-Agent 2 will use it as a fallback when
+        # the NVD lookup can't supply one.
+        "cwe_id": llm_issue.cwe_id,
         "title": llm_issue.title,
         "description": llm_issue.description,
         "severity": llm_issue.severity,

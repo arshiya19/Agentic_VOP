@@ -1,0 +1,177 @@
+// Dashboard data hook — encapsulates the four queries the Dashboard needs
+// (stats, latest CVEs, top risk drivers, daily counts) plus a Supabase
+// Realtime subscription that re-fetches when issues change.
+//
+// Refresh strategy: on any INSERT or UPDATE to the `issues` table we
+// re-run the four queries, debounced by 600 ms so a batch of inserts
+// from one scan only triggers a single refresh.
+//
+// Validated / Remediated counters are returned as `null` for now —
+// the ingestion layer doesn't track those states yet. Components
+// should render those as `—` until later phases add the tracking.
+
+import { useEffect, useState } from 'react'
+import { supabase } from '../lib/supabase'
+
+const RANGE_TO_DAYS = { '14d': 14, '30d': 30, '90d': 90 }
+
+const SEVERITY_RANK = { Critical: 4, High: 3, Medium: 2, Low: 1, Info: 0 }
+
+export function useDashboardData(chartRange = '14d') {
+  const [stats, setStats] = useState({
+    total: 0,
+    requiringAction: 0,
+    readyToRemediate: 0,
+    validated: null, // not tracked yet
+    remediated: null, // not tracked yet
+    severityBreakdown: { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 },
+  })
+  const [latestCves, setLatestCves] = useState([])
+  const [topRiskDrivers, setTopRiskDrivers] = useState([])
+  const [chartData, setChartData] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(null)
+
+  useEffect(() => {
+    let mounted = true
+    let debounceTimer = null
+
+    async function loadAll() {
+      // Pull a reasonable slab of recent issues for severity + CVE + chart math.
+      // Anything older than chartRange + a little buffer is irrelevant here.
+      const days = RANGE_TO_DAYS[chartRange] ?? 14
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+
+      const [countRes, severityRes, topRiskRes, recentRes] = await Promise.all([
+        // 1. Total issue count (head=true means we only get the count, no rows)
+        supabase.from('issues').select('*', { count: 'exact', head: true }),
+
+        // 2. Severity + remediation breakdown — pull just those two columns
+        supabase.from('issues').select('severity, remediation_suggestion'),
+
+        // 3. Top 10 by derived_risk (the "Top Risk Drivers" table)
+        supabase
+          .from('issues')
+          .select('id, cve_id, title, severity, derived_risk, asset_identity, source')
+          .not('derived_risk', 'is', null)
+          .order('derived_risk', { ascending: false })
+          .limit(10),
+
+        // 4. Recent rows within the chart range — used for both the CVE ticker
+        //    and the per-day count chart
+        supabase
+          .from('issues')
+          .select('id, cve_id, severity, created_at')
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(2000),
+      ])
+
+      if (!mounted) return
+
+      // ---- stats ----
+      const severityBreakdown = { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 }
+      let requiringAction = 0
+      let readyToRemediate = 0
+      for (const row of severityRes.data || []) {
+        if (row.severity && severityBreakdown[row.severity] !== undefined) {
+          severityBreakdown[row.severity] += 1
+        }
+        if (row.severity === 'Critical' || row.severity === 'High') requiringAction += 1
+        if (row.remediation_suggestion) readyToRemediate += 1
+      }
+      setStats({
+        total: countRes.count ?? 0,
+        requiringAction,
+        readyToRemediate,
+        validated: null,
+        remediated: null,
+        severityBreakdown,
+      })
+
+      // ---- latest CVEs (dedupe, keep highest severity per CVE) ----
+      const cveMap = new Map()
+      for (const row of recentRes.data || []) {
+        if (!row.cve_id) continue
+        const existing = cveMap.get(row.cve_id)
+        if (!existing) {
+          cveMap.set(row.cve_id, { id: row.cve_id, severity: row.severity, count: 1 })
+        } else {
+          existing.count += 1
+          if (
+            (SEVERITY_RANK[row.severity] ?? -1) > (SEVERITY_RANK[existing.severity] ?? -1)
+          ) {
+            existing.severity = row.severity
+          }
+        }
+      }
+      setLatestCves(Array.from(cveMap.values()).slice(0, 20))
+
+      // ---- top risk drivers ----
+      setTopRiskDrivers(
+        (topRiskRes.data || []).map((row) => ({
+          id: row.id,
+          cve: row.cve_id || row.source,
+          name: row.title || row.cve_id || 'Untitled',
+          avg_risk_score: row.derived_risk != null ? Math.round(row.derived_risk) : 0,
+          total_affected: 1, // we don't have an asset rollup yet; one issue == one occurrence
+          asset_id: row?.asset_identity?.hostname || row?.asset_identity?.target || '',
+          criticals: row.severity === 'Critical' ? 1 : 0,
+          high: row.severity === 'High' ? 1 : 0,
+        }))
+      )
+
+      // ---- chart data: bucket recent issues by ISO date string ----
+      const bucket = new Map() // 'YYYY-MM-DD' -> count
+      for (let d = 0; d < days; d++) {
+        const day = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+        bucket.set(day, 0)
+      }
+      for (const row of recentRes.data || []) {
+        const day = (row.created_at || '').slice(0, 10)
+        if (bucket.has(day)) bucket.set(day, bucket.get(day) + 1)
+      }
+      // Oldest → newest for left-to-right chart reading
+      setChartData(
+        Array.from(bucket.entries())
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([day, count]) => ({
+            day: day.slice(5), // "MM-DD"
+            exposure: count,
+            remediated: 0, // not tracked yet
+            validated: 0, // not tracked yet
+          }))
+      )
+
+      setLastUpdatedAt(new Date())
+      setLoading(false)
+    }
+
+    loadAll()
+
+    // Realtime: any change to `issues` triggers a debounced re-fetch.
+    // Debouncing collapses a burst of inserts (one scan = many rows at once)
+    // into a single recompute.
+    const channel = supabase
+      .channel('dashboard-issues-stream')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'issues' },
+        () => {
+          if (debounceTimer) clearTimeout(debounceTimer)
+          debounceTimer = setTimeout(() => {
+            if (mounted) loadAll()
+          }, 600)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      mounted = false
+      if (debounceTimer) clearTimeout(debounceTimer)
+      supabase.removeChannel(channel)
+    }
+  }, [chartRange])
+
+  return { stats, latestCves, topRiskDrivers, chartData, loading, lastUpdatedAt }
+}

@@ -8,6 +8,7 @@ from .agents.connectors.file_upload import SCANNER_BUCKET, sniff_format
 from .agents.master import run_master
 from .config import settings
 from .db import supabase_admin
+from .mitre_refresh import refresh_mitre_attack, refresh_mitre_capec, refresh_mitre_cwe
 from .models import RunCreated, TriggerEvent
 from .models_registry import AVAILABLE_MODELS, RECOMMENDED_MODELS, is_valid_model
 
@@ -489,3 +490,57 @@ async def upload_scanner_file(
     if not inserted:
         raise HTTPException(status_code=500, detail="insert returned no rows")
     return _row_to_scanner_config(inserted[0])
+
+
+# ----------------------------------------------------------------------------
+# Admin — MITRE CWE catalog refresh
+# ----------------------------------------------------------------------------
+
+
+class MitreRefreshResponse(BaseModel):
+    status: str  # "unchanged" | "updated" | "failed"
+    cwes_processed: int | None = None
+    mitre_version: str | None = None
+    sha256: str | None = None
+    error_message: str | None = None
+
+
+@app.post("/admin/mitre/refresh", response_model=MitreRefreshResponse)
+def refresh_mitre() -> MitreRefreshResponse:
+    """Re-pull the MITRE CWE catalog into the mitre_cwe table.
+
+    Safe to call repeatedly — the SHA-256 hash check makes subsequent runs
+    no-ops when MITRE hasn't published a new version. Designed to be hit
+    monthly by cron (or pg_cron) and also available as a manual button.
+    """
+    result = refresh_mitre_cwe()
+    if result["status"] == "failed":
+        raise HTTPException(status_code=502, detail=result)
+    return MitreRefreshResponse(**result)
+
+
+@app.post("/admin/mitre/refresh-capec", response_model=MitreRefreshResponse)
+def refresh_mitre_capec_endpoint() -> MitreRefreshResponse:
+    """Re-pull the MITRE CAPEC catalog into the mitre_capec table.
+
+    Same hash-check + idempotency contract as the CWE endpoint. CAPEC has
+    a similar release cadence (~3-4 versions per year).
+    """
+    result = refresh_mitre_capec()
+    if result["status"] == "failed":
+        raise HTTPException(status_code=502, detail=result)
+    return MitreRefreshResponse(**result)
+
+
+@app.post("/admin/mitre/refresh-attack", response_model=MitreRefreshResponse)
+def refresh_mitre_attack_endpoint() -> MitreRefreshResponse:
+    """Re-pull the MITRE ATT&CK Enterprise STIX bundle into mitre_attack_techniques.
+
+    Source: github.com/mitre-attack/attack-stix-data. The JSON bundle is large
+    (~30 MB) so this call is slower than CWE/CAPEC — typically 20-40 seconds
+    on a first run; near-instant on no-op runs thanks to the hash check.
+    """
+    result = refresh_mitre_attack()
+    if result["status"] == "failed":
+        raise HTTPException(status_code=502, detail=result)
+    return MitreRefreshResponse(**result)

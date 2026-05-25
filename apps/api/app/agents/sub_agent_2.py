@@ -59,11 +59,17 @@ def _llm_decide(
     epss: dict,
     nvd: dict,
     in_kev: bool,
+    mitre: dict | None = None,
 ) -> LLMEnrichmentDecision:
     """Call ChatOpenAI with structured output for the per-issue risk decision.
 
     Tiered retry — escalate temperature first, then escalate the model on the
     final attempt for issues the small model can't reason about.
+
+    `mitre` is the full MITRE chain payload — shape:
+        {"cwe": {...} | {}, "capec": [...], "attack": [...]}
+    Sections may be empty when the local catalogs haven't been seeded or
+    when the CVE has no CWE id.
     """
     params = prompt_row.get("parameters") or {}
     base_temp = float(params.get("temperature", 0.2))
@@ -85,6 +91,7 @@ def _llm_decide(
             "epss_percentile": epss.get("epss_percentile"),
             "in_kev": in_kev,
             "nvd": nvd or {},
+            "mitre": mitre or {"cwe": {}, "capec": [], "attack": []},
         },
     }
 
@@ -296,6 +303,115 @@ def run_enrich(run_id: str) -> dict:
                 f"NVD lookup failed: {type(e).__name__}: {str(e)[:200]}",
             )
 
+    # 3c. MITRE chain: CWE → CAPEC → ATT&CK
+    # All three are local table joins (refreshed monthly by /admin/mitre/refresh*).
+    # Each step is best-effort — empty tables just mean less context for the LLM.
+    mitre_cwe_by_id: dict[str, dict] = {}
+    mitre_capec_by_id: dict[str, dict] = {}
+    mitre_attack_by_id: dict[str, dict] = {}
+
+    # CWE ids come from TWO places — NVD (for CVE-having findings) and Sub-Agent 1
+    # (for SAST-style findings that have a CWE but no CVE). We union them so MITRE
+    # enrichment fires for both kinds of issues.
+    cwe_ids_seen = {row.get("cwe_id") for row in nvd_data.values() if row.get("cwe_id")}
+    for issue in issues:
+        if issue.get("cwe_id"):
+            cwe_ids_seen.add(issue["cwe_id"])
+    if cwe_ids_seen:
+        try:
+            cwe_rows = (
+                sb.table("mitre_cwe")
+                .select(
+                    "cwe_id,name,description,extended_description,"
+                    "likelihood_of_exploit,consequences,mitigations,related_capec"
+                )
+                .in_("cwe_id", list(cwe_ids_seen))
+                .execute()
+                .data
+                or []
+            )
+            mitre_cwe_by_id = {row["cwe_id"]: row for row in cwe_rows}
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
+                f"MITRE CWE matched {len(mitre_cwe_by_id)} of {len(cwe_ids_seen)} CWE id(s)",
+            )
+        except Exception as e:
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
+                f"MITRE CWE lookup skipped: {type(e).__name__}: {str(e)[:200]}",
+            )
+
+    # Collect CAPEC ids referenced by the CWEs we just loaded.
+    capec_ids_seen: set[str] = set()
+    for cwe_row in mitre_cwe_by_id.values():
+        for capec_id in cwe_row.get("related_capec") or []:
+            capec_ids_seen.add(capec_id)
+
+    if capec_ids_seen:
+        try:
+            capec_rows = (
+                sb.table("mitre_capec")
+                .select(
+                    "capec_id,name,description,likelihood_of_attack,typical_severity,"
+                    "prerequisites,mitigations,related_attack_techniques"
+                )
+                .in_("capec_id", list(capec_ids_seen))
+                .execute()
+                .data
+                or []
+            )
+            mitre_capec_by_id = {row["capec_id"]: row for row in capec_rows}
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
+                f"MITRE CAPEC matched {len(mitre_capec_by_id)} of "
+                f"{len(capec_ids_seen)} attack pattern(s)",
+            )
+        except Exception as e:
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
+                f"MITRE CAPEC lookup skipped: {type(e).__name__}: {str(e)[:200]}",
+            )
+
+    # Collect ATT&CK technique ids referenced by the CAPECs we just loaded.
+    attack_ids_seen: set[str] = set()
+    for capec_row in mitre_capec_by_id.values():
+        for tech_id in capec_row.get("related_attack_techniques") or []:
+            attack_ids_seen.add(tech_id)
+
+    if attack_ids_seen:
+        try:
+            attack_rows = (
+                sb.table("mitre_attack_techniques")
+                .select("technique_id,name,description,tactics,platforms")
+                .in_("technique_id", list(attack_ids_seen))
+                .execute()
+                .data
+                or []
+            )
+            mitre_attack_by_id = {row["technique_id"]: row for row in attack_rows}
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
+                f"MITRE ATT&CK matched {len(mitre_attack_by_id)} of "
+                f"{len(attack_ids_seen)} technique id(s)",
+            )
+        except Exception as e:
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
+                f"MITRE ATT&CK lookup skipped: {type(e).__name__}: {str(e)[:200]}",
+            )
+
     # 4. CISA KEV catalog (downloaded once per run)
     kev_set: set[str] = set()
     emit_trace(run_id, "sub-agent-2", "MESSAGE", "Downloading CISA KEV catalog…")
@@ -344,14 +460,48 @@ def run_enrich(run_id: str) -> dict:
         epss_percentile = epss.get("epss_percentile")
         in_kev = (cve in kev_set) if cve else False
         nvd = nvd_data.get(cve, {}) if cve else {}
+        # Prefer the NVD-derived CWE (authoritative, comes from the official
+        # CVE↔CWE mapping). Fall back to Sub-Agent 1's CWE when the finding
+        # has no CVE (SAST findings, code-level weaknesses).
+        cwe_id = nvd.get("cwe_id") or issue.get("cwe_id")
 
-        decision = _llm_decide(run_id, prompt_row, issue, epss, nvd, in_kev)
+        # Assemble the chained MITRE payload for this issue:
+        #   cwe   → the single CWE row matched by nvd.cwe_id
+        #   capec → all CAPEC rows whose ids appear in cwe.related_capec
+        #   attack→ all ATT&CK rows whose ids appear in any capec.related_attack_techniques
+        cwe_row = mitre_cwe_by_id.get(cwe_id) if cwe_id else None
+        capec_rows: list[dict] = []
+        attack_rows: list[dict] = []
+        if cwe_row:
+            for capec_id in cwe_row.get("related_capec") or []:
+                row = mitre_capec_by_id.get(capec_id)
+                if row:
+                    capec_rows.append(row)
+            seen_techs: set[str] = set()
+            for capec_row in capec_rows:
+                for tech_id in capec_row.get("related_attack_techniques") or []:
+                    if tech_id in seen_techs:
+                        continue
+                    row = mitre_attack_by_id.get(tech_id)
+                    if row:
+                        attack_rows.append(row)
+                        seen_techs.add(tech_id)
+
+        mitre_payload = {
+            "cwe": cwe_row or {},
+            "capec": capec_rows,
+            "attack": attack_rows,
+        }
+
+        decision = _llm_decide(run_id, prompt_row, issue, epss, nvd, in_kev, mitre_payload)
 
         update_row = {
             "epss_score": epss_score,
             "epss_percentile": epss_percentile,
             "exploit_in_kev": in_kev,
-            "cwe_id": nvd.get("cwe_id"),
+            "cwe_id": cwe_id,
+            # cwe_name: prefer MITRE (authoritative), fall back to NVD-supplied name if any.
+            "cwe_name": (cwe_row or {}).get("name") or nvd.get("cwe_name"),
             "cvss_attack_vector": nvd.get("cvss_attack_vector"),
             "cvss_attack_complexity": nvd.get("cvss_attack_complexity"),
             "cvss_privileges_required": nvd.get("cvss_privileges_required"),
