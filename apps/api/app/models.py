@@ -46,6 +46,11 @@ class LLMNormalizedIssue(BaseModel):
     source_vuln_id: str
     cve_id: str | None = None
     all_cves: list[str] = []
+    # cwe_id is populated by Sub-Agent 1 when the raw row references one
+    # directly (common for SAST scanners like Bandit/Semgrep/Snyk-Code that
+    # produce code-level weakness findings without a CVE). When set, Sub-Agent 2
+    # routes enrichment through MITRE directly, skipping the NVD-per-CVE lookup.
+    cwe_id: str | None = None
     title: str
     description: str | None = None
     severity: Literal["Info", "Low", "Medium", "High", "Critical"]

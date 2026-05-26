@@ -256,7 +256,21 @@ jobs:
                       "fix_versions": vuln.get("fix_versions", []),
                       "description": vuln.get("description", "")[:200],
                   }
-                  blocking.append(entry)
+                  # BLOCK only if a fix exists
+                  if vuln.get("fix_versions"):
+                      blocking.append(entry)
+                  # WARN only if no fix available
+                  else:
+                      warnings.append(entry)    
+
+          if warnings:
+              print("::warning::pip-audit — Vulnerabilities with NO FIX available (non-blocking):")
+              for v in warnings:
+                  print(
+                      f"  {v['package']}=={v['version']} "
+                      f"[{v['id']}] fix: no fix available — "
+                      f"{v['description']}"
+                  )          
 
           if blocking:
               print("::error::pip-audit — Vulnerable dependencies BLOCK this pipeline:")

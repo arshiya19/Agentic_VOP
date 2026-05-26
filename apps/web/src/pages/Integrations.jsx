@@ -42,6 +42,7 @@ const INTEGRATION_CATALOG = [
     oauthTool('dependabot', 'Github Dependabot'),
     oauthTool('hackerone-appsec', 'Hackerone'),
     apiTool('owasp-zap-appsec', 'OWASP ZAP'),
+    apiTool('semgrep-appsec', 'Semgrep'),
     apiTool('snyk-appsec', 'Snyk'),
     apiTool('veracode-appsec', 'Veracode'),
   ]},
