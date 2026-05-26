@@ -252,7 +252,7 @@ class ScannerCreate(BaseModel):
     enabled: bool = True
 
 
-_VALID_CONNECTOR_TYPES = ("osv_api", "tenable_api", "user_endpoint", "file_upload")
+_VALID_CONNECTOR_TYPES = ("osv_api", "tenable_api", "dependabot_api", "user_endpoint", "file_upload")
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — generous for scanner exports
 _VALID_FILE_FORMATS = ("json", "jsonl", "csv", "sarif")
 

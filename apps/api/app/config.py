@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     tenable_access_key: str = ""
     tenable_secret_key: str = ""
 
+    # GitHub Dependabot (only required if any tool uses connector_type="dependabot_api")
+    # Token needs the 'security_events' scope for public repos, or 'repo' for private repos.
+    github_token: str = ""
+    github_org: str = ""  # org name or username; can also be set in connection_registry.metadata.org
+
     # NVD API key (optional; without it, calls are rate-limited to 5 per 30 sec.
     # Get one free from https://nvd.nist.gov/developers/request-an-api-key)
     nvd_api_key: str = ""
