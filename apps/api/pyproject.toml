@@ -22,6 +22,8 @@ dependencies = [
     # Pinned to remediate CVE-2026-44431 and CVE-2026-44432 (cross-origin redirect leak + streaming-API issue).
     "urllib3>=2.7.0",
     "python-multipart>=0.0.28",
+    # Pinned to remediate PYSEC-2026-161 (Host header injection in Starlette).
+    "starlette>=1.0.1",
 ]
 
 [dependency-groups]
