@@ -31,8 +31,8 @@ Alert states:
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from datetime import datetime
-from typing import Iterator
 
 import httpx
 
@@ -251,16 +251,12 @@ def fetch(
     cutoff = _parse_iso(last_fetched_at)
 
     with httpx.Client(timeout=60, headers=_headers()) as client:
-        repos = _list_repos(
-            client, base_url, account_type, org, repo_limit, run_id=run_id
-        )
+        repos = _list_repos(client, base_url, account_type, org, repo_limit, run_id=run_id)
 
         all_alerts: list[dict] = []
 
         for repo_full_name in repos:
-            alerts = _fetch_repo_alerts(
-                client, base_url, repo_full_name, per_page, run_id=run_id
-            )
+            alerts = _fetch_repo_alerts(client, base_url, repo_full_name, per_page, run_id=run_id)
 
             for alert in alerts:
                 # Watermark: skip alerts we've already processed
