@@ -119,9 +119,7 @@ def _paginate(
             # GitHub returns a dict on error (e.g. {"message": "..."}).
             # Raise so the caller sees the problem instead of getting 0 results.
             msg = items.get("message", "") if isinstance(items, dict) else str(items)
-            raise RuntimeError(
-                f"GitHub API returned non-list response for {next_url}: {msg}"
-            )
+            raise RuntimeError(f"GitHub API returned non-list response for {next_url}: {msg}")
         yield from items
 
         # Parse Link header for the next page URL
