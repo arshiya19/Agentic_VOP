@@ -456,7 +456,9 @@ def get_scanner_secrets_status(tool: str) -> SecretsStatusResponse:
     from .crypto import get_sensitive_fields
 
     sb = supabase_admin()
-    existing = sb.table("connection_registry").select("metadata").eq("tool", tool).limit(1).execute().data
+    existing = (
+        sb.table("connection_registry").select("metadata").eq("tool", tool).limit(1).execute().data
+    )
     if not existing:
         raise HTTPException(status_code=404, detail=f"Unknown scanner: {tool}")
 

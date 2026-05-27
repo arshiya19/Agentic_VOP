@@ -124,7 +124,7 @@ def _decrypt_value(token: str) -> str:
             "Set it in .env to enable secrets decryption."
         )
 
-    payload = base64.b64decode(token[len(_ENC_PREFIX):])
+    payload = base64.b64decode(token[len(_ENC_PREFIX) :])
     if len(payload) < 12 + 16:
         raise ValueError("Encrypted payload is too short (corrupt data?)")
 
