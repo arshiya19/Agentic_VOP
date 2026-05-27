@@ -51,6 +51,7 @@ from ._shape_utils import (
     persist_response_path,
     try_simple_extract,
 )
+from ...crypto import decrypt_sensitive_fields
 from ..http_utils import request_with_retry
 
 
@@ -78,6 +79,10 @@ def fetch(
         raise ValueError("user_endpoint connector: registry row has no endpoint")
 
     metadata = registry_entry.get("metadata") or {}
+    # Decrypt sensitive fields (headers, body, credentials) for runtime use.
+    # If encryption is not configured or fields are plaintext, this is a no-op.
+    metadata = decrypt_sensitive_fields(metadata)
+
     method = (metadata.get("http_method") or "GET").upper()
     headers = metadata.get("headers") or {}
     body = metadata.get("body")
