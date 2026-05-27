@@ -5,13 +5,16 @@ Returns one record per open alert, augmented with the repo name so
 Sub-Agent 1 can populate asset_identity without re-joining.
 
 Configuration (all under connection_registry):
-  endpoint          : GitHub API base URL (default https://api.github.com)
+  endpoint          : Full GitHub repos list URL for the target account, e.g.
+                        https://api.github.com/users/{username}/repos   (personal)
+                        https://api.github.com/orgs/{orgname}/repos     (organisation)
+                      The connector uses this URL as-is to list repos, then
+                      derives the API base URL (scheme + host) from it to
+                      build per-repo alert URLs.
   auth_ref          : 'env://GITHUB_TOKEN' — Personal Access Token or
                       GitHub App installation token. Requires the
                       'security_events' scope (or 'repo' for private repos).
   metadata:
-    account_type    : 'org' (default) | 'user'
-    org             : GitHub org name or username (also read from GITHUB_ORG env var)
     repo_limit      : max repos to scan per run (default 50)
     per_page        : alerts per page, 1-100 (default 100)
 
@@ -33,6 +36,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from datetime import datetime
+from urllib.parse import urlparse
 
 import httpx
 
@@ -40,7 +44,7 @@ from ...config import settings
 from ..http_utils import request_with_retry
 
 
-_DEFAULT_BASE_URL = "https://api.github.com"
+_DEFAULT_REPOS_URL = "https://api.github.com/users/{org}/repos"
 _DEFAULT_REPO_LIMIT = 50
 _DEFAULT_PER_PAGE = 100
 
@@ -112,7 +116,12 @@ def _paginate(
         )
         items = resp.json()
         if not isinstance(items, list):
-            break
+            # GitHub returns a dict on error (e.g. {"message": "..."}).
+            # Raise so the caller sees the problem instead of getting 0 results.
+            msg = items.get("message", "") if isinstance(items, dict) else str(items)
+            raise RuntimeError(
+                f"GitHub API returned non-list response for {next_url}: {msg}"
+            )
         yield from items
 
         # Parse Link header for the next page URL
@@ -145,25 +154,69 @@ def _parse_next_link(link_header: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _is_repos_list_url(url: str) -> bool:
+    """Detect whether the URL is a GitHub repos-list endpoint.
+
+    Repos list URLs look like:
+      /users/{owner}/repos
+      /orgs/{org}/repos
+
+    Single-repo URLs look like:
+      /repos/{owner}/{repo}
+    """
+    path = urlparse(url).path.rstrip("/")
+    # /users/{x}/repos or /orgs/{x}/repos
+    parts = path.split("/")
+    # ['', 'users', '{x}', 'repos'] or ['', 'orgs', '{x}', 'repos']
+    if len(parts) == 4 and parts[1] in ("users", "orgs") and parts[3] == "repos":
+        return True
+    return False
+
+
+def _extract_repo_full_name(url: str) -> str | None:
+    """If the URL points to a single repo, extract 'owner/repo'.
+
+    Handles:
+      https://api.github.com/repos/{owner}/{repo}
+      https://api.github.com/users/{owner}/repos/{repo}  (common user mistake)
+      https://github.com/{owner}/{repo}
+    """
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    parts = path.split("/")
+
+    # /repos/{owner}/{repo} — GitHub API format
+    if len(parts) == 4 and parts[1] == "repos":
+        return f"{parts[2]}/{parts[3]}"
+
+    # /users/{owner}/repos/{repo} — user pasted a repo name after the list URL
+    if len(parts) == 5 and parts[1] in ("users", "orgs") and parts[3] == "repos":
+        return f"{parts[2]}/{parts[4]}"
+
+    # /{owner}/{repo} — github.com web URL format
+    if parsed.netloc in ("github.com", "www.github.com") and len(parts) == 3 and parts[1]:
+        return f"{parts[1]}/{parts[2]}"
+
+    return None
+
+
 def _list_repos(
     client: httpx.Client,
-    base_url: str,
-    account_type: str,
-    org: str,
+    repos_url: str,
     repo_limit: int,
     *,
     run_id: str | None,
 ) -> list[str]:
-    """Return a list of 'owner/repo' strings for the org/user, up to repo_limit."""
-    if account_type == "user":
-        url = f"{base_url}/users/{org}/repos"
-    else:
-        url = f"{base_url}/orgs/{org}/repos"
+    """Return a list of 'owner/repo' strings by calling repos_url directly.
 
+    repos_url is the full endpoint stored in connection_registry, e.g.:
+      https://api.github.com/users/{username}/repos
+      https://api.github.com/orgs/{orgname}/repos
+    """
     repos: list[str] = []
     for repo in _paginate(
         client,
-        url,
+        repos_url,
         params={"per_page": 100, "type": "all", "sort": "updated"},
         run_id=run_id,
     ):
@@ -205,10 +258,10 @@ def _fetch_repo_alerts(
                 alert["repo_name"] = repo_full_name
                 alerts.append(alert)
     except httpx.HTTPStatusError as exc:
-        # 404 = Dependabot not enabled on this repo; 403 = no access.
-        # Both are expected for some repos — skip silently.
-        if exc.response.status_code in (403, 404):
+        # 404 = Dependabot not enabled on this repo — skip silently.
+        if exc.response.status_code == 404:
             return []
+        # 403 = token lacks permissions. Raise so the user knows.
         raise
 
     return alerts
@@ -225,33 +278,57 @@ def fetch(
     *,
     run_id: str | None = None,
 ) -> list[dict]:
-    """Fetch open Dependabot alerts across all repos in the configured org/user.
+    """Fetch open Dependabot alerts for the configured GitHub endpoint.
+
+    The endpoint in connection_registry can be:
+      1. A repos list URL (fetches alerts across all repos):
+           https://api.github.com/users/{username}/repos
+           https://api.github.com/orgs/{orgname}/repos
+      2. A single repo URL (fetches alerts for just that repo):
+           https://api.github.com/repos/{owner}/{repo}
+           https://github.com/{owner}/{repo}
+
+    Whatever the user pastes in the UI is used directly — no path appending
+    or hardcoded account names.
 
     Returns a flat list of raw alert dicts, one per alert, each augmented
     with 'repo_name' for asset_identity construction by Sub-Agent 1.
     """
-    base_url = (registry_entry.get("endpoint") or _DEFAULT_BASE_URL).rstrip("/")
-    metadata = registry_entry.get("metadata") or {}
-
-    account_type = metadata.get("account_type", "org")
-    org = (
-        metadata.get("org")
-        or getattr(settings, "github_org", "")
-        or os.environ.get("GITHUB_ORG", "")
-    )
-    if not org:
+    endpoint = registry_entry.get("endpoint", "").strip()
+    if not endpoint:
         raise ValueError(
-            "Dependabot connector: no org configured. "
-            "Set GITHUB_ORG in .env or update metadata.org in connection_registry."
+            "Dependabot connector: no endpoint configured. "
+            "Set the endpoint to a GitHub repos URL, e.g. "
+            "https://api.github.com/users/{username}/repos or "
+            "https://api.github.com/repos/{owner}/{repo}"
         )
 
+    # Derive the API base URL (scheme + host) for building alert URLs.
+    parsed = urlparse(endpoint)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    # If user pasted a github.com web URL, use the API host for API calls.
+    if parsed.netloc in ("github.com", "www.github.com"):
+        base_url = "https://api.github.com"
+
+    metadata = registry_entry.get("metadata") or {}
     repo_limit = int(metadata.get("repo_limit", _DEFAULT_REPO_LIMIT))
     per_page = min(int(metadata.get("per_page", _DEFAULT_PER_PAGE)), 100)
 
     cutoff = _parse_iso(last_fetched_at)
 
+    # Determine whether the endpoint is a repos list or a single repo.
+    single_repo = _extract_repo_full_name(endpoint)
+
     with httpx.Client(timeout=60, headers=_headers()) as client:
-        repos = _list_repos(client, base_url, account_type, org, repo_limit, run_id=run_id)
+        if single_repo:
+            # User pasted a single repo URL — scan just that repo.
+            repos = [single_repo]
+        elif _is_repos_list_url(endpoint):
+            # User pasted a repos list URL — enumerate repos from it.
+            repos = _list_repos(client, endpoint, repo_limit, run_id=run_id)
+        else:
+            # Unrecognized URL shape — try using it as a repos list anyway.
+            repos = _list_repos(client, endpoint, repo_limit, run_id=run_id)
 
         all_alerts: list[dict] = []
 

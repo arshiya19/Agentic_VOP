@@ -2,7 +2,9 @@
 -- Agentic_VOP — add GitHub Dependabot connector
 -- =============================================================================
 -- Registers Dependabot as a live scanner using the GitHub REST API.
--- Requires GITHUB_TOKEN + GITHUB_ORG in apps/api/.env.
+-- Requires GITHUB_TOKEN in apps/api/.env.
+-- The target account/org is configured via the endpoint URL in the UI —
+-- no hardcoded username or org name anywhere in this migration.
 --
 -- What this migration does:
 --   1. Extend the issues.source CHECK constraint to allow 'dependabot'
@@ -12,13 +14,16 @@
 -- Idempotent: safe to re-run (uses ON CONFLICT / IF NOT EXISTS).
 -- =============================================================================
 
--- requires personal token (ghp_...), if org or user, user name
+-- Requires GITHUB_TOKEN (ghp_... personal token or a GitHub App installation
+-- token with the 'security_events' scope) in apps/api/.env.
 
 -- =============================================================================
 -- 1. Extend issues.source CHECK constraint
 -- =============================================================================
 -- The current constraint was set in 0010. We drop and recreate it to add
 -- 'dependabot'. All existing values are preserved.
+
+-- structure for the REST API endpoint should be https://api.github.com/users/{your-username}/repos
 
 ALTER TABLE issues DROP CONSTRAINT IF EXISTS issues_source_check;
 
@@ -40,12 +45,17 @@ ALTER TABLE issues
 -- =============================================================================
 -- 2. connection_registry — how to reach GitHub Dependabot
 -- =============================================================================
--- The connector reads GITHUB_TOKEN + GITHUB_ORG from the environment at
--- runtime (via config.py). The endpoint here is the GitHub REST API base URL.
--- `org` in metadata is the fallback if GITHUB_ORG is not set in the env.
+-- The connector reads GITHUB_TOKEN from the environment at runtime (config.py).
+-- The endpoint is the full GitHub repos list URL for the target account.
+-- The connector uses this URL directly to list repos, then derives the API
+-- base URL (scheme + host) from it to build per-repo alert URLs.
 --
--- To target a personal account instead of an org, set metadata.account_type
--- to 'user' and metadata.org to the GitHub username.
+-- Examples:
+--   Personal account : https://api.github.com/users/{username}/repos
+--   Organisation     : https://api.github.com/orgs/{orgname}/repos
+--
+-- To change the target, update the endpoint via the UI or PATCH
+-- /admin/scanners/dependabot — no metadata fields need to change.
 
 INSERT INTO connection_registry (
   tool, protocol, auth_type, endpoint, auth_ref, timeout_sec, enabled, metadata
@@ -53,27 +63,26 @@ INSERT INTO connection_registry (
   'dependabot',
   'REST',
   'bearer_token',
-  'https://api.github.com',
+  'https://api.github.com/users/{your-username}/repos',
   'env://GITHUB_TOKEN',
   60,
   true,
   jsonb_build_object(
     'connector_type',  'dependabot_api',
-    'account_type',    'user',
-    'org',             'arshiya19',
     'repo_limit',      50,
     'per_page',        100,
-    'note',            'GitHub Dependabot alerts via REST API v3.'
+    'note',            'GitHub Dependabot alerts via REST API v3. Set endpoint to the full repos list URL for your account or org.'
   )
 )
 ON CONFLICT (tool) DO UPDATE SET
   protocol    = EXCLUDED.protocol,
   auth_type   = EXCLUDED.auth_type,
-  endpoint    = EXCLUDED.endpoint,
+  -- Do NOT overwrite endpoint — preserve whatever the user set via the UI.
+  -- To reset the endpoint, use PATCH /admin/scanners/dependabot.
   auth_ref    = EXCLUDED.auth_ref,
   timeout_sec = EXCLUDED.timeout_sec,
   enabled     = EXCLUDED.enabled,
-  metadata    = EXCLUDED.metadata,
+  metadata    = connection_registry.metadata || EXCLUDED.metadata,
   updated_at  = now();
 
 
@@ -204,11 +213,16 @@ ON CONFLICT (scanner, source_field, canonical_field) DO UPDATE SET
   notes      = EXCLUDED.notes,
   updated_at = now();
 
+-- (no trailing UPDATE needed — the INSERT ... ON CONFLICT above is the
+--  single source of truth for the dependabot registry row)
+
+-- =============================================================================
+-- 4. Reset watermark — force a full re-fetch on next scan
+-- =============================================================================
+-- Clears last_fetched_at so the connector does not skip alerts that were
+-- already fetched before this migration was applied. Without this, the
+-- watermark filter would suppress all existing alerts.
+
 UPDATE connection_registry
-SET 
-  endpoint = 'https://api.github.com',
-  metadata = jsonb_set(
-    jsonb_set(metadata, '{org}', '"arshiya19"'),
-    '{account_type}', '"user"'
-  )
+SET last_fetched_at = NULL
 WHERE tool = 'dependabot';
