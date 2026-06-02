@@ -26,6 +26,8 @@ dependencies = [
     "starlette>=1.0.1",
     # MITRE CWE catalog is distributed as a zipped XML feed; lxml parses it.
     "lxml>=5.3.0",
+    # AES-256-GCM encryption for sensitive scanner credentials at rest.
+    "cryptography>=44.0.0",
 ]
 
 [dependency-groups]

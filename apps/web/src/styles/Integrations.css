@@ -245,6 +245,9 @@
   padding: 32px;
   width: 420px;
   max-width: 95%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--border-color);
   animation: fadeIn 0.2s ease;
 
@@ -267,6 +270,7 @@
   gap: 14px;
   margin-top: 24px;
   justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .integration-close-btn {
@@ -276,15 +280,21 @@
   color: white;
   cursor: pointer;
   transition: all 0.2s ease;
-  border-color: #06B6D4;
+  border: 1px solid #06B6D4;
 }
 
 .integration-close-btn:hover {
   background: var(--bg-hover);
-  border-color: #06B6D4;
 }
 
 /* Form */
+.integration-form {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 4px;
+}
+
 .integration-form input {
   width: 100%;
   margin-bottom: 12px;
@@ -329,7 +339,7 @@
 .sem-method-btn {
   background: transparent;
   color: #94A3B8;
-  border: 1px solid var(--border-color);
+  border: 1px solid #06B6D4;
   padding: 6px 14px;
   border-radius: 8px;
   cursor: pointer;
@@ -412,16 +422,13 @@
 
 /* Source-type tab strip (API vs File) above the form */
 .sem-source-tabs {
-  display: inline-flex;
-  background: #0B0F19;
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 3px;
+  display: flex;
+  gap: 8px;
   margin: 4px 0 16px;
 }
 .sem-source-tab {
   background: transparent;
-  border: none;
+  border: 1px solid #06B6D4;
   color: #94A3B8;
   padding: 6px 14px;
   border-radius: 8px;
@@ -433,6 +440,7 @@
 .sem-source-tab.active {
   background: #06B6D4;
   color: #042A33;
+  border-color: #06B6D4;
   font-weight: 500;
 }
 .sem-source-tab:hover:not(.active) {
