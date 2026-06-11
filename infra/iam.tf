@@ -291,6 +291,7 @@ resource "aws_iam_role_policy" "infra_apply" {
           "iam:DeleteRole",
           "iam:GetRole",
           "iam:UpdateRole",
+          "iam:UpdateAssumeRolePolicy",
           "iam:PutRolePolicy",
           "iam:DeleteRolePolicy",
           "iam:GetRolePolicy",
