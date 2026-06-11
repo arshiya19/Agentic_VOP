@@ -1,0 +1,330 @@
+# =============================================================================
+# Agentic_VOP — Lambda Deployment Pipeline
+# =============================================================================
+# Triggered by changes to lambdas/** directory.
+#
+# On PR:
+#   - Run ruff lint + pytest against Lambda code
+#   - Block merge on any failure
+#
+# On merge to main:
+#   - Package Lambda code as zip (shared/ + nvd_sync/ + dependencies)
+#   - Upload to S3 with git-sha key and metadata tags
+#   - Verify artifact integrity (exists + size >0)
+#   - Auto-deploy to dev environment
+#   - Require manual approval for prod (same artifact)
+#   - Enforce Terraform apply before Lambda deploy when infra/ also changes
+#
+# Requirements: 13.1–13.7, 23.2, 23.4–23.6
+# =============================================================================
+
+name: Lambda Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lambdas/**"
+      - "infra/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "lambdas/**"
+
+concurrency:
+  group: lambda-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: us-east-1
+  S3_BUCKET: sisyfix-lambda-artifacts-486655355038
+  PYTHON_VERSION: "3.11"
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # 1. PR Validation — Lint + Test (runs on PRs only)
+  # ---------------------------------------------------------------------------
+  validate:
+    name: "Validate · Lint + Test"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install ruff pytest boto3 urllib3 hypothesis moto[dynamodb]
+          if [ -f lambdas/requirements.txt ]; then
+            pip install -r lambdas/requirements.txt
+          fi
+
+      - name: Ruff lint
+        run: ruff check lambdas/
+
+      - name: Ruff format check
+        run: ruff format --check lambdas/
+
+      - name: Run pytest
+        run: |
+          pytest lambdas/ -v --tb=short
+        env:
+          PYTHONPATH: .
+
+  # ---------------------------------------------------------------------------
+  # 2. Check changes — Determine if infra and/or lambdas changed (merge only)
+  # ---------------------------------------------------------------------------
+  check-changes:
+    name: "Check Changed Paths"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      infra_changed: ${{ steps.changes.outputs.infra }}
+      lambdas_changed: ${{ steps.changes.outputs.lambdas }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed paths
+        id: changes
+        run: |
+          # Compare HEAD with previous commit to detect changed paths
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if echo "$CHANGED_FILES" | grep -q "^infra/"; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "infra=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED_FILES" | grep -q "^lambdas/"; then
+            echo "lambdas=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "lambdas=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 3. Terraform Apply (Dev) — Runs only when infra/ changed on merge
+  #    Enforces infra before Lambda deploy via job dependency
+  # ---------------------------------------------------------------------------
+  terraform-apply-dev:
+    name: "Terraform Apply · Dev"
+    if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.check-changes.outputs.infra_changed == 'true'
+    needs: [check-changes]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-terraform-apply-dev
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -backend-config=backend/dev.hcl
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: terraform apply -auto-approve -var-file=environments/dev.tfvars
+
+  # ---------------------------------------------------------------------------
+  # 4. Package Lambda — Build zip artifact (merge only, when lambdas changed)
+  #    Depends on terraform-apply-dev to enforce infra-before-lambda ordering.
+  #    Runs when terraform-apply-dev succeeds OR was skipped (lambdas-only change).
+  #    Fails if terraform-apply-dev actually failed (both infra + lambdas changed).
+  # ---------------------------------------------------------------------------
+  package:
+    name: "Package Lambda"
+    needs: [check-changes, terraform-apply-dev]
+    if: |
+      always() &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.check-changes.outputs.lambdas_changed == 'true' &&
+      (needs.terraform-apply-dev.result == 'success' || needs.terraform-apply-dev.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_key: ${{ steps.upload.outputs.artifact_key }}
+      git_sha: ${{ steps.meta.outputs.git_sha }}
+      built_at: ${{ steps.meta.outputs.built_at }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set metadata
+        id: meta
+        run: |
+          echo "git_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Lambda dependencies
+        run: |
+          mkdir -p build/package
+          if [ -f lambdas/requirements.txt ]; then
+            pip install -r lambdas/requirements.txt -t build/package/
+          fi
+
+      - name: Copy Lambda source
+        run: |
+          mkdir -p build/package/lambdas
+          cp -r lambdas/shared build/package/lambdas/shared
+          cp -r lambdas/nvd_sync build/package/lambdas/nvd_sync
+          touch build/package/lambdas/__init__.py
+
+      - name: Create zip artifact
+        run: |
+          cd build/package
+          zip -r ../../lambda.zip . -x "*.pyc" "__pycache__/*" "*.dist-info/*"
+          cd ../..
+          echo "Zip size: $(stat --format=%s lambda.zip) bytes"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-lambda-deploy-dev
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-lambda-package
+
+      - name: Upload to S3
+        id: upload
+        run: |
+          ARTIFACT_KEY="nvd-sync/${{ github.sha }}/lambda.zip"
+          echo "artifact_key=${ARTIFACT_KEY}" >> "$GITHUB_OUTPUT"
+
+          aws s3 cp lambda.zip "s3://${S3_BUCKET}/${ARTIFACT_KEY}" \
+            --metadata "git-sha=${{ github.sha }},built-at=${{ steps.meta.outputs.built_at }}"
+
+          echo "Uploaded: s3://${S3_BUCKET}/${ARTIFACT_KEY}"
+
+      - name: Verify artifact upload
+        run: |
+          ARTIFACT_KEY="nvd-sync/${{ github.sha }}/lambda.zip"
+
+          # Check object exists and get size
+          SIZE=$(aws s3api head-object \
+            --bucket "${S3_BUCKET}" \
+            --key "${ARTIFACT_KEY}" \
+            --query "ContentLength" \
+            --output text)
+
+          if [ -z "$SIZE" ] || [ "$SIZE" = "0" ] || [ "$SIZE" = "None" ]; then
+            echo "::error::Artifact verification failed — object missing or empty"
+            exit 1
+          fi
+
+          echo "Artifact verified: ${SIZE} bytes at s3://${S3_BUCKET}/${ARTIFACT_KEY}"
+
+  # ---------------------------------------------------------------------------
+  # 5. Deploy to Dev — Auto-deploy after successful package + upload
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    name: "Deploy · Dev"
+    needs: [package]
+    if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.package.result == 'success'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-lambda-deploy-dev
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-lambda-deploy-dev
+
+      - name: Deploy Lambda to Dev
+        run: |
+          aws lambda update-function-code \
+            --function-name sisyfix-dev-nvd-sync \
+            --s3-bucket "${S3_BUCKET}" \
+            --s3-key "${{ needs.package.outputs.artifact_key }}"
+
+      - name: Wait for update to complete
+        run: |
+          aws lambda wait function-updated \
+            --function-name sisyfix-dev-nvd-sync
+
+      - name: Verify deployment
+        run: |
+          # Confirm the function is in Active state
+          STATE=$(aws lambda get-function-configuration \
+            --function-name sisyfix-dev-nvd-sync \
+            --query "State" \
+            --output text)
+
+          if [ "$STATE" != "Active" ]; then
+            echo "::error::Lambda function is in state '${STATE}', expected 'Active'"
+            exit 1
+          fi
+
+          echo "Dev deployment successful — function state: ${STATE}"
+
+  # ---------------------------------------------------------------------------
+  # 6. Deploy to Prod — Requires manual approval via GitHub Environment gate
+  # ---------------------------------------------------------------------------
+  deploy-prod:
+    name: "Deploy · Prod"
+    needs: [package, deploy-dev]
+    if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.deploy-dev.result == 'success'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-lambda-deploy-prod
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-lambda-deploy-prod
+
+      - name: Deploy Lambda to Prod
+        run: |
+          aws lambda update-function-code \
+            --function-name sisyfix-prod-nvd-sync \
+            --s3-bucket "${S3_BUCKET}" \
+            --s3-key "${{ needs.package.outputs.artifact_key }}"
+
+      - name: Wait for update to complete
+        run: |
+          aws lambda wait function-updated \
+            --function-name sisyfix-prod-nvd-sync
+
+      - name: Verify deployment
+        run: |
+          STATE=$(aws lambda get-function-configuration \
+            --function-name sisyfix-prod-nvd-sync \
+            --query "State" \
+            --output text)
+
+          if [ "$STATE" != "Active" ]; then
+            echo "::error::Lambda function is in state '${STATE}', expected 'Active'"
+            exit 1
+          fi
+
+          echo "Prod deployment successful — function state: ${STATE}"

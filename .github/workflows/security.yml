@@ -4,11 +4,13 @@
 # Runs on every push (all branches) and every pull request.
 #
 # Jobs (all parallel):
-#   bandit      — Python SAST (apps/api)
-#   semgrep     — JS/JSX SAST + SQL injection patterns (apps/web, supabase/)
-#   gitleaks    — Secrets / credential scanning (whole repo)
-#   pip-audit   — Python SCA via uv.lock export (apps/api)
-#   npm-audit   — JS SCA via package-lock.json (apps/web)
+#   bandit         — Python SAST (apps/api)
+#   bandit-lambdas — Python SAST (lambdas/)
+#   semgrep        — JS/JSX SAST + SQL injection patterns + Python SAST (apps/web, supabase/, lambdas/)
+#   gitleaks       — Secrets / credential scanning (whole repo)
+#   pip-audit      — Python SCA via uv.lock export (apps/api)
+#   pip-audit-lambdas — Python SCA via requirements.txt (lambdas/)
+#   npm-audit      — JS SCA via package-lock.json (apps/web)
 #
 # Gate logic (enforced in every job, not just the final gate job):
 #   Critical / High  → exit 1  → pipeline fails  → PR cannot merge
@@ -103,17 +105,85 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # 2. Semgrep — JS/JSX SAST + SQL patterns
+  # 1b. Bandit — Python SAST (Lambdas)
+  # ---------------------------------------------------------------------------
+  bandit-lambdas:
+    name: "SAST · Python Lambdas (Bandit)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit
+        id: bandit_run
+        run: |
+          bandit -r lambdas \
+            -f json \
+            -o bandit-lambdas-report.json \
+            --confidence-level medium \
+            --severity-level low \
+            --exit-zero \
+            -x lambdas/nvd_sync/tests,lambdas/shared/tests
+
+      - name: Evaluate Bandit results
+        run: |
+          python - <<'EOF'
+          import json, sys, os
+
+          report_path = "bandit-lambdas-report.json"
+          if not os.path.exists(report_path) or os.path.getsize(report_path) == 0:
+              print("::error::bandit-lambdas-report.json is missing or empty — Bandit likely failed to run.")
+              print("Check the 'Run Bandit' step output above for the actual error.")
+              sys.exit(1)
+
+          with open(report_path) as f:
+              report = json.load(f)
+
+          results = report.get("results", [])
+          high_block   = [r for r in results if r["issue_severity"] in ("HIGH", "CRITICAL")]
+          medium_warn  = [r for r in results if r["issue_severity"] == "MEDIUM"]
+          low_warn     = [r for r in results if r["issue_severity"] == "LOW"]
+
+          if medium_warn or low_warn:
+              print("::warning::Bandit (lambdas) — Medium/Low findings (non-blocking):")
+              for r in medium_warn + low_warn:
+                  print(f"  [{r['issue_severity']}] {r['filename']}:{r['line_number']} — {r['issue_text']}")
+
+          if high_block:
+              print("::error::Bandit (lambdas) — Critical/High findings BLOCK this pipeline:")
+              for r in high_block:
+                  print(f"  [{r['issue_severity']}] {r['filename']}:{r['line_number']} — {r['issue_text']}")
+              sys.exit(1)
+
+          print(f"Bandit (lambdas) passed. High/Critical: 0 | Medium: {len(medium_warn)} | Low: {len(low_warn)}")
+          EOF
+
+      - name: Upload Bandit Lambdas report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-lambdas-report
+          path: bandit-lambdas-report.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 2. Semgrep — JS/JSX SAST + SQL patterns + Python SAST (lambdas)
   # ---------------------------------------------------------------------------
   semgrep:
-    name: "SAST · JS/SQL (Semgrep)"
+    name: "SAST · JS/SQL/Python (Semgrep)"
     runs-on: ubuntu-latest
     container:
       image: semgrep/semgrep:1.127.0
     steps:
       - uses: actions/checkout@v4
 
-      # Run OSS rule packs for JS/TS security + generic secrets + SQL injection.
+      # Run OSS rule packs for JS/TS security + generic secrets + SQL injection + Python security.
       # Output JSON for gate parsing.
       - name: Run Semgrep
         run: |
@@ -122,10 +192,12 @@ jobs:
             --config "p/react" \
             --config "p/sql-injection" \
             --config "p/secrets" \
+            --config "p/python" \
             --json \
             --output semgrep-report.json \
             apps/web/src \
             supabase/migrations \
+            lambdas \
             || true
 
       - name: Evaluate Semgrep results
@@ -291,6 +363,87 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
+  # 4b. pip-audit — Python SCA (lambdas/requirements.txt)
+  # ---------------------------------------------------------------------------
+  pip-audit-lambdas:
+    name: "SCA · Python Lambdas (pip-audit)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit
+        working-directory: lambdas
+        run: |
+          pip-audit \
+            -r requirements.txt \
+            --desc on \
+            --format json \
+            -o pip-audit-lambdas-report.json \
+            || true
+
+      - name: Evaluate pip-audit results
+        working-directory: lambdas
+        run: |
+          python - <<'EOF'
+          import json, sys
+
+          with open("pip-audit-lambdas-report.json") as f:
+              report = json.load(f)
+
+          dependencies = report.get("dependencies", [])
+          blocking = []
+          warnings = []
+
+          for dep in dependencies:
+              for vuln in dep.get("vulns", []):
+                  entry = {
+                      "package": dep["name"],
+                      "version": dep["version"],
+                      "id": vuln["id"],
+                      "aliases": vuln.get("aliases", []),
+                      "fix_versions": vuln.get("fix_versions", []),
+                      "description": vuln.get("description", "")[:200],
+                  }
+                  if vuln.get("fix_versions"):
+                      blocking.append(entry)
+                  else:
+                      warnings.append(entry)
+
+          if warnings:
+              print("::warning::pip-audit (lambdas) — Vulnerabilities with NO FIX available (non-blocking):")
+              for v in warnings:
+                  print(
+                      f"  {v['package']}=={v['version']} "
+                      f"[{v['id']}] fix: no fix available — "
+                      f"{v['description']}"
+                  )
+
+          if blocking:
+              print("::error::pip-audit (lambdas) — Vulnerable dependencies BLOCK this pipeline:")
+              for v in blocking:
+                  fix = ", ".join(v["fix_versions"]) or "no fix available"
+                  print(f"  {v['package']}=={v['version']} [{v['id']}] fix: {fix} — {v['description']}")
+              sys.exit(1)
+
+          print("pip-audit (lambdas) passed. No known vulnerabilities in locked dependencies.")
+          EOF
+
+      - name: Upload pip-audit lambdas report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-lambdas-report
+          path: lambdas/pip-audit-lambdas-report.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
   # 5. npm audit — JS SCA
   # ---------------------------------------------------------------------------
   npm-audit:
@@ -367,7 +520,7 @@ jobs:
   gate:
     name: "Security Gate"
     runs-on: ubuntu-latest
-    needs: [bandit, semgrep, gitleaks, pip-audit, npm-audit]
+    needs: [bandit, bandit-lambdas, semgrep, gitleaks, pip-audit, pip-audit-lambdas, npm-audit]
     # Run even if upstream jobs failed so we always emit a clear summary.
     if: always()
     steps:
