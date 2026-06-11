@@ -254,19 +254,7 @@ resource "aws_iam_role_policy" "infra_apply" {
         Sid    = "TerraformApplyLambda"
         Effect = "Allow"
         Action = [
-          "lambda:CreateFunction",
-          "lambda:UpdateFunctionCode",
-          "lambda:UpdateFunctionConfiguration",
-          "lambda:DeleteFunction",
-          "lambda:GetFunction",
-          "lambda:GetFunctionConfiguration",
-          "lambda:GetPolicy",
-          "lambda:AddPermission",
-          "lambda:RemovePermission",
-          "lambda:PutFunctionConcurrency",
-          "lambda:TagResource",
-          "lambda:UntagResource",
-          "lambda:ListTags"
+          "lambda:*"
         ]
         Resource = "arn:aws:lambda:${var.aws_region}:${local.account_id}:function:sisyfix-${var.env}-nvd-sync"
       },
