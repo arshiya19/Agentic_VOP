@@ -288,15 +288,12 @@ resource "aws_iam_role_policy" "infra_apply" {
         Sid    = "TerraformApplySSM"
         Effect = "Allow"
         Action = [
-          "ssm:PutParameter",
-          "ssm:DeleteParameter",
-          "ssm:GetParameter",
-          "ssm:DescribeParameters",
-          "ssm:AddTagsToResource",
-          "ssm:RemoveTagsFromResource",
-          "ssm:ListTagsForResource"
+          "ssm:*"
         ]
-        Resource = local.ssm_nvd_api_key_arn
+        Resource = [
+          local.ssm_nvd_api_key_arn,
+          "arn:aws:ssm:${var.aws_region}:${local.account_id}:*"
+        ]
       },
       {
         Sid    = "TerraformApplyIAM"
@@ -313,9 +310,18 @@ resource "aws_iam_role_policy" "infra_apply" {
           "iam:ListAttachedRolePolicies",
           "iam:TagRole",
           "iam:UntagRole",
-          "iam:PassRole"
+          "iam:PassRole",
+          "iam:CreateOpenIDConnectProvider",
+          "iam:DeleteOpenIDConnectProvider",
+          "iam:GetOpenIDConnectProvider",
+          "iam:UpdateOpenIDConnectProviderThumbprint",
+          "iam:TagOpenIDConnectProvider",
+          "iam:ListOpenIDConnectProviders"
         ]
-        Resource = "arn:aws:iam::${local.account_id}:role/sisyfix-*"
+        Resource = [
+          "arn:aws:iam::${local.account_id}:role/sisyfix-*",
+          "arn:aws:iam::${local.account_id}:oidc-provider/token.actions.githubusercontent.com"
+        ]
       },
       {
         Sid    = "TerraformApplyEvents"
@@ -337,21 +343,12 @@ resource "aws_iam_role_policy" "infra_apply" {
         Sid    = "TerraformApplyS3"
         Effect = "Allow"
         Action = [
-          "s3:CreateBucket",
-          "s3:DeleteBucket",
-          "s3:PutBucketPolicy",
-          "s3:DeleteBucketPolicy",
-          "s3:GetBucketPolicy",
-          "s3:PutBucketVersioning",
-          "s3:GetBucketVersioning",
-          "s3:PutLifecycleConfiguration",
-          "s3:GetLifecycleConfiguration",
-          "s3:PutEncryptionConfiguration",
-          "s3:GetEncryptionConfiguration",
-          "s3:PutBucketTagging",
-          "s3:GetBucketTagging"
+          "s3:*"
         ]
-        Resource = "arn:aws:s3:::sisyfix-lambda-artifacts-486655355038"
+        Resource = [
+          "arn:aws:s3:::sisyfix-lambda-artifacts-486655355038",
+          "arn:aws:s3:::sisyfix-lambda-artifacts-486655355038/*"
+        ]
       },
       {
         Sid    = "TerraformApplyCloudWatch"
@@ -370,18 +367,12 @@ resource "aws_iam_role_policy" "infra_apply" {
         Sid    = "TerraformApplySNS"
         Effect = "Allow"
         Action = [
-          "sns:CreateTopic",
-          "sns:DeleteTopic",
-          "sns:GetTopicAttributes",
-          "sns:SetTopicAttributes",
-          "sns:Subscribe",
-          "sns:Unsubscribe",
-          "sns:ListSubscriptionsByTopic",
-          "sns:TagResource",
-          "sns:UntagResource",
-          "sns:ListTagsForResource"
+          "sns:*"
         ]
-        Resource = "arn:aws:sns:${var.aws_region}:${local.account_id}:sisyfix-${var.env}-alerts"
+        Resource = [
+          "arn:aws:sns:${var.aws_region}:${local.account_id}:sisyfix-${var.env}-alerts",
+          "arn:aws:sns:${var.aws_region}:${local.account_id}:sisyfix-${var.env}-alerts:*"
+        ]
       },
       {
         Sid    = "TerraformStateAccess"
