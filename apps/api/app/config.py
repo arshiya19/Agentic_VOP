@@ -52,5 +52,20 @@ class Settings(BaseSettings):
     # only for local development.
     enforce_https_endpoints: bool = True
 
+    # --- Intelligence Layer (DynamoDB) ---
+    # DynamoDB table name for vulnerability intelligence lookups.
+    # Pattern: sisyfix-{env}-vulnerability-intelligence
+    intelligence_table_name: str = ""
+
+    # AWS region for the intelligence DynamoDB table.
+    intelligence_aws_region: str = "us-east-1"
+
+    # Feature flag for gradual rollout of DynamoDB-backed lookups.
+    # When False, falls back to direct NVD API calls.
+    intelligence_enabled: bool = False
+
+    # Threshold for cache misses before emitting CacheMissesLookupFailed metric.
+    max_sync_cache_misses: int = 10
+
 
 settings = Settings()

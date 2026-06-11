@@ -1,0 +1,176 @@
+# =============================================================================
+# Drift Detection — Weekly Infrastructure Plan Check
+# =============================================================================
+# Runs every Monday at 6 AM UTC via cron schedule.
+#
+# Executes `terraform plan` against both dev and prod environments.
+# If drift is detected (non-empty plan) or if the plan command fails,
+# a GitHub issue is created with environment name and details.
+#
+# Requirements: 14.3–14.5
+# =============================================================================
+
+name: Drift Detection
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 6 AM UTC
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.5.7"
+
+jobs:
+  drift-check:
+    name: "Drift · ${{ matrix.environment }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-plan
+          role-session-name: drift-detection-${{ matrix.environment }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        id: init
+        working-directory: infra
+        run: |
+          terraform init -backend-config=backend/${{ matrix.environment }}.hcl -input=false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: infra
+        continue-on-error: true
+        run: |
+          terraform plan \
+            -var-file=environments/${{ matrix.environment }}.tfvars \
+            -detailed-exitcode \
+            -input=false \
+            -no-color \
+            -out=plan.tfplan 2>&1 | tee plan_output.txt
+
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate plan result
+        id: evaluate
+        working-directory: infra
+        run: |
+          EXIT_CODE="${{ steps.plan.outputs.exitcode }}"
+
+          if [ "$EXIT_CODE" = "0" ]; then
+            echo "status=no_drift" >> "$GITHUB_OUTPUT"
+            echo "✅ No drift detected in ${{ matrix.environment }}"
+          elif [ "$EXIT_CODE" = "2" ]; then
+            echo "status=drift_detected" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Drift detected in ${{ matrix.environment }}"
+
+            # Extract resource summary from plan output
+            SUMMARY=$(grep -E '^\s*(#|Plan:)' plan_output.txt | head -20 || echo "See workflow run for details")
+            echo "summary<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$SUMMARY" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "❌ Terraform plan failed in ${{ matrix.environment }}"
+
+            # Capture failure reason
+            FAILURE_REASON=$(tail -30 plan_output.txt || echo "Unknown error - see workflow run logs")
+            echo "failure_reason<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$FAILURE_REASON" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create issue for drift
+        if: steps.evaluate.outputs.status == 'drift_detected'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const env = '${{ matrix.environment }}';
+            const summary = `${{ steps.evaluate.outputs.summary }}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🔀 Infrastructure drift detected in ${env}`,
+              body: [
+                `## Drift Detected: \`${env}\` environment`,
+                '',
+                `**Detected:** ${new Date().toISOString()}`,
+                `**Workflow Run:** [View Details](${runUrl})`,
+                '',
+                '### Resources with drift',
+                '',
+                '```',
+                summary,
+                '```',
+                '',
+                '### Recommended actions',
+                '',
+                '1. Review the plan output in the [workflow run](' + runUrl + ')',
+                '2. If the drift is intentional, run `terraform apply` to update state',
+                '3. If the drift is unintentional, investigate the source of the change',
+              ].join('\n'),
+              labels: ['infrastructure', 'drift']
+            });
+
+      - name: Create issue for plan failure
+        if: steps.evaluate.outputs.status == 'failed'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const env = '${{ matrix.environment }}';
+            const failureReason = `${{ steps.evaluate.outputs.failure_reason }}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `❌ Drift detection plan failed for ${env}`,
+              body: [
+                `## Terraform Plan Failed: \`${env}\` environment`,
+                '',
+                `**Detected:** ${new Date().toISOString()}`,
+                `**Workflow Run:** [View Details](${runUrl})`,
+                '',
+                '### Failure reason',
+                '',
+                '```',
+                failureReason,
+                '```',
+                '',
+                '### Recommended actions',
+                '',
+                '1. Check the [workflow run logs](' + runUrl + ') for full details',
+                '2. Verify AWS credentials and backend state access',
+                '3. Check for Terraform provider or configuration issues',
+              ].join('\n'),
+              labels: ['infrastructure', 'drift', 'failure']
+            });
+
+      - name: Fail step on plan failure
+        if: steps.evaluate.outputs.status == 'failed'
+        run: |
+          echo "::error::Terraform plan failed for ${{ matrix.environment }} environment"
+          exit 1
