@@ -204,6 +204,7 @@ resource "aws_iam_role" "infra_apply" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid    = "AllowGitHubOIDCDeploy"
         Effect = "Allow"
         Principal = {
           Federated = local.github_oidc_provider_arn
@@ -211,8 +212,10 @@ resource "aws_iam_role" "infra_apply" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:ref:refs/heads/main"
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
           }
         }
       }
@@ -402,6 +405,7 @@ resource "aws_iam_role" "lambda_deploy" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid    = "AllowGitHubOIDCDeploy"
         Effect = "Allow"
         Principal = {
           Federated = local.github_oidc_provider_arn
@@ -409,8 +413,10 @@ resource "aws_iam_role" "lambda_deploy" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:ref:refs/heads/main"
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
           }
         }
       }
@@ -465,6 +471,7 @@ resource "aws_iam_role" "backfill" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid    = "AllowGitHubOIDCDeploy"
         Effect = "Allow"
         Principal = {
           Federated = local.github_oidc_provider_arn
@@ -472,8 +479,10 @@ resource "aws_iam_role" "backfill" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:ref:refs/heads/main"
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
           }
         }
       }
