@@ -72,11 +72,14 @@ data "aws_iam_policy_document" "oidc_trust_deploy" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Main branch only — exact match
+    # Allow both direct push to main and environment-based deployments
     condition {
-      test     = "StringEquals"
+      test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:refs/heads/main"]
+      values = [
+        "repo:${var.github_repository}:ref:refs/heads/main",
+        "repo:${var.github_repository}:environment:*"
+      ]
     }
   }
 }
