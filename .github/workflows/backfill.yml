@@ -69,4 +69,4 @@ jobs:
         run: pip install -r lambdas/requirements.txt
 
       - name: Run Backfill CLI
-        run: python -m lambdas.nvd_sync.backfill ${{ inputs.environment }}
+        run: python -m lambdas.nvd_sync.backfill --env ${{ inputs.environment }}
