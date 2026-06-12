@@ -25,7 +25,7 @@ resource "aws_lambda_function" "nvd_sync" {
 
   environment {
     variables = {
-      ENV                  = var.env
+      ENVIRONMENT          = var.env
       INTELLIGENCE_TABLE   = aws_dynamodb_table.intelligence.name
       SSM_NVD_API_KEY_NAME = aws_ssm_parameter.nvd_api_key.name
     }
