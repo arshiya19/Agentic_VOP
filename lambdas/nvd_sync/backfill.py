@@ -1,8 +1,12 @@
 """Backfill CLI for historical NVD data loading.
 
-A standalone script that performs one-time bulk loading of NVD yearly
-JSON feed files into the Intelligence_Table. Supports resumption from
-the last completed year via a progress checkpoint.
+A standalone script that performs one-time bulk loading of NVD CVE data
+into the Intelligence_Table via the NVD 2.0 REST API. Supports resumption
+from the last completed year via a progress checkpoint.
+
+The NVD yearly JSON feed files (nvdcve-2.0-{year}.json.gz) were retired by
+NIST in late 2023. This module uses the live NVD 2.0 API with date-range
+pagination instead, ensuring complete coverage for all years.
 
 Usage:
     python -m lambdas.nvd_sync.backfill --env dev
@@ -11,23 +15,29 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 
+import boto3
+import urllib3
+from botocore.exceptions import ClientError
+
 from lambdas.nvd_sync.config import (
+    BASE_DELAY_SECONDS,
     MAX_RETRIES,
-    NVD_YEARLY_FEED_URL_PATTERN,
+    NVD_API_BASE_URL,
+    RATE_LIMIT_REQUESTS,
+    RATE_LIMIT_WINDOW_SECONDS,
+    get_ssm_api_key_path,
     get_table_name,
 )
 from lambdas.nvd_sync.transformer import transform_nvd_cve
 from lambdas.shared.dynamo_writer import DynamoWriter
-from lambdas.shared.exceptions import FeedDownloadError, TransformError, WriteError
-from lambdas.shared.feed_ingestion import download_and_decompress, parse_json_feed
-
-import boto3
-from botocore.exceptions import ClientError
+from lambdas.shared.exceptions import TransformError, WriteError
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +51,53 @@ BACKFILL_CHECKPOINT_SK = "NVD"
 SYNC_CHECKPOINT_PK = "SYSTEM#SYNC"
 SYNC_CHECKPOINT_SK = "NVD"
 
-# Download retry configuration
-DOWNLOAD_MAX_RETRIES = 3
-DOWNLOAD_BASE_DELAY_SECONDS = 1
+# NVD API pagination
+_RESULTS_PER_PAGE = 2000
 
-# Backfill max decompressed size (500 MB — larger than Lambda's 200 MB limit
-# because the CLI runs locally with ample memory)
-BACKFILL_MAX_FEED_SIZE = 500_000_000
+
+# ---------------------------------------------------------------------------
+# Rate limiter (identical to gap_recovery.py implementation)
+# ---------------------------------------------------------------------------
+
+
+class _RateLimiter:
+    """Rolling window rate limiter for NVD API requests."""
+
+    def __init__(
+        self,
+        max_requests: int = RATE_LIMIT_REQUESTS,
+        window_seconds: int = RATE_LIMIT_WINDOW_SECONDS,
+    ) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._timestamps: deque[float] = deque()
+
+    def wait_if_needed(self) -> None:
+        """Block until a request slot is available in the rolling window."""
+        now = time.monotonic()
+        self._evict_expired(now)
+
+        if len(self._timestamps) >= self.max_requests:
+            oldest = self._timestamps[0]
+            sleep_time = self.window_seconds - (now - oldest)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            self._evict_expired(time.monotonic())
+
+    def record_request(self) -> None:
+        """Record that a request was made at the current time."""
+        self._timestamps.append(time.monotonic())
+
+    def _evict_expired(self, now: float) -> None:
+        """Remove timestamps older than the rolling window."""
+        cutoff = now - self.window_seconds
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
+
+
+# ---------------------------------------------------------------------------
+# DynamoDB helpers
+# ---------------------------------------------------------------------------
 
 
 def _get_dynamodb_table(table_name: str):
@@ -58,9 +108,6 @@ def _get_dynamodb_table(table_name: str):
 
 def _read_backfill_checkpoint(table_name: str) -> int | None:
     """Read the backfill progress checkpoint from DynamoDB.
-
-    Args:
-        table_name: Name of the DynamoDB table.
 
     Returns:
         The last completed year, or None if no checkpoint exists.
@@ -83,12 +130,7 @@ def _read_backfill_checkpoint(table_name: str) -> int | None:
 
 
 def _write_backfill_checkpoint(table_name: str, year: int) -> None:
-    """Update the backfill progress checkpoint after a year completes.
-
-    Args:
-        table_name: Name of the DynamoDB table.
-        year: The year that just completed successfully.
-    """
+    """Update the backfill progress checkpoint after a year completes."""
     table = _get_dynamodb_table(table_name)
     now = datetime.now(timezone.utc).isoformat()
     table.put_item(
@@ -107,9 +149,6 @@ def _write_sync_checkpoint(table_name: str) -> None:
 
     This enables the Sync Lambda to begin ongoing incremental sync
     from the backfill completion time.
-
-    Args:
-        table_name: Name of the DynamoDB table.
     """
     table = _get_dynamodb_table(table_name)
     now = datetime.now(timezone.utc).isoformat()
@@ -124,98 +163,280 @@ def _write_sync_checkpoint(table_name: str) -> None:
     logger.info("Set sync checkpoint: last_successful_sync=%s", now)
 
 
-def _download_yearly_feed(year: int) -> bytes:
-    """Download and decompress a yearly NVD feed with retry logic.
+# ---------------------------------------------------------------------------
+# NVD API key retrieval
+# ---------------------------------------------------------------------------
 
-    Retries up to DOWNLOAD_MAX_RETRIES times with exponential backoff
-    on download failure.
 
-    Args:
-        year: The year to download the feed for.
+def _get_nvd_api_key(environment: str) -> str | None:
+    """Read NVD API key from SSM Parameter Store.
 
     Returns:
-        Decompressed feed data as bytes.
-
-    Raises:
-        FeedDownloadError: If all retry attempts are exhausted.
+        The API key string, or None if retrieval fails.
     """
-    url = NVD_YEARLY_FEED_URL_PATTERN.format(year=year)
-    last_error: FeedDownloadError | None = None
+    ssm = boto3.client("ssm")
+    param_path = get_ssm_api_key_path(environment)
+    try:
+        response = ssm.get_parameter(Name=param_path, WithDecryption=True)
+        return response["Parameter"]["Value"]
+    except ClientError as e:
+        logger.warning(
+            "Failed to retrieve NVD API key from SSM (%s): %s", param_path, e
+        )
+        return None
 
-    for attempt in range(DOWNLOAD_MAX_RETRIES):
+
+# ---------------------------------------------------------------------------
+# NVD API fetching
+# ---------------------------------------------------------------------------
+
+
+def _fetch_page_with_retry(
+    *,
+    http: urllib3.PoolManager,
+    api_key: str | None,
+    params: dict[str, str],
+    rate_limiter: _RateLimiter,
+) -> dict | None:
+    """Fetch a single page from the NVD 2.0 API with retry logic.
+
+    Retries up to MAX_RETRIES times with exponential backoff.
+
+    Returns:
+        Parsed JSON response dict, or None if all retries failed.
+    """
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["apiKey"] = api_key
+
+    query_string = "&".join(f"{k}={v}" for k, v in params.items())
+    url = f"{NVD_API_BASE_URL}?{query_string}"
+
+    for attempt in range(MAX_RETRIES + 1):
         if attempt > 0:
-            delay = DOWNLOAD_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            delay = BASE_DELAY_SECONDS * (2 ** (attempt - 1))
             logger.info(
-                "Retrying download for year %d (attempt %d/%d, delay %.1fs)",
-                year,
+                "Retrying NVD API request (attempt %d/%d, delay %ds)",
                 attempt + 1,
-                DOWNLOAD_MAX_RETRIES,
+                MAX_RETRIES + 1,
                 delay,
             )
             time.sleep(delay)
 
+        rate_limiter.wait_if_needed()
+
         try:
-            data = download_and_decompress(url, max_size=BACKFILL_MAX_FEED_SIZE)
-            logger.info(
-                "Downloaded and decompressed feed for year %d (%d bytes)",
-                year,
-                len(data),
+            response = http.request(
+                "GET",
+                url,
+                headers=headers,
+                timeout=30.0,
             )
-            return data
-        except FeedDownloadError as e:
-            last_error = e
+            rate_limiter.record_request()
+
+            if response.status == 200:
+                return json.loads(response.data.decode("utf-8"))
+
+            if response.status == 403:
+                logger.warning(
+                    "NVD API returned HTTP 403 — possible rate limit or invalid key"
+                )
+            elif response.status == 503:
+                logger.warning(
+                    "NVD API returned HTTP 503 — service temporarily unavailable"
+                )
+            else:
+                logger.warning("NVD API returned HTTP %d", response.status)
+
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Download failed for year %d (attempt %d/%d): %s",
-                year,
+                "NVD API request failed (attempt %d/%d): %s",
                 attempt + 1,
-                DOWNLOAD_MAX_RETRIES,
-                e,
+                MAX_RETRIES + 1,
+                exc,
             )
 
-    # All retries exhausted
-    raise last_error  # type: ignore[misc]
+    return None
 
 
-def _process_year(year: int, table_name: str, timestamp: str) -> bool:
-    """Process a single yearly feed: download, transform, write.
+def _build_date_windows(year: int) -> list[tuple[str, str]]:
+    """Split a calendar year into 120-day windows for NVD API compliance.
+
+    The NVD 2.0 API enforces a maximum range of 120 consecutive days
+    for date-range parameters. This function produces non-overlapping
+    windows covering the entire year.
+
+    Returns:
+        List of (start_date, end_date) tuples in ISO 8601 format with
+        UTC timezone offset as required by the NVD API.
+    """
+    from datetime import timedelta
+
+    window_days = 120
+    year_start = datetime(year, 1, 1, tzinfo=timezone.utc)
+    year_end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    windows: list[tuple[str, str]] = []
+    current_start = year_start
+
+    while current_start <= year_end:
+        current_end = min(current_start + timedelta(days=window_days - 1), year_end)
+        # NVD API expects ISO 8601 without timezone offset suffix
+        start_str = current_start.strftime("%Y-%m-%dT%H:%M:%S.000")
+        end_str = current_end.strftime("%Y-%m-%dT%H:%M:%S.999")
+        windows.append((start_str, end_str))
+        current_start = current_end + timedelta(seconds=1)
+
+    return windows
+
+
+def _fetch_window_from_api(
+    *,
+    http: urllib3.PoolManager,
+    api_key: str | None,
+    start_date: str,
+    end_date: str,
+    rate_limiter: _RateLimiter,
+    year: int,
+    window_idx: int,
+) -> list[dict] | None:
+    """Fetch all CVEs published in a single date window via pagination.
+
+    Returns:
+        List of NVD 2.0 vulnerability objects, or None on fatal failure.
+    """
+    all_items: list[dict] = []
+    start_index = 0
+    total_results: int | None = None
+
+    while True:
+        params = {
+            "pubStartDate": start_date,
+            "pubEndDate": end_date,
+            "startIndex": str(start_index),
+            "resultsPerPage": str(_RESULTS_PER_PAGE),
+        }
+
+        response_data = _fetch_page_with_retry(
+            http=http,
+            api_key=api_key,
+            params=params,
+            rate_limiter=rate_limiter,
+        )
+
+        if response_data is None:
+            logger.error(
+                "NVD API request failed after all retries for year %d "
+                "window %d (startIndex=%d)",
+                year,
+                window_idx,
+                start_index,
+            )
+            return None
+
+        if total_results is None:
+            total_results = response_data.get("totalResults", 0)
+            logger.info(
+                "Year %d window %d (%s → %s): %d CVEs",
+                year,
+                window_idx,
+                start_date[:10],
+                end_date[:10],
+                total_results,
+            )
+
+        vulnerabilities = response_data.get("vulnerabilities", [])
+        all_items.extend(vulnerabilities)
+
+        results_per_page = response_data.get("resultsPerPage", _RESULTS_PER_PAGE)
+        start_index += results_per_page
+
+        if start_index >= total_results:
+            break
+
+    return all_items
+
+
+def _fetch_year_from_api(
+    year: int,
+    api_key: str | None,
+    rate_limiter: _RateLimiter,
+) -> list[dict] | None:
+    """Fetch all CVEs published in a given year via the NVD 2.0 API.
+
+    Splits the year into 120-day windows (NVD API max range) and
+    paginates through each window.
+
+    Returns:
+        List of NVD 2.0 vulnerability objects, or None on fatal failure.
+    """
+    windows = _build_date_windows(year)
+    logger.info("Year %d: split into %d date window(s)", year, len(windows))
+
+    http = urllib3.PoolManager()
+    all_items: list[dict] = []
+
+    for idx, (start_date, end_date) in enumerate(windows):
+        window_items = _fetch_window_from_api(
+            http=http,
+            api_key=api_key,
+            start_date=start_date,
+            end_date=end_date,
+            rate_limiter=rate_limiter,
+            year=year,
+            window_idx=idx + 1,
+        )
+
+        if window_items is None:
+            logger.error(
+                "Aborting year %d: window %d failed after retries", year, idx + 1
+            )
+            return None
+
+        all_items.extend(window_items)
+
+    logger.info("Year %d: fetched %d total CVEs from NVD API", year, len(all_items))
+    return all_items
+
+
+# ---------------------------------------------------------------------------
+# Year processing
+# ---------------------------------------------------------------------------
+
+
+def _process_year(
+    year: int, table_name: str, timestamp: str, api_key: str | None
+) -> bool:
+    """Process a single year: fetch from API, transform, write to DynamoDB.
 
     Args:
         year: The year to process.
         table_name: DynamoDB table name.
         timestamp: ISO 8601 timestamp for metadata fields.
+        api_key: NVD API key (or None for unauthenticated, rate-limited access).
 
     Returns:
         True if the year was processed successfully, False on abort.
     """
-    # Download with retries
-    try:
-        raw_data = _download_yearly_feed(year)
-    except FeedDownloadError as e:
-        logger.error(
-            "Aborting backfill: failed to download year %d after %d retries: %s",
-            year,
-            DOWNLOAD_MAX_RETRIES,
-            e,
-        )
-        return False
+    rate_limiter = _RateLimiter()
 
-    # Parse JSON feed
-    try:
-        feed = parse_json_feed(raw_data)
-    except FeedDownloadError as e:
-        logger.error("Aborting backfill: failed to parse feed for year %d: %s", year, e)
-        return False
+    # Fetch all CVEs for this year from the NVD API
+    vulnerabilities = _fetch_year_from_api(year, api_key, rate_limiter)
 
-    # Extract vulnerabilities array (NVD 2.0 format)
-    vulnerabilities = feed.get("vulnerabilities", [])
-    if not isinstance(vulnerabilities, list):
+    if vulnerabilities is None:
         logger.error(
-            "Aborting backfill: 'vulnerabilities' field is not a list for year %d",
+            "Aborting backfill: failed to fetch year %d from NVD API after retries",
             year,
         )
         return False
 
-    logger.info("Processing year %d: %d CVE items", year, len(vulnerabilities))
+    if not vulnerabilities:
+        logger.info("Year %d: no CVEs found — skipping", year)
+        return True
+
+    logger.info(
+        "Processing year %d: %d CVE items to transform", year, len(vulnerabilities)
+    )
 
     # Transform CVEs
     items: list[dict] = []
@@ -259,6 +480,11 @@ def _process_year(year: int, table_name: str, timestamp: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
 def main(
     env: str, start_year: int = BACKFILL_START_YEAR, end_year: int = BACKFILL_END_YEAR
 ) -> int:
@@ -288,6 +514,16 @@ def main(
         end_year,
     )
 
+    # Retrieve NVD API key from SSM (optional but recommended for throughput)
+    api_key = _get_nvd_api_key(env)
+    if api_key:
+        logger.info("NVD API key retrieved from SSM — using authenticated rate limits")
+    else:
+        logger.warning(
+            "No NVD API key available — using unauthenticated rate limits "
+            "(5 requests per 30 seconds). Backfill will be significantly slower."
+        )
+
     # Read backfill checkpoint to determine resume point
     last_completed = _read_backfill_checkpoint(table_name)
     if last_completed is not None and last_completed >= start_year:
@@ -311,7 +547,7 @@ def main(
     # Process each year
     for year in range(resume_year, end_year + 1):
         logger.info("--- Processing year %d ---", year)
-        success = _process_year(year, table_name, timestamp)
+        success = _process_year(year, table_name, timestamp, api_key)
 
         if not success:
             logger.error(
