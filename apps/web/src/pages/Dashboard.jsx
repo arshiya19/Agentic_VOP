@@ -25,7 +25,7 @@ export default function Dashboard() {
   const [showCveTicker] = useState(true)
   const [riskReducedRange, setRiskReducedRange] = useState('14d')
 
-  const { stats, latestCves, topRiskDrivers, chartData } =
+  const { stats, latestCves, topRiskDrivers, chartData, exposureMap } =
     useDashboardData(riskReducedRange)
 
   const { Critical = 0, High = 0, Medium = 0 } = stats.severityBreakdown || {}
@@ -91,22 +91,74 @@ export default function Dashboard() {
             <div className="exposure-map-header">
               <h2>Exposure Map</h2>
             </div>
+
+            {/* Row 1 — Context: what is this asset */}
+            <div className="exposure-map-row-label">Asset Context</div>
             <div className="exposure-map-grid">
               <ExposureCardCompact
                 icon="internet"
                 title="Internet Facing"
-                subtitle="Assets with criticals"
-                mainValue="—"
-                stats={[]}
+                subtitle="Public-exposed assets"
+                mainValue={exposureMap.internetFacing.assetCount}
+                mainLabel={
+                  exposureMap.internetFacing.assetCount === 1 ? 'asset' : 'assets'
+                }
+                bucket={exposureMap.internetFacing}
               />
               <ExposureCardCompact
                 icon="crown"
                 title="Crown Jewel Apps"
-                subtitle="with Open Vulnerabilities"
-                mainValue="—"
-                stats={[]}
+                subtitle="Business-critical (≥4)"
+                mainValue={exposureMap.crownJewel.assetCount}
+                mainLabel={
+                  exposureMap.crownJewel.assetCount === 1 ? 'asset' : 'assets'
+                }
+                bucket={exposureMap.crownJewel}
               />
-              <RegulatoryComplianceCard />
+              <RegulatoryComplianceCard data={exposureMap.regulatory} />
+            </div>
+
+            {/* Row 2 — 3 threat-angle cards. "Threat Based" is the
+                external-reachable angle (renamed from "Internet Zone" to
+                avoid lexical clash with the Row 1 "Internet Facing" card).
+                Priority: Threat Based > Extranet > Intranet. */}
+            <div className="exposure-map-row-label">
+              Threat Based
+              <span className="exposure-map-row-hint">
+                {' '}— priority: Threat &gt; Extranet &gt; Intranet
+              </span>
+            </div>
+            <div className="exposure-map-grid">
+              <ExposureCardCompact
+                icon="threat"
+                title="Threat Based"
+                subtitle="External attacker reach"
+                mainValue={exposureMap.zoneInternet.assetCount}
+                mainLabel={
+                  exposureMap.zoneInternet.assetCount === 1 ? 'asset' : 'assets'
+                }
+                bucket={exposureMap.zoneInternet}
+              />
+              <ExposureCardCompact
+                icon="extranet"
+                title="Extranet"
+                subtitle="Partner / customer-reachable"
+                mainValue={exposureMap.zoneExtranet.assetCount}
+                mainLabel={
+                  exposureMap.zoneExtranet.assetCount === 1 ? 'asset' : 'assets'
+                }
+                bucket={exposureMap.zoneExtranet}
+              />
+              <ExposureCardCompact
+                icon="intranet"
+                title="Intranet"
+                subtitle="Internal-only access"
+                mainValue={exposureMap.zoneIntranet.assetCount}
+                mainLabel={
+                  exposureMap.zoneIntranet.assetCount === 1 ? 'asset' : 'assets'
+                }
+                bucket={exposureMap.zoneIntranet}
+              />
             </div>
           </div>
         </main>
@@ -349,7 +401,7 @@ function RiskReduced({ chartData = [], timeRange = '14d', setTimeRange = () => {
   )
 }
 
-function ExposureCardCompact({ icon, title, subtitle, mainValue, mainLabel, stats }) {
+function ExposureCardCompact({ icon, title, subtitle, mainValue, mainLabel, bucket }) {
   const renderIcon = () => {
     if (icon === 'internet') {
       return (
@@ -368,8 +420,39 @@ function ExposureCardCompact({ icon, title, subtitle, mainValue, mainLabel, stat
         </svg>
       )
     }
+    if (icon === 'extranet') {
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18" />
+          <path d="M12 3v18" />
+          <path d="M6 6l12 12" />
+        </svg>
+      )
+    }
+    if (icon === 'intranet') {
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="3" y="6" width="18" height="12" rx="2" />
+          <line x1="8" y1="12" x2="16" y2="12" />
+        </svg>
+      )
+    }
+    if (icon === 'threat') {
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 2L3 7v6c0 5 4 9 9 10 5-1 9-5 9-10V7l-9-5z" />
+          <path d="M9 12l2 2 4-4" />
+        </svg>
+      )
+    }
     return null
   }
+
+  const findingCount = bucket?.findingCount ?? 0
+  const critical = bucket?.critical ?? 0
+  const high = bucket?.high ?? 0
+  const medium = bucket?.medium ?? 0
 
   return (
     <div className="exposure-compact">
@@ -380,23 +463,84 @@ function ExposureCardCompact({ icon, title, subtitle, mainValue, mainLabel, stat
           <span className="exposure-compact-subtitle">{subtitle}</span>
         </div>
       </div>
-      <div className="exposure-compact-stats">
-        {stats.map((stat, index) => (
-          <span key={index} className={`exposure-compact-stat ${stat.color}`}>
-            <span className="stat-dot"></span>
-            {stat.value} {stat.label}
-          </span>
-        ))}
-      </div>
-      <div className="exposure-compact-value">
-        <span className="value-number">{mainValue}</span>
-        {mainLabel && <span className="value-label">{mainLabel}</span>}
+
+      {/* Right-aligned stack: value, finding count, severity proportion bar */}
+      <div className="exposure-compact-strip">
+        <span className="exposure-compact-strip-primary">
+          <span className="value-number">{mainValue}</span>
+          {mainLabel && <span className="value-label">{mainLabel}</span>}
+        </span>
+        <span className="exposure-finding-count">
+          {findingCount} {findingCount === 1 ? 'finding' : 'findings'}
+        </span>
+        <SeverityBar critical={critical} high={high} medium={medium} />
       </div>
     </div>
   )
 }
 
-function RegulatoryComplianceCard() {
+// Stacked horizontal bar showing the C/H/M severity proportion of the card's
+// findings. Always renders all three labels so the user can read the counts
+// even when a severity has zero findings (the bar segment just stays empty).
+function SeverityBar({ critical = 0, high = 0, medium = 0 }) {
+  const total = critical + high + medium
+  const cPct = total > 0 ? (critical / total) * 100 : 0
+  const hPct = total > 0 ? (high / total) * 100 : 0
+  const mPct = total > 0 ? (medium / total) * 100 : 0
+
+  return (
+    <div className="severity-bar">
+      <div className="severity-bar-track">
+        {critical > 0 && (
+          <div
+            className="seg seg-critical"
+            style={{ width: `${cPct}%` }}
+            title={`Critical: ${critical}`}
+          />
+        )}
+        {high > 0 && (
+          <div className="seg seg-high" style={{ width: `${hPct}%` }} title={`High: ${high}`} />
+        )}
+        {medium > 0 && (
+          <div
+            className="seg seg-medium"
+            style={{ width: `${mPct}%` }}
+            title={`Medium: ${medium}`}
+          />
+        )}
+      </div>
+      <div className="severity-bar-legend">
+        <span className="sb-leg sb-critical">
+          <span className="sb-dot" />C {critical}
+        </span>
+        <span className="sb-leg sb-high">
+          <span className="sb-dot" />H {high}
+        </span>
+        <span className="sb-leg sb-medium">
+          <span className="sb-dot" />M {medium}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// Map compliance tag → class hint so styling can colour each chip
+// independently. Tags we don't recognise fall back to a neutral chip.
+const TAG_CLASS_HINTS = {
+  'PCI-DSS': 'pci',
+  HIPAA: 'hipaa',
+  GDPR: 'gdpr',
+  SOC2: 'soc2',
+}
+
+function RegulatoryComplianceCard({ data }) {
+  const tags = data?.tags ?? []
+  const findingCount = data?.findingCount ?? 0
+  const critical = data?.critical ?? 0
+  const high = data?.high ?? 0
+  const medium = data?.medium ?? 0
+  const totalAssets = data?.assetCount ?? 0
+
   return (
     <div className="exposure-compact regulatory">
       <div className="exposure-compact-header">
@@ -409,16 +553,39 @@ function RegulatoryComplianceCard() {
         <div className="exposure-compact-content">
           <span className="exposure-compact-title">Regulatory Impact</span>
           <span className="exposure-compact-subtitle">Compliance scope at risk</span>
+          {/* Chips live inside the header content so they stay on the left
+              and never collide with the value strip on the right. */}
+          <div className="compliance-tags-container">
+            {tags.length === 0 ? (
+              <>
+                <span className="compliance-tag pci">PCI-DSS</span>
+                <span className="compliance-tag hipaa">HIPAA</span>
+                <span className="compliance-tag gdpr">GDPR</span>
+              </>
+            ) : (
+              tags.map((t) => (
+                <span
+                  key={t.tag}
+                  className={`compliance-tag ${TAG_CLASS_HINTS[t.tag] || ''}`}
+                  title={`${t.assets} ${t.assets === 1 ? 'asset' : 'assets'} · ${t.findings} findings`}
+                >
+                  {t.tag} {t.assets}
+                </span>
+              ))
+            )}
+          </div>
         </div>
       </div>
-      <div className="compliance-tags-container">
-        <span className="compliance-tag pci">PCI-DSS</span>
-        <span className="compliance-tag hipaa">HIPAA</span>
-        <span className="compliance-tag gdpr">GDPR</span>
-      </div>
-      <div className="regulatory-value">
-        <span className="reg-number">—</span>
-        <span className="reg-label">assets</span>
+
+      <div className="exposure-compact-strip">
+        <span className="exposure-compact-strip-primary">
+          <span className="value-number">{totalAssets ?? '—'}</span>
+          <span className="value-label">{totalAssets === 1 ? 'asset' : 'assets'}</span>
+        </span>
+        <span className="exposure-finding-count">
+          {findingCount} {findingCount === 1 ? 'finding' : 'findings'}
+        </span>
+        <SeverityBar critical={critical} high={high} medium={medium} />
       </div>
     </div>
   )

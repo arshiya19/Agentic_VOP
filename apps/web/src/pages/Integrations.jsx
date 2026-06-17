@@ -13,6 +13,17 @@ const BUILTIN_SCANNERS = [
   { tool: 'osv', label: 'OSV.dev' },
 ]
 
+// Catalog cards use namespaced IDs (e.g. "owasp-zap-appsec") but some
+// scanners are registered under shorter slugs in connection_registry
+// (e.g. "zap"). This map lets the "configured" dot light up for those
+// scanners too without forcing a DB rename.
+//   key   = catalog id (tool.id in INTEGRATION_CATALOG)
+//   value = array of slugs that should also count as "this is configured"
+const CATALOG_ID_ALIASES = {
+  'owasp-zap-appsec': ['zap', 'owasp-zap'],
+  'github-dependabot-appsec': ['dependabot', 'github-dependabot'],
+}
+
 const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 const apiTool = (id, name) => ({
@@ -44,6 +55,7 @@ const INTEGRATION_CATALOG = [
     apiTool('owasp-zap-appsec', 'OWASP ZAP'),
     apiTool('semgrep-appsec', 'Semgrep'),
     apiTool('snyk-appsec', 'Snyk'),
+    apiTool('sonarqube-appsec', 'SonarQube'),
     apiTool('veracode-appsec', 'Veracode'),
   ]},
   { category: 'Asset Management', tools: [
@@ -442,7 +454,10 @@ export default function Integrations() {
 
               <div className="integration-grid-modern">
                 {filteredTools.map(tool => {
-                  const configured = registeredByTool.has(tool.id)
+                  const aliases = CATALOG_ID_ALIASES[tool.id] || []
+                  const configured =
+                    registeredByTool.has(tool.id) ||
+                    aliases.some((slug) => registeredByTool.has(slug))
                   return (
                     <div
                       key={tool.id}

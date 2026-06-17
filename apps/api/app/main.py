@@ -4,8 +4,23 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from .agents.connectors.file_upload import SCANNER_BUCKET, sniff_format
 from .agents.master import run_master
+from .agents.sub_agent_1 import (
+    extract_all_vectors_from_raw,
+    parse_cvss_vector,
+    pick_best_cvss_vector,
+)
+from .agents.sub_agent_2 import (
+    SCORING_POLICY_VERSION,
+    _build_asset_index,
+    _compute_score,
+    _fetch_nvd_data,
+    _llm_decide,
+    _resolve_asset,
+)
 from .config import settings
 from .db import supabase_admin
 from .mitre_refresh import refresh_mitre_attack, refresh_mitre_capec, refresh_mitre_cwe
@@ -544,3 +559,529 @@ def refresh_mitre_attack_endpoint() -> MitreRefreshResponse:
     if result["status"] == "failed":
         raise HTTPException(status_code=502, detail=result)
     return MitreRefreshResponse(**result)
+
+
+# ----------------------------------------------------------------------------
+# Admin — Backfill prioritization-engine scores for existing issues
+# ----------------------------------------------------------------------------
+
+
+class RescoreRequest(BaseModel):
+    """Optional body for the rescore endpoint."""
+
+    regenerate_llm: bool = Field(
+        default=False,
+        description=(
+            "When true, also call the LLM with the current sub-agent-2 prompt "
+            "to regenerate risk_explanation + remediation_suggestion. Reuses "
+            "the issue's already-stored enrichment data (EPSS / KEV / NVD / "
+            "MITRE) — does not re-fetch from external sources. Costs ~1 LLM "
+            "call per issue."
+        ),
+    )
+
+
+class RescoreResponse(BaseModel):
+    """Summary returned by the rescore endpoint."""
+
+    issues_processed: int
+    issues_updated: int
+    llm_regenerated: int
+    by_priority: dict[str, int]
+    policy_version: str
+
+
+@app.post("/admin/issues/rescore", response_model=RescoreResponse)
+def rescore_issues(body: RescoreRequest | None = None) -> RescoreResponse:
+    """Recompute derived_risk / priority / components_summary for ALL issues
+    using the current scoring formula (Sub-Agent 2's `_compute_score`).
+
+    Uses the SAME Python helpers Sub-Agent 2 uses during enrichment, so the
+    backfill values are byte-identical to what a fresh enrichment would
+    produce. Safe to re-run any number of times — the formula is deterministic.
+
+    Optional: pass `{"regenerate_llm": true}` to ALSO re-run the LLM with the
+    active sub-agent-2 prompt and overwrite risk_explanation +
+    remediation_suggestion. This uses the issue's already-stored enrichment
+    (EPSS, KEV, NVD, MITRE chain) — does NOT re-fetch external data. Useful
+    when you ship a new prompt (e.g. v1.5) and want the existing 404 issues'
+    explanations to reflect the new prompt without running a full scan.
+    """
+    req = body or RescoreRequest()
+    sb = supabase_admin()
+
+    # 1. Load every issue with the columns the formula + LLM payload need.
+    issues = (
+        sb.table("issues")
+        .select(
+            "id, severity, cve_id, title, description, cvss_score, "
+            "cvss_attack_vector, cvss_attack_complexity, cvss_privileges_required, "
+            "cvss_user_interaction, epss_score, epss_percentile, exploit_in_kev, "
+            "cwe_id, cwe_name, cwe_likelihood_of_exploit, capec_ids, "
+            "attack_technique_ids, attack_tactics, attack_platforms, "
+            "package, asset_identity"
+        )
+        .execute()
+        .data
+        or []
+    )
+
+    # 2. Load assets + build the resolver index.
+    asset_rows = sb.table("assets").select("*").execute().data or []
+    asset_index = _build_asset_index(asset_rows)
+
+    # 3. If we're regenerating LLM prose, also load the active prompt + MITRE
+    #    catalogs (once, batched) so per-issue LLM calls can reconstruct the
+    #    rich payload without per-call DB hits.
+    prompt_row: dict | None = None
+    mitre_cwe_by_id: dict[str, dict] = {}
+    mitre_capec_by_id: dict[str, dict] = {}
+    mitre_attack_by_id: dict[str, dict] = {}
+
+    if req.regenerate_llm:
+        prompt_row = (
+            sb.table("prompt_db")
+            .select("*")
+            .eq("agent", "sub-agent-2")
+            .eq("is_active", True)
+            .single()
+            .execute()
+            .data
+        )
+
+        # Pull the catalogs we'll need to rebuild mitre_payload per issue.
+        cwe_ids_needed = {issue.get("cwe_id") for issue in issues if issue.get("cwe_id")}
+        if cwe_ids_needed:
+            cwe_rows = (
+                sb.table("mitre_cwe").select("*").in_("cwe_id", list(cwe_ids_needed)).execute().data
+                or []
+            )
+            mitre_cwe_by_id = {row["cwe_id"]: row for row in cwe_rows}
+
+        capec_ids_needed: set[str] = set()
+        for issue in issues:
+            for capec_id in issue.get("capec_ids") or []:
+                capec_ids_needed.add(capec_id)
+        if capec_ids_needed:
+            capec_rows = (
+                sb.table("mitre_capec")
+                .select("*")
+                .in_("capec_id", list(capec_ids_needed))
+                .execute()
+                .data
+                or []
+            )
+            mitre_capec_by_id = {row["capec_id"]: row for row in capec_rows}
+
+        attack_ids_needed: set[str] = set()
+        for issue in issues:
+            for tech_id in issue.get("attack_technique_ids") or []:
+                attack_ids_needed.add(tech_id)
+        if attack_ids_needed:
+            attack_rows = (
+                sb.table("mitre_attack_techniques")
+                .select("*")
+                .in_("technique_id", list(attack_ids_needed))
+                .execute()
+                .data
+                or []
+            )
+            mitre_attack_by_id = {row["technique_id"]: row for row in attack_rows}
+
+    by_priority: dict[str, int] = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    llm_regenerated = 0
+    updated = 0
+
+    def _process_one(issue: dict) -> tuple[str, bool]:
+        """Score + (optionally) LLM-regenerate one issue. Returns (priority, llm_called)."""
+        asset = _resolve_asset(issue, asset_index)
+        scoring = _compute_score(issue, asset)
+
+        update_row: dict = {
+            "derived_risk": scoring["derived_risk"],
+            "priority": scoring["priority"],
+            "components_summary": scoring["components_summary"],
+            "scoring_policy_version": scoring["scoring_policy_version"],
+            "exposure": (asset or {}).get("exposure"),
+            "business_criticality": (asset or {}).get("business_criticality"),
+            "asset_owner": (asset or {}).get("business_owner"),
+        }
+
+        llm_called = False
+        if req.regenerate_llm and prompt_row is not None:
+            # Reconstruct the LLM payload from stored fields.
+            epss_for_llm = {
+                "epss_score": issue.get("epss_score"),
+                "epss_percentile": issue.get("epss_percentile"),
+            }
+            nvd_for_llm = {
+                "cwe_id": issue.get("cwe_id"),
+                "cwe_name": issue.get("cwe_name"),
+                "cvss_attack_vector": issue.get("cvss_attack_vector"),
+                "cvss_attack_complexity": issue.get("cvss_attack_complexity"),
+                "cvss_privileges_required": issue.get("cvss_privileges_required"),
+                "cvss_user_interaction": issue.get("cvss_user_interaction"),
+            }
+
+            cwe_row = mitre_cwe_by_id.get(issue.get("cwe_id")) if issue.get("cwe_id") else None
+            capec_rows = [
+                mitre_capec_by_id[cid]
+                for cid in (issue.get("capec_ids") or [])
+                if cid in mitre_capec_by_id
+            ]
+            attack_rows = [
+                mitre_attack_by_id[tid]
+                for tid in (issue.get("attack_technique_ids") or [])
+                if tid in mitre_attack_by_id
+            ]
+            mitre_for_llm = {
+                "cwe": cwe_row or {},
+                "capec": capec_rows,
+                "attack": attack_rows,
+            }
+
+            try:
+                decision = _llm_decide(
+                    run_id="rescore",
+                    prompt_row=prompt_row,
+                    issue=issue,
+                    epss=epss_for_llm,
+                    nvd=nvd_for_llm,
+                    in_kev=bool(issue.get("exploit_in_kev")),
+                    mitre=mitre_for_llm,
+                    asset=asset,
+                    scoring=scoring,
+                )
+                update_row["risk_explanation"] = decision.risk_explanation
+                update_row["remediation_suggestion"] = decision.remediation_suggestion
+                llm_called = True
+            except Exception:  # nosec B110 — LLM hiccups shouldn't block the formula update  # noqa: S110
+                pass
+
+        sb.table("issues").update(update_row).eq("id", issue["id"]).execute()
+        return scoring["priority"], llm_called
+
+    # Parallel processing — Sub-Agent 2 uses the same pattern during enrichment.
+    workers = max(1, int(settings.llm_parallel_workers or 10))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_process_one, issue) for issue in issues]
+        for future in as_completed(futures):
+            priority, llm_called = future.result()
+            by_priority[priority] = by_priority.get(priority, 0) + 1
+            if llm_called:
+                llm_regenerated += 1
+            updated += 1
+
+    return RescoreResponse(
+        issues_processed=len(issues),
+        issues_updated=updated,
+        llm_regenerated=llm_regenerated,
+        by_priority=by_priority,
+        policy_version=SCORING_POLICY_VERSION,
+    )
+
+
+class BackfillCvssResponse(BaseModel):
+    """Summary returned by the CVSS backfill endpoint."""
+
+    issues_scanned: int
+    vectors_found: int
+    scores_filled: int
+    versions_filled: int
+    skipped_no_raw: int
+    skipped_no_vector: int
+
+
+def _extract_vector_from_raw(raw: dict) -> str | None:
+    """Pick the highest-version CVSS vector from a raw scanner payload.
+
+    Walks OSV / NVD / scanner-native shapes via extract_all_vectors_from_raw,
+    then prefers V4 > V3.1 > V3.0 > V2. Returns None when no vector is found.
+    """
+    return pick_best_cvss_vector(extract_all_vectors_from_raw(raw))
+
+
+@app.post("/admin/issues/backfill_cvss", response_model=BackfillCvssResponse)
+def backfill_cvss() -> BackfillCvssResponse:
+    """Fill cvss_vector / cvss_score / cvss_version on existing issues by
+    re-reading the raw scanner payload from raw_findings.
+
+    Idempotent — only fills NULLs. Existing scores/vectors are never overwritten.
+    Safe to run any number of times.
+
+    Use after migration 0026 + the Sub-Agent 1 vector-extraction prompt (v1.2)
+    are deployed, to catch up the rows ingested before those landed.
+    """
+    sb = supabase_admin()
+
+    issues = (
+        sb.table("issues")
+        .select("id, cvss_score, cvss_version, cvss_vector, raw_finding_id")
+        .execute()
+        .data
+        or []
+    )
+
+    raw_ids = [i["raw_finding_id"] for i in issues if i.get("raw_finding_id")]
+    raw_by_id: dict[int, dict] = {}
+    # Supabase has a URL-length cap on .in_(), so chunk.
+    for start in range(0, len(raw_ids), 200):
+        chunk = raw_ids[start : start + 200]
+        rows = sb.table("raw_findings").select("id, raw").in_("id", chunk).execute().data or []
+        for r in rows:
+            raw_by_id[r["id"]] = r.get("raw") or {}
+
+    vectors_found = 0
+    scores_filled = 0
+    versions_filled = 0
+    skipped_no_raw = 0
+    skipped_no_vector = 0
+
+    for issue in issues:
+        raw_id = issue.get("raw_finding_id")
+        if not raw_id or raw_id not in raw_by_id:
+            skipped_no_raw += 1
+            continue
+
+        vec = issue.get("cvss_vector") or _extract_vector_from_raw(raw_by_id[raw_id])
+        if not vec:
+            skipped_no_vector += 1
+            continue
+
+        update_row: dict = {}
+        if not issue.get("cvss_vector"):
+            update_row["cvss_vector"] = vec
+            vectors_found += 1
+
+        # Only compute score/version if missing — never overwrite.
+        if issue.get("cvss_score") is None or issue.get("cvss_version") is None:
+            score, version = parse_cvss_vector(vec)
+            if score is not None and issue.get("cvss_score") is None:
+                update_row["cvss_score"] = score
+                scores_filled += 1
+            if version is not None and issue.get("cvss_version") is None:
+                update_row["cvss_version"] = version
+                versions_filled += 1
+
+        if update_row:
+            sb.table("issues").update(update_row).eq("id", issue["id"]).execute()
+
+    return BackfillCvssResponse(
+        issues_scanned=len(issues),
+        vectors_found=vectors_found,
+        scores_filled=scores_filled,
+        versions_filled=versions_filled,
+        skipped_no_raw=skipped_no_raw,
+        skipped_no_vector=skipped_no_vector,
+    )
+
+
+_CVSS_VERSION_RANK_MAIN = {"4.0": 4, "3.1": 3, "3.0": 2, "2.0": 1}
+
+
+class UpgradeCvssResponse(BaseModel):
+    """Summary returned by the CVSS upgrade endpoint."""
+
+    issues_scanned: int
+    upgraded: int
+    score_corrected: int
+    vector_filled: int
+    skipped_no_change: int
+    skipped_no_raw: int
+    skipped_no_vector: int
+
+
+@app.post("/admin/issues/upgrade_cvss_to_best", response_model=UpgradeCvssResponse)
+def upgrade_cvss_to_best() -> UpgradeCvssResponse:
+    """Re-evaluate every issue's CVSS against ALL vectors in its raw payload
+    and upgrade to the highest version available.
+
+    Differs from /admin/issues/backfill_cvss in one important way: this OVERWRITES
+    existing cvss_version + cvss_score when a higher-version vector exists in
+    raw_findings. Use this after a prompt or schema bump to retrofit issues
+    that were normalized under an older prompt that didn't know about newer
+    CVSS versions (e.g. V4).
+
+    Idempotent. Only changes rows where the new pick strictly beats the
+    current state.
+    """
+    sb = supabase_admin()
+
+    issues = (
+        sb.table("issues")
+        .select("id, cvss_score, cvss_version, cvss_vector, raw_finding_id")
+        .execute()
+        .data
+        or []
+    )
+
+    raw_ids = [i["raw_finding_id"] for i in issues if i.get("raw_finding_id")]
+    raw_by_id: dict[int, dict] = {}
+    for start in range(0, len(raw_ids), 200):
+        chunk = raw_ids[start : start + 200]
+        rows = sb.table("raw_findings").select("id, raw").in_("id", chunk).execute().data or []
+        for r in rows:
+            raw_by_id[r["id"]] = r.get("raw") or {}
+
+    upgraded = 0
+    score_corrected = 0
+    vector_filled = 0
+    skipped_no_change = 0
+    skipped_no_raw = 0
+    skipped_no_vector = 0
+
+    for issue in issues:
+        raw_id = issue.get("raw_finding_id")
+        if not raw_id or raw_id not in raw_by_id:
+            skipped_no_raw += 1
+            continue
+
+        candidate_vectors = extract_all_vectors_from_raw(raw_by_id[raw_id])
+        if issue.get("cvss_vector"):
+            candidate_vectors.append(issue["cvss_vector"])
+        best_vector = pick_best_cvss_vector(candidate_vectors)
+        if not best_vector:
+            skipped_no_vector += 1
+            continue
+
+        best_score, best_version = parse_cvss_vector(best_vector)
+        if best_version is None:
+            skipped_no_vector += 1
+            continue
+
+        current_version = issue.get("cvss_version")
+        current_score = issue.get("cvss_score")
+        current_rank = _CVSS_VERSION_RANK_MAIN.get(current_version or "", 0)
+        best_rank = _CVSS_VERSION_RANK_MAIN.get(best_version, 0)
+
+        update_row: dict = {}
+
+        if best_rank > current_rank:
+            # Higher version available — overwrite version + score + vector.
+            update_row["cvss_vector"] = best_vector
+            update_row["cvss_version"] = best_version
+            if best_score is not None:
+                update_row["cvss_score"] = best_score
+            upgraded += 1
+        else:
+            # Same version. Fill nulls / fix bogus 0.0 score, but don't change version.
+            if issue.get("cvss_vector") is None:
+                update_row["cvss_vector"] = best_vector
+                vector_filled += 1
+            # A previous prompt sometimes wrote 0.0 when it couldn't parse — treat
+            # that as null and recompute. Real "score = 0.0" doesn't happen for V3+.
+            score_is_bogus = current_score is None or (
+                isinstance(current_score, (int, float)) and current_score == 0.0
+            )
+            if score_is_bogus and best_score is not None:
+                update_row["cvss_score"] = best_score
+                score_corrected += 1
+
+        if not update_row:
+            skipped_no_change += 1
+            continue
+
+        sb.table("issues").update(update_row).eq("id", issue["id"]).execute()
+
+    return UpgradeCvssResponse(
+        issues_scanned=len(issues),
+        upgraded=upgraded,
+        score_corrected=score_corrected,
+        vector_filled=vector_filled,
+        skipped_no_change=skipped_no_change,
+        skipped_no_raw=skipped_no_raw,
+        skipped_no_vector=skipped_no_vector,
+    )
+
+
+class ReenrichMissingResponse(BaseModel):
+    """Summary returned by the targeted NVD re-enrichment endpoint."""
+
+    cves_to_lookup: int
+    cves_returned_by_nvd: int
+    cves_missing_from_nvd: int
+    issues_updated: int
+    issues_scores_filled: int
+    issues_cwe_filled: int
+
+
+@app.post("/admin/issues/reenrich_missing_cvss", response_model=ReenrichMissingResponse)
+def reenrich_missing_cvss() -> ReenrichMissingResponse:
+    """Targeted NVD re-fetch for issues that have a CVE id but no CVSS score.
+
+    Runs after the throttle fix (0.66s pace + 5 retries) so CVEs that were
+    dropped by NVD 429s in earlier runs get a second chance. Only touches
+    rows where cve_id IS NOT NULL AND cvss_score IS NULL — leaves everything
+    else alone. Idempotent.
+
+    Use after you ship the throttle fix OR any time NVD's catalog catches up
+    to a previously-unscored CVE (e.g. AWAITING_ANALYSIS clears).
+    """
+    sb = supabase_admin()
+
+    rows = (
+        sb.table("issues")
+        .select("id, cve_id, cvss_score, cvss_version, cvss_vector, cwe_id")
+        .is_("cvss_score", "null")
+        .not_.is_("cve_id", "null")
+        .execute()
+        .data
+        or []
+    )
+
+    cve_ids = sorted({r["cve_id"] for r in rows if r.get("cve_id")})
+    if not cve_ids:
+        return ReenrichMissingResponse(
+            cves_to_lookup=0,
+            cves_returned_by_nvd=0,
+            cves_missing_from_nvd=0,
+            issues_updated=0,
+            issues_scores_filled=0,
+            issues_cwe_filled=0,
+        )
+
+    nvd_data = _fetch_nvd_data(cve_ids, settings.nvd_api_key or None, run_id="reenrich")
+
+    issues_updated = 0
+    issues_scores_filled = 0
+    issues_cwe_filled = 0
+
+    for row in rows:
+        cve = row.get("cve_id")
+        if not cve or cve not in nvd_data:
+            continue
+        data = nvd_data[cve]
+        update_row: dict = {}
+
+        if row.get("cvss_score") is None and data.get("cvss_score") is not None:
+            update_row["cvss_score"] = data["cvss_score"]
+            issues_scores_filled += 1
+        if row.get("cvss_version") is None and data.get("cvss_version") is not None:
+            update_row["cvss_version"] = data["cvss_version"]
+        if row.get("cvss_vector") is None and data.get("cvss_vector") is not None:
+            update_row["cvss_vector"] = data["cvss_vector"]
+        if row.get("cwe_id") is None and data.get("cwe_id") is not None:
+            update_row["cwe_id"] = data["cwe_id"]
+            issues_cwe_filled += 1
+        # CVSS v3 sub-vector fields — fill if missing.
+        for key in (
+            "cvss_attack_vector",
+            "cvss_attack_complexity",
+            "cvss_privileges_required",
+            "cvss_user_interaction",
+        ):
+            if data.get(key) is not None:
+                update_row[key] = data[key]
+
+        if update_row:
+            sb.table("issues").update(update_row).eq("id", row["id"]).execute()
+            issues_updated += 1
+
+    return ReenrichMissingResponse(
+        cves_to_lookup=len(cve_ids),
+        cves_returned_by_nvd=len(nvd_data),
+        cves_missing_from_nvd=len(cve_ids) - len(nvd_data),
+        issues_updated=issues_updated,
+        issues_scores_filled=issues_scores_filled,
+        issues_cwe_filled=issues_cwe_filled,
+    )

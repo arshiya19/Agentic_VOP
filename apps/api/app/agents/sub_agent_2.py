@@ -41,6 +41,307 @@ _KEV_CATALOG_URL = (
 _NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 
+# ---- MITRE projection helpers ----------------------------------------------
+# Used to compute the 9 MITRE-derived columns we promote onto `issues` (added
+# in migration 0020). Kept module-level so they don't get rebuilt per call.
+
+_LIKELIHOOD_RANK = {"Low": 1, "Medium": 2, "High": 3}
+_SEVERITY_RANK = {"Low": 1, "Medium": 2, "High": 3, "Very High": 4}
+
+
+def _max_label(values, rank_map):
+    """Return the highest-ranked label in `values` according to `rank_map`.
+
+    Used to collapse "max likelihood across CAPECs" and "max severity across
+    CAPECs" into a single text value per issue. Returns None when no labels
+    in `values` are recognised.
+    """
+    ranks = [rank_map[v] for v in values if v in rank_map]
+    if not ranks:
+        return None
+    target = max(ranks)
+    for label, rank in rank_map.items():
+        if rank == target:
+            return label
+    return None
+
+
+# =============================================================================
+# Prioritization formula — hybrid: deterministic Python score + LLM prose
+# =============================================================================
+# Ported from the previous chatbot-cyberisk `vop_reprio` engine and extended
+# with EPSS, CISA KEV, ATT&CK tactics, and compliance-scope weighting.
+#
+# Output:
+#   derived_risk           — 0-100 score (existing column; the formula produces
+#                            a 0-10 score internally, then * 10)
+#   priority               — P0..P3 banding
+#   components_summary     — every factor stored as jsonb for audit
+#   scoring_policy_version — version string so we can A/B test policies
+# =============================================================================
+
+SCORING_POLICY_VERSION = "reprio-v1.0"
+
+_SEV_TO_BASE = {
+    "Critical": 9.5,
+    "High": 8.0,
+    "Medium": 5.5,
+    "Low": 2.0,
+    "Info": 0.5,
+}
+_ENV_WEIGHTS = {
+    "production": 1.20,
+    "staging": 1.00,
+    "qa": 0.85,
+    "development": 0.80,
+    "sandbox": 0.70,
+}
+_CRIT_WEIGHTS = {5: 1.20, 4: 1.10, 3: 1.00, 2: 0.95, 1: 0.90}
+_DATA_CLASS_WEIGHTS = {
+    "restricted": 1.20,
+    "confidential": 1.10,
+    "internal": 1.00,
+    "public": 0.90,
+}
+_EXPOSURE_WEIGHTS = {"public": 1.15, "internal": 1.00}
+_AV_WEIGHTS = {
+    "NETWORK": 1.20,
+    "ADJACENT": 1.10,
+    "LOCAL": 1.00,
+    "PHYSICAL": 0.90,
+}
+_CWE_LIKELIHOOD_WEIGHTS = {"High": 1.10, "Medium": 1.00, "Low": 0.95}
+
+# ATT&CK tactic bonuses applied additively to the tactic factor
+_TACTIC_BONUSES = {
+    "initial-access": 0.08,
+    "execution": 0.05,
+    "privilege-escalation": 0.05,
+    "lateral-movement": 0.04,
+    "exfiltration": 0.04,
+}
+
+# KEV-listed findings get bumped to at least this 0-10 score (== priority P1+).
+_KEV_FLOOR = 8.5
+
+
+def _compute_score(issue: dict, asset: dict | None) -> dict:
+    """Deterministic risk-score formula.
+
+    Args:
+      issue: row from `issues` table (or partial dict with the scoring inputs).
+      asset: row from `assets` table (or None when the issue is unattributed).
+
+    Returns:
+      {
+        'derived_risk':           0-100 score,
+        'priority':               'P0' | 'P1' | 'P2' | 'P3',
+        'components_summary':     {...all factors used...},
+        'scoring_policy_version': 'reprio-v1.0',
+      }
+
+    Pure function — no DB calls, no LLM, no side effects. Same input always
+    produces the same output.
+    """
+    a = asset or {}
+
+    # --- Base score: CVSS if present, else severity-mapped, else mid-range
+    base = issue.get("cvss_score") or _SEV_TO_BASE.get(issue.get("severity"), 5.0)
+    base = float(base)
+
+    # --- Asset-context multipliers (default 1.0 when asset is unattributed)
+    env_f = _ENV_WEIGHTS.get(a.get("environment"), 1.00)
+    crit_f = _CRIT_WEIGHTS.get(a.get("business_criticality"), 1.00)
+    data_f = _DATA_CLASS_WEIGHTS.get(a.get("data_classification"), 1.00)
+    exposure_f = _EXPOSURE_WEIGHTS.get(a.get("exposure"), 1.00)
+
+    # --- Threat-intel multipliers
+    av_f = _AV_WEIGHTS.get(issue.get("cvss_attack_vector"), 1.00)
+    cwe_f = _CWE_LIKELIHOOD_WEIGHTS.get(issue.get("cwe_likelihood_of_exploit"), 1.00)
+
+    # EPSS: scale 0..1 → 0.9..1.25 (higher EPSS = stronger boost)
+    epss = float(issue.get("epss_score") or 0)
+    epss_f = round(0.9 + epss * 0.35, 4)
+
+    # ATT&CK tactics: additive bonuses for high-impact tactics
+    tactics = issue.get("attack_tactics") or []
+    tactic_f = 1.00
+    for tactic, bonus in _TACTIC_BONUSES.items():
+        if tactic in tactics:
+            tactic_f += bonus
+    tactic_f = round(tactic_f, 4)
+
+    # Compliance scope: each compliance tag adds 5% (so PCI+SOC2 = 1.10)
+    compliance_tags = a.get("compliance_tags") or []
+    compliance_f = round(1.00 + 0.05 * len(compliance_tags), 4)
+
+    # --- Combine
+    raw_score = (
+        base
+        * env_f
+        * crit_f
+        * data_f
+        * exposure_f
+        * av_f
+        * cwe_f
+        * epss_f
+        * tactic_f
+        * compliance_f
+    )
+
+    # --- KEV floor (CISA-listed actively-exploited)
+    kev_floor_applied = False
+    if issue.get("exploit_in_kev"):
+        if raw_score < _KEV_FLOOR:
+            raw_score = _KEV_FLOOR
+            kev_floor_applied = True
+
+    # --- Clamp to 0..9.9 then scale to 0..99 for the existing column shape.
+    # We deliberately cap below 10.0 (max display 99, not 100) because a score
+    # of exactly 100 implies certainty / theoretical maximum, which doesn't
+    # match how security risk actually behaves — there's always residual
+    # uncertainty. Industry convention (Tenable, Qualys, ArmorCode) caps the
+    # public-facing score below the formula maximum.
+    clamped_score = round(max(0.0, min(9.9, raw_score)), 1)
+    derived_risk = round(clamped_score * 10, 2)
+
+    # --- Priority banding (matches the old repo's P0..P3 model)
+    if clamped_score >= 9.0:
+        priority = "P0"
+    elif clamped_score >= 7.0:
+        priority = "P1"
+    elif clamped_score >= 4.0:
+        priority = "P2"
+    else:
+        priority = "P3"
+
+    components_summary = {
+        "base": round(base, 2),
+        "env_f": env_f,
+        "crit_f": crit_f,
+        "data_f": data_f,
+        "exposure_f": exposure_f,
+        "av_f": av_f,
+        "cwe_f": cwe_f,
+        "epss_f": epss_f,
+        "tactic_f": tactic_f,
+        "compliance_f": compliance_f,
+        "kev_floor_applied": kev_floor_applied,
+        "raw_score": round(raw_score, 3),
+        "clamped_score": clamped_score,
+    }
+
+    return {
+        "derived_risk": derived_risk,
+        "priority": priority,
+        "components_summary": components_summary,
+        "scoring_policy_version": SCORING_POLICY_VERSION,
+    }
+
+
+def _build_asset_index(assets: list[dict]) -> dict:
+    """Build O(1) lookup dicts for asset attribution.
+
+    Indexes by:
+      - canonical name + each alias            (project / repo / direct names)
+      - hostname                               (host scanners)
+      - ip_address                             (host scanners)
+      - (ecosystem, package_name)              (SBOM — package scanners)
+
+    The SBOM index is the primary path for package-level findings (OSV, Trivy,
+    Snyk, Dependabot). It lets a scanner emit just `{name: lodash, ecosystem: npm}`
+    and the matcher finds the asset whose `dependencies.npm` contains `lodash`
+    — no per-scanner alias tables needed.
+    """
+    by_name_or_alias: dict[str, dict] = {}
+    by_hostname: dict[str, dict] = {}
+    by_ip: dict[str, dict] = {}
+    by_sbom: dict[tuple[str, str], dict] = {}
+
+    for a in assets:
+        if a.get("name"):
+            by_name_or_alias[a["name"]] = a
+        for alias in a.get("aliases") or []:
+            by_name_or_alias[alias] = a
+        if a.get("hostname"):
+            by_hostname[a["hostname"]] = a
+        if a.get("ip_address"):
+            by_ip[a["ip_address"]] = a
+        for ecosystem, pkgs in (a.get("dependencies") or {}).items():
+            for pkg in pkgs or []:
+                by_sbom[(ecosystem.lower(), pkg.lower())] = a
+
+    return {
+        "name_or_alias": by_name_or_alias,
+        "hostname": by_hostname,
+        "ip_address": by_ip,
+        "sbom": by_sbom,
+    }
+
+
+def _resolve_asset(issue: dict, asset_index: dict) -> dict | None:
+    """Match one issue's asset_identity (+ package field) to a row in `assets`.
+
+    Priority chain (first match wins):
+      1. Direct asset identifier (project / repo)         → name / aliases
+      2. SBOM match (ecosystem + package name)            → assets.dependencies
+      3. Package-name-only fallback (no ecosystem known)  → aliases
+      4. Host identifiers (hostname / ipv4)               → hostname / ip_address
+
+    SBOM matching (step 2) is the scalable path for package scanners. Each
+    asset declares its dependencies once in `assets.dependencies`; every
+    package-level scanner (OSV, Trivy, Snyk, Dependabot) auto-attributes
+    without scanner-specific configuration.
+
+    Returns None when nothing matches (the issue stays "unattributed" and
+    the formula uses default 1.0 multipliers for all asset-context factors).
+    """
+    ai = issue.get("asset_identity") or {}
+    pkg_obj = issue.get("package") or {}
+    name_or_alias = asset_index["name_or_alias"]
+
+    # 1. Direct asset identifiers — strongest signal
+    for key in ("project", "repo"):
+        v = ai.get(key)
+        if v and v in name_or_alias:
+            return name_or_alias[v]
+
+    # Package name + ecosystem can live in either `asset_identity` (Trivy's
+    # PkgName / package_name) or the dedicated `package` field (OSV-style).
+    pkg_name = (
+        ai.get("PkgName")
+        or ai.get("package_name")
+        or pkg_obj.get("name")
+        or pkg_obj.get("package_name")
+    )
+    ecosystem = (
+        ai.get("ecosystem")
+        or pkg_obj.get("ecosystem")
+        or pkg_obj.get("type")
+    )
+
+    # 2. SBOM match — precise when ecosystem is known
+    if pkg_name and ecosystem:
+        key = (ecosystem.lower(), pkg_name.lower())
+        if key in asset_index["sbom"]:
+            return asset_index["sbom"][key]
+
+    # 3. Package-name-only fallback via aliases (when ecosystem missing)
+    if pkg_name and pkg_name in name_or_alias:
+        return name_or_alias[pkg_name]
+
+    # 4. Host identifiers
+    hostname = ai.get("hostname")
+    if hostname and hostname in asset_index["hostname"]:
+        return asset_index["hostname"][hostname]
+
+    ip = ai.get("ipv4")
+    if ip and ip in asset_index["ip_address"]:
+        return asset_index["ip_address"][ip]
+
+    return None
+
+
 def _sanitize(value):
     """Recursively strip Postgres-incompatible NUL bytes from any string fields."""
     if isinstance(value, str):
@@ -60,20 +361,28 @@ def _llm_decide(
     nvd: dict,
     in_kev: bool,
     mitre: dict | None = None,
+    asset: dict | None = None,
+    scoring: dict | None = None,
 ) -> LLMEnrichmentDecision:
-    """Call ChatOpenAI with structured output for the per-issue risk decision.
+    """Call the LLM to produce the prose narrative for an already-scored issue.
 
     Tiered retry — escalate temperature first, then escalate the model on the
     final attempt for issues the small model can't reason about.
 
-    `mitre` is the full MITRE chain payload — shape:
+    As of prompt v1.4, the LLM does NOT compute the score. The deterministic
+    formula `_compute_score()` produces derived_risk/priority/components_summary
+    before this call; we pass them to the LLM as additional context so the
+    explanation can cite the ACTUAL factors that drove the number.
+
+    `mitre` is the full MITRE chain payload —
         {"cwe": {...} | {}, "capec": [...], "attack": [...]}
-    Sections may be empty when the local catalogs haven't been seeded or
-    when the CVE has no CWE id.
+    `asset` is the resolved asset row (or None for unattributed findings).
+    `scoring` is the formula's output (derived_risk, priority, components).
+    Any may be empty/None — the prompt handles missing sections gracefully.
     """
     params = prompt_row.get("parameters") or {}
     base_temp = float(params.get("temperature", 0.2))
-    max_tokens = int(params.get("max_tokens", 800))
+    max_tokens = int(params.get("max_tokens", 500))
     primary_model = prompt_row["model"]
     fallback_model = params.get("fallback_model", "gpt-4o")
 
@@ -92,6 +401,13 @@ def _llm_decide(
             "in_kev": in_kev,
             "nvd": nvd or {},
             "mitre": mitre or {"cwe": {}, "capec": [], "attack": []},
+            "asset": _asset_for_llm(asset),
+        },
+        "scoring": {
+            "derived_risk": (scoring or {}).get("derived_risk"),
+            "priority": (scoring or {}).get("priority"),
+            "policy_version": (scoring or {}).get("scoring_policy_version"),
+            "components": (scoring or {}).get("components_summary") or {},
         },
     }
 
@@ -111,18 +427,45 @@ def _llm_decide(
     )
 
 
+def _asset_for_llm(asset: dict | None) -> dict:
+    """Trim an asset row to the fields useful for explanation prose.
+
+    We DON'T pass every column (description, repo_url, etc. would just bloat
+    tokens). The LLM cares about the categorical signals — env, exposure,
+    criticality, compliance — same ones the formula uses.
+    """
+    if not asset:
+        return {}
+    return {
+        "name": asset.get("name"),
+        "asset_type": asset.get("asset_type"),
+        "environment": asset.get("environment"),
+        "exposure": asset.get("exposure"),
+        "business_criticality": asset.get("business_criticality"),
+        "data_classification": asset.get("data_classification"),
+        "compliance_tags": asset.get("compliance_tags") or [],
+        "network_zone": asset.get("network_zone"),
+        "business_owner": asset.get("business_owner"),
+    }
+
+
 def _fetch_nvd_data(
     cve_ids: list[str], api_key: str | None, run_id: str | None = None
 ) -> dict[str, dict]:
     """For each CVE, fetch NVD data: CWE id + CVSS v3 vector breakdown.
 
-    Throttle: 0.06s between calls with key (~50 req / 30s allowed),
-              0.6s without (~5 req / 30s allowed).
+    Throttle math (NVD's published rolling 30s window):
+      with key   : 50 req / 30s  →  0.6s between calls
+      without key: 5  req / 30s  →  6.0s between calls
+
+    Padded by 10% so a clock-skew burst between us and NVD's counter
+    doesn't tip us over the limit. Sequential — no parallelism — so the
+    pace is the only thing keeping us under the limit.
     """
     headers: dict[str, str] = {}
     if api_key:
         headers["apiKey"] = api_key
-    delay = 0.06 if api_key else 0.6
+    delay = 0.66 if api_key else 6.6
 
     results: dict[str, dict] = {}
     with httpx.Client(timeout=30, headers=headers) as client:
@@ -134,6 +477,12 @@ def _fetch_nvd_data(
                     _NVD_API,
                     params={"cveId": cve},
                     timeout=30,
+                    # NVD's published rate is 50/30s with key. Even at our padded
+                    # 0.66s pace we occasionally see a 429 burst when their rolling
+                    # window aligns oddly with ours. 5 retries with exponential
+                    # backoff (0.5 → 1 → 2 → 4 → 8s) buys ~16s of patience per CVE.
+                    max_attempts=5,
+                    backoff_factor=1.0,
                     run_id=run_id,
                     agent="sub-agent-2",
                 )
@@ -147,14 +496,17 @@ def _fetch_nvd_data(
 
                 # Prefer CVSS v3.1, fall back to v3.0
                 cvss: dict | None = None
+                cvss_version_picked: str | None = None
                 for m in metrics.get("cvssMetricV31", []) or []:
                     if m.get("type") == "Primary":
                         cvss = m.get("cvssData") or {}
+                        cvss_version_picked = "3.1"
                         break
                 if cvss is None:
                     for m in metrics.get("cvssMetricV30", []) or []:
                         if m.get("type") == "Primary":
                             cvss = m.get("cvssData") or {}
+                            cvss_version_picked = "3.0"
                             break
 
                 # CWE id from weaknesses[]
@@ -168,8 +520,14 @@ def _fetch_nvd_data(
                     if cwe_id:
                         break
 
+                base_score = (cvss or {}).get("baseScore")
+                vector_string = (cvss or {}).get("vectorString")
+
                 results[cve] = {
                     "cwe_id": cwe_id,
+                    "cvss_score": float(base_score) if base_score is not None else None,
+                    "cvss_version": cvss_version_picked,
+                    "cvss_vector": vector_string,
                     "cvss_attack_vector": (cvss or {}).get("attackVector"),
                     "cvss_attack_complexity": (cvss or {}).get("attackComplexity"),
                     "cvss_privileges_required": (cvss or {}).get("privilegesRequired"),
@@ -206,6 +564,17 @@ def run_enrich(run_id: str) -> dict:
         "MESSAGE",
         f"Loaded {len(issues)} canonical Issues to enrich. "
         f"Using prompt {prompt_row['agent']}@{prompt_row['version']} ({prompt_row['model']})",
+    )
+
+    # 1b. Batch-load the assets table so the formula has business context
+    # available for every issue. One query feeds all subsequent issue lookups.
+    asset_rows = sb.table("assets").select("*").execute().data or []
+    asset_index = _build_asset_index(asset_rows)
+    emit_trace(
+        run_id,
+        "sub-agent-2",
+        "MESSAGE",
+        f"Loaded {len(asset_rows)} asset rows for scoring context",
     )
 
     if not issues:
@@ -495,6 +864,57 @@ def run_enrich(run_id: str) -> dict:
 
         decision = _llm_decide(run_id, prompt_row, issue, epss, nvd, in_kev, mitre_payload)
 
+        # ---- MITRE projection columns (added in migration 0020) ----
+        # Compute the 9 denormalized columns from the chain payload so the
+        # prioritization + remediation engines can query without joining
+        # back to the catalog tables on every read.
+        cwe_likelihood = (cwe_row or {}).get("likelihood_of_exploit")
+        cwe_abstraction = (cwe_row or {}).get("abstraction")
+        # Dedupe + sort the mitigation phases across all CWE mitigations.
+        mitigation_phases = sorted(
+            {
+                phase
+                for m in (cwe_row or {}).get("mitigations") or []
+                for phase in (m.get("phase") or [])
+                if phase
+            }
+        )
+        capec_ids_list = list((cwe_row or {}).get("related_capec") or [])
+        capec_max_likelihood = _max_label(
+            [cr.get("likelihood_of_attack") for cr in capec_rows], _LIKELIHOOD_RANK
+        )
+        capec_max_severity = _max_label(
+            [cr.get("typical_severity") for cr in capec_rows], _SEVERITY_RANK
+        )
+        attack_tech_ids = sorted(
+            {ar["technique_id"] for ar in attack_rows if ar.get("technique_id")}
+        )
+        attack_tactics_list = sorted({t for ar in attack_rows for t in (ar.get("tactics") or [])})
+        attack_platforms_list = sorted(
+            {p for ar in attack_rows for p in (ar.get("platforms") or [])}
+        )
+
+        # ---- Hybrid scoring (formula + LLM-for-prose) ----
+        # 1. Resolve asset via the same priority chain as issue_with_asset view.
+        asset = _resolve_asset(issue, asset_index)
+
+        # 2. Build a snapshot of the issue augmented with MITRE projection
+        #    fields, so _compute_score sees the final state the row will have.
+        issue_for_scoring = {
+            **issue,
+            "epss_score": epss_score,
+            "exploit_in_kev": in_kev,
+            "cvss_attack_vector": nvd.get("cvss_attack_vector"),
+            "cwe_likelihood_of_exploit": cwe_likelihood,
+            "attack_tactics": attack_tactics_list,
+        }
+        scoring = _compute_score(issue_for_scoring, asset)
+
+        # 3. LLM gets the computed score + factors and writes only the prose.
+        decision = _llm_decide(
+            run_id, prompt_row, issue, epss, nvd, in_kev, mitre_payload, asset, scoring
+        )
+
         update_row = {
             "epss_score": epss_score,
             "epss_percentile": epss_percentile,
@@ -506,12 +926,33 @@ def run_enrich(run_id: str) -> dict:
             "cvss_attack_complexity": nvd.get("cvss_attack_complexity"),
             "cvss_privileges_required": nvd.get("cvss_privileges_required"),
             "cvss_user_interaction": nvd.get("cvss_user_interaction"),
-            "likelihood": decision.likelihood,
-            "impact": decision.impact,
-            "derived_risk": decision.derived_risk,
+            # ---- Asset-context snapshot (denormalized from assets table) ----
+            # Mirrors the vestigial columns originally specced in 0001. Lets
+            # SQL queries read asset context without joining. Snapshot is fresh
+            # for each enrichment run; if asset metadata changes later, the
+            # issue's snapshot stays as-of-this-run until the next rescore.
+            "exposure": (asset or {}).get("exposure"),
+            "business_criticality": (asset or {}).get("business_criticality"),
+            "asset_owner": (asset or {}).get("business_owner"),
+            # ---- Formula-computed scoring (migration 0022) ----
+            "derived_risk": scoring["derived_risk"],
+            "priority": scoring["priority"],
+            "components_summary": scoring["components_summary"],
+            "scoring_policy_version": scoring["scoring_policy_version"],
+            # ---- LLM-generated prose (prompt v1.4) ----
             "risk_explanation": decision.risk_explanation,
             "remediation_suggestion": decision.remediation_suggestion,
             "enriched_at": datetime.now(UTC).isoformat(),
+            # ---- MITRE projection (migration 0020) ----
+            "cwe_likelihood_of_exploit": cwe_likelihood,
+            "cwe_abstraction": cwe_abstraction,
+            "cwe_mitigation_phases": mitigation_phases,
+            "capec_ids": capec_ids_list,
+            "capec_max_likelihood_of_attack": capec_max_likelihood,
+            "capec_max_typical_severity": capec_max_severity,
+            "attack_technique_ids": attack_tech_ids,
+            "attack_tactics": attack_tactics_list,
+            "attack_platforms": attack_platforms_list,
         }
         sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
         return {"epss_hit": epss_score is not None, "kev_hit": in_kev}

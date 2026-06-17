@@ -1,9 +1,25 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import ColumnToggle from '../components/ColumnToggle'
 import '../styles/Issues.css'
 import SeverityFilter from '../components/SeverityFilter'
+import { useIssuesData } from '../hooks/useIssuesData'
+
+// Approx vertical overhead above the table body: topbar + page header +
+// filters/toolbar + pagination footer = ~360px on most layouts.
+// Each table row is ~46px in the current density. We compute how many
+// rows fit in the viewport and use that as the page size, so zooming
+// out (more available height) shows more rows instead of empty space.
+const TABLE_OVERHEAD_PX = 360
+const ROW_HEIGHT_PX = 46
+const MIN_ITEMS_PER_PAGE = 10
+
+function computeItemsPerPage() {
+  if (typeof window === 'undefined') return 20
+  const fits = Math.floor((window.innerHeight - TABLE_OVERHEAD_PX) / ROW_HEIGHT_PX)
+  return Math.max(MIN_ITEMS_PER_PAGE, fits)
+}
 
 const ISSUE_COLUMNS = [
   { key: 'issue_id', label: 'Issue ID' },
@@ -24,9 +40,17 @@ export default function Issues() {
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedSeverity, setSelectedSeverity] = useState([])
   const [currentPage, setCurrentPage] = useState(1)
-  const [issues] = useState([])
+  const { issues } = useIssuesData()
   const [visibleColumns, setVisibleColumns] = useState(ISSUE_COLUMNS.map(c => c.key))
-  const itemsPerPage = 10
+  // Items-per-page adapts to viewport height — zoom out or use a tall screen
+  // and you'll see more rows automatically instead of empty space.
+  const [itemsPerPage, setItemsPerPage] = useState(() => computeItemsPerPage())
+
+  useEffect(() => {
+    const onResize = () => setItemsPerPage(computeItemsPerPage())
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   const isVisible = (key) => visibleColumns.includes(key)
 

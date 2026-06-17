@@ -55,7 +55,12 @@ class LLMNormalizedIssue(BaseModel):
     description: str | None = None
     severity: Literal["Info", "Low", "Medium", "High", "Critical"]
     cvss_score: float | None = None
-    cvss_version: Literal["2.0", "3.0", "3.1"] | None = None
+    cvss_version: Literal["2.0", "3.0", "3.1", "4.0"] | None = None
+    # Raw CVSS vector string (e.g. "CVSS:3.1/AV:N/AC:H/..."). When the LLM
+    # spots one in the raw row, it lifts it here verbatim — Sub-Agent 1's
+    # deterministic post-LLM step then parses it to fill cvss_score +
+    # cvss_version. Lifts the LLM out of doing arithmetic it does poorly.
+    cvss_vector: str | None = None
     solution: str | None = None
     asset_identity: dict[str, Any] = {}
     package: dict[str, Any] | None = None
@@ -63,17 +68,20 @@ class LLMNormalizedIssue(BaseModel):
 
 
 class LLMEnrichmentDecision(BaseModel):
-    """Sub-Agent 2's per-issue LLM output: risk reasoning + remediation.
+    """Sub-Agent 2's per-issue LLM output — prose only.
 
     Used as the input_schema for the emit_enrichment_decision tool call.
+
+    As of prompt v1.4, the LLM no longer outputs the numeric score —
+    a deterministic Python formula computes derived_risk, priority, and the
+    factor breakdown (stored in `components_summary`). The LLM's job is now
+    to write the narrative that explains WHY the formula produced that
+    score, and to write a concrete remediation suggestion.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    derived_risk: float = Field(..., ge=0, le=100)
     risk_explanation: str = Field(..., min_length=10, max_length=600)
-    likelihood: float = Field(..., ge=0, le=1)
-    impact: float = Field(..., ge=0, le=1)
     remediation_suggestion: str = Field(..., min_length=10, max_length=600)
 
 
