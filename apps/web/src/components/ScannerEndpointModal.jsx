@@ -37,11 +37,16 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
+  // True when the API returned a redacted placeholder for headers (encryption active)
+  const [headersRedacted, setHeadersRedacted] = useState(false)
+  // Track header keys removed by the user so we can signal deletion to the backend
+  const [removedHeaderKeys, setRemovedHeaderKeys] = useState([])
 
   useEffect(() => {
     if (!tool) return
     setError(null)
     setPendingFile(null)
+    setRemovedHeaderKeys([])
 
     if (existing) {
       setSourceType(existing.connector_type === 'file_upload' ? 'file' : 'api')
@@ -49,9 +54,37 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
       const m = existing.metadata || {}
       setMethod((m.http_method || 'GET').toUpperCase())
       setResponsePath(m.response_path || '')
-      const hdrs = m.headers || {}
-      const hdrList = Object.entries(hdrs).map(([key, value]) => ({ key, value }))
-      setHeaders(hdrList.length ? hdrList : [{ key: '', value: '' }])
+
+      // With per-key encryption, the API returns headers as a dict with
+      // key names visible and values redacted (e.g. {"Authorization": "••••••••"}).
+      // We show the key names with empty value fields so the user can:
+      //   - See which headers are configured
+      //   - Update individual values by typing in the field
+      //   - Leave a field empty to keep the existing encrypted value
+      const rawHeaders = m.headers
+      if (rawHeaders && typeof rawHeaders === 'object' && !Array.isArray(rawHeaders)) {
+        const hasRedactedValues = Object.values(rawHeaders).some(
+          (v) => typeof v === 'string' && (v.startsWith('••••') || v.startsWith('****'))
+        )
+        if (hasRedactedValues) {
+          // Show key names with empty values — user fills in only what they want to change
+          const hdrList = Object.keys(rawHeaders).map((key) => ({ key, value: '' }))
+          setHeaders(hdrList.length ? hdrList : [{ key: '', value: '' }])
+          setHeadersRedacted(true)
+        } else {
+          // Plaintext headers (encryption disabled or legacy) — show as-is
+          const hdrList = Object.entries(rawHeaders).map(([key, value]) => ({ key, value }))
+          setHeaders(hdrList.length ? hdrList : [{ key: '', value: '' }])
+          setHeadersRedacted(false)
+        }
+      } else if (typeof rawHeaders === 'string' && rawHeaders.includes('configured')) {
+        // Blob-encrypted fallback (old format) — show empty fields
+        setHeaders([{ key: '', value: '' }])
+        setHeadersRedacted(true)
+      } else {
+        setHeaders([{ key: '', value: '' }])
+        setHeadersRedacted(false)
+      }
       setEnabled(existing.enabled)
     } else {
       setSourceType('api')
@@ -59,6 +92,7 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
       setMethod('GET')
       setResponsePath('')
       setHeaders([{ key: '', value: '' }])
+      setHeadersRedacted(false)
       setEnabled(true)
     }
   }, [tool, existing])
@@ -70,18 +104,42 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
     setHeaders((prev) => prev.map((h, idx) => (idx === i ? { ...h, [field]: value } : h)))
   }
   const addHeader = () => setHeaders((prev) => [...prev, { key: '', value: '' }])
+  // Track removed header keys so we can signal deletion to the backend
   const removeHeader = (i) => {
-    setHeaders((prev) =>
-      prev.length <= 1 ? [{ key: '', value: '' }] : prev.filter((_, idx) => idx !== i)
-    )
+    setHeaders((prev) => {
+      const removed = prev[i]
+      // If this header had a key name (i.e. it was a previously saved header),
+      // track it for deletion signaling
+      if (removed.key.trim() && headersRedacted) {
+        setRemovedHeaderKeys((keys) => [...keys, removed.key.trim()])
+      }
+      return prev.length <= 1 ? [{ key: '', value: '' }] : prev.filter((_, idx) => idx !== i)
+    })
   }
 
   const buildApiMetadata = () => {
     const hdrs = {}
     for (const { key, value } of headers) {
-      if (key.trim()) hdrs[key.trim()] = value
+      // Only include headers where the user has entered a value.
+      // Empty values on existing headers mean "keep the current encrypted value".
+      if (key.trim() && value.trim()) {
+        hdrs[key.trim()] = value
+      }
     }
-    const meta = { http_method: method, headers: hdrs }
+    // Mark removed headers with null — backend interprets this as "delete this key"
+    for (const key of removedHeaderKeys) {
+      hdrs[key] = null
+    }
+    const meta = { http_method: method }
+    // Include headers if user entered any values or removed any, or if this is a new scanner
+    if (Object.keys(hdrs).length > 0) {
+      meta.headers = hdrs
+    } else if (!headersRedacted) {
+      // New scanner with no headers — explicitly set empty
+      meta.headers = hdrs
+    }
+    // If headersRedacted and no new values entered, omit headers entirely
+    // so the PATCH preserves existing encrypted values via the deep merge.
     if (responsePath.trim()) meta.response_path = responsePath.trim()
     return meta
   }
@@ -262,6 +320,20 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
                 <code>Authorization: Bearer &lt;token&gt;</code> or{' '}
                 <code>X-API-Key: &lt;key&gt;</code>. Leave empty for public APIs.
               </span>
+              {headersRedacted && (
+                <div style={{
+                  marginBottom: 8,
+                  fontSize: 13,
+                  padding: '8px 12px',
+                  borderRadius: 6,
+                  background: 'rgba(56, 189, 248, 0.1)',
+                  border: '1px solid rgba(56, 189, 248, 0.3)',
+                  color: '#7dd3fc',
+                }}>
+                  🔒 Values are encrypted. Enter a new value to update a specific header,
+                  or leave blank to keep the current encrypted value.
+                </div>
+              )}
               <div className="sem-headers">
                 {headers.map((h, i) => (
                   <div key={i} className="sem-header-row">
@@ -273,7 +345,7 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
                     />
                     <input
                       type="text"
-                      placeholder="Bearer eyJhbGciOi…"
+                      placeholder={headersRedacted && h.key && !h.value ? '••••••••' : 'Bearer eyJhbGciOi…'}
                       value={h.value}
                       onChange={(e) => updateHeader(i, 'value', e.target.value)}
                     />

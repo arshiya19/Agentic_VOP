@@ -22,6 +22,13 @@ from .agents.sub_agent_2 import (
     _resolve_asset,
 )
 from .config import settings
+from .crypto import (
+    encrypt_sensitive_fields,
+    get_sensitive_fields,
+    is_encryption_enabled,
+    redact_sensitive_fields,
+    validate_endpoint_security,
+)
 from .db import supabase_admin
 from .mitre_refresh import refresh_mitre_attack, refresh_mitre_capec, refresh_mitre_cwe
 from .models import RunCreated, TriggerEvent
@@ -268,7 +275,13 @@ class ScannerCreate(BaseModel):
     enabled: bool = True
 
 
-_VALID_CONNECTOR_TYPES = ("osv_api", "tenable_api", "user_endpoint", "file_upload")
+_VALID_CONNECTOR_TYPES = (
+    "osv_api",
+    "tenable_api",
+    "dependabot_api",
+    "user_endpoint",
+    "file_upload",
+)
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — generous for scanner exports
 _VALID_FILE_FORMATS = ("json", "jsonl", "csv", "sarif")
 
@@ -292,6 +305,8 @@ def _ensure_scanner_bucket() -> None:
 
 def _row_to_scanner_config(row: dict) -> ScannerConfig:
     metadata = row.get("metadata") or {}
+    # Redact sensitive fields so secrets never reach the frontend
+    safe_metadata = redact_sensitive_fields(metadata)
     return ScannerConfig(
         tool=row["tool"],
         endpoint=row.get("endpoint", ""),
@@ -300,7 +315,7 @@ def _row_to_scanner_config(row: dict) -> ScannerConfig:
         enabled=bool(row.get("enabled", False)),
         connector_type=metadata.get("connector_type"),
         last_fetched_at=row.get("last_fetched_at"),
-        metadata={k: v for k, v in metadata.items() if k != "connector_type"},
+        metadata={k: v for k, v in safe_metadata.items() if k != "connector_type"},
     )
 
 
@@ -340,7 +355,38 @@ def update_scanner(tool: str, body: ScannerUpdate) -> ScannerConfig:
         update_payload["enabled"] = body.enabled
 
     if body.metadata is not None:
-        merged = {**(current.get("metadata") or {}), **body.metadata}
+        current_metadata = current.get("metadata") or {}
+        incoming = body.metadata
+
+        # Deep-merge sensitive dict fields (e.g. headers) at the key level.
+        # This allows partial header updates: sending {"headers": {"Authorization": "new"}}
+        # updates only that key while preserving other encrypted headers.
+        # A null value signals deletion: {"headers": {"X-Old-Key": null}} removes that key.
+        sensitive = set(get_sensitive_fields())
+        merged = {**current_metadata}
+        for k, v in incoming.items():
+            if k in sensitive and isinstance(v, dict) and isinstance(merged.get(k), dict):
+                # Merge at the inner-key level with null-as-delete semantics
+                inner = dict(merged[k])
+                for ik, iv in v.items():
+                    if iv is None:
+                        # null signals deletion — remove the key entirely
+                        inner.pop(ik, None)
+                    else:
+                        inner[ik] = iv
+                merged[k] = inner
+            else:
+                merged[k] = v
+
+        # HTTPS enforcement: check the effective endpoint (new or existing)
+        effective_endpoint = update_payload.get("endpoint") or current.get("endpoint", "")
+        try:
+            validate_endpoint_security(effective_endpoint, merged)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+
+        # Encrypt sensitive fields before persisting
+        merged = encrypt_sensitive_fields(merged)
         update_payload["metadata"] = merged
 
     if not update_payload:
@@ -388,6 +434,15 @@ def create_scanner(body: ScannerCreate) -> ScannerConfig:
     merged_metadata = {"connector_type": body.connector_type, **(body.metadata or {})}
     merged_metadata["connector_type"] = body.connector_type  # ensure it's authoritative
 
+    # HTTPS enforcement: block auth headers against non-HTTPS endpoints
+    try:
+        validate_endpoint_security(body.endpoint, merged_metadata)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+    # Encrypt sensitive fields before persisting
+    merged_metadata = encrypt_sensitive_fields(merged_metadata)
+
     row = {
         "tool": body.tool,
         "protocol": body.protocol,
@@ -403,6 +458,45 @@ def create_scanner(body: ScannerCreate) -> ScannerConfig:
         raise HTTPException(status_code=500, detail="insert returned no rows")
 
     return _row_to_scanner_config(inserted[0])
+
+
+class SecretsStatusResponse(BaseModel):
+    """Shows which sensitive fields are configured for a scanner (without values)."""
+
+    tool: str
+    encryption_enabled: bool
+    fields: dict[str, bool]  # field_name → is_set
+
+
+@app.get("/admin/scanners/{tool}/secrets-status", response_model=SecretsStatusResponse)
+def get_scanner_secrets_status(tool: str) -> SecretsStatusResponse:
+    """Return which sensitive fields are set for a scanner, without exposing values.
+
+    Useful for the UI to show lock icons / "configured" badges next to fields.
+    """
+    from .crypto import get_sensitive_fields
+
+    sb = supabase_admin()
+    existing = (
+        sb.table("connection_registry").select("metadata").eq("tool", tool).limit(1).execute().data
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Unknown scanner: {tool}")
+
+    metadata = existing[0].get("metadata") or {}
+    sensitive = get_sensitive_fields()
+
+    fields_status = {}
+    for field in sensitive:
+        value = metadata.get(field)
+        # A field is "set" if it's present and non-empty (encrypted or plaintext)
+        fields_status[field] = bool(value)
+
+    return SecretsStatusResponse(
+        tool=tool,
+        encryption_enabled=is_encryption_enabled(),
+        fields=fields_status,
+    )
 
 
 @app.post("/admin/scanners/{tool}/upload", response_model=ScannerConfig)

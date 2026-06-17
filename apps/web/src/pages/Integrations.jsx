@@ -50,7 +50,7 @@ const oauthTool = (id, name) => ({
 const INTEGRATION_CATALOG = [
   { category: 'Application Security', tools: [
     apiTool('checkmarx-appsec', 'Checkmarx'),
-    oauthTool('github-dependabot-appsec', 'Github Dependabot'),
+    oauthTool('dependabot', 'Github Dependabot'),
     oauthTool('hackerone-appsec', 'Hackerone'),
     apiTool('owasp-zap-appsec', 'OWASP ZAP'),
     apiTool('semgrep-appsec', 'Semgrep'),

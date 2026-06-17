@@ -29,11 +29,25 @@ pnpm-debug.log*
 *.swp
 *.swo
 
+# Kiro specs (planning artifacts, not runtime code)
+.kiro/
+
 # Python tooling
 *.pyc
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.benchmarks/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Lambda build artifacts
+lambda.zip
+result.json
 
 # Lockfile noise during early dev (commit when stable)
 # package-lock.json

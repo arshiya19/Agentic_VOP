@@ -30,6 +30,7 @@ from .http_utils import request_with_retry
 from ..config import settings
 from ..db import supabase_admin
 from ..models import LLMEnrichmentDecision
+from ..services.vuln_intelligence import VulnIntelligenceService
 from .llm import invoke_structured_with_retry
 from .trace import emit_trace
 
@@ -39,6 +40,26 @@ _KEV_CATALOG_URL = (
     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 )
 _NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+# ---------------------------------------------------------------------------
+# Intelligence Service (DynamoDB) — lazy singleton
+# ---------------------------------------------------------------------------
+_intelligence_service: VulnIntelligenceService | None = None
+
+
+def _get_intelligence_service() -> VulnIntelligenceService | None:
+    """Lazy-init intelligence service. Returns None if not configured."""
+    global _intelligence_service
+    if (
+        _intelligence_service is None
+        and settings.intelligence_enabled
+        and settings.intelligence_table_name
+    ):
+        _intelligence_service = VulnIntelligenceService(
+            table_name=settings.intelligence_table_name,
+            region=settings.intelligence_aws_region,
+        )
+    return _intelligence_service if settings.intelligence_enabled else None
 
 
 # ---- MITRE projection helpers ----------------------------------------------
@@ -449,8 +470,77 @@ def _asset_for_llm(asset: dict | None) -> dict:
     }
 
 
+def _fetch_nvd_data_from_intelligence(
+    cve_ids: list[str], run_id: str | None = None
+) -> dict[str, dict]:
+    """Fetch NVD data using the DynamoDB Intelligence Service (fast path).
+
+    Returns the same dict shape as _fetch_nvd_data so it's a drop-in replacement.
+    """
+    svc = _get_intelligence_service()
+    if svc is None:
+        return {}
+
+    results: dict[str, dict] = {}
+    try:
+        intel_map = svc.batch_get_cve_intelligence(list(cve_ids)[:100])
+        for cve_id, intel in intel_map.items():
+            if intel and intel.resolution == "resolved" and intel.nvd:
+                results[cve_id] = {
+                    "cwe_id": intel.nvd.cwe_ids[0] if intel.nvd.cwe_ids else None,
+                    "cvss_attack_vector": intel.nvd.cvss_attack_vector,
+                    "cvss_attack_complexity": intel.nvd.cvss_attack_complexity,
+                    "cvss_privileges_required": intel.nvd.cvss_privileges_required,
+                    "cvss_user_interaction": intel.nvd.cvss_user_interaction,
+                }
+    except Exception as e:
+        if run_id:
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "ERROR",
+                f"Intelligence service lookup failed: {type(e).__name__}: {str(e)[:200]}",
+            )
+
+    return results
+
+
+def _write_back_nvd_to_dynamo(raw_responses: list[dict], run_id: str | None = None) -> None:
+    """Write already-fetched raw NVD API vulnerability objects back to DynamoDB.
+
+    Accepts raw NVD responses captured during the fallback fetch (avoids
+    duplicate API calls). Errors are logged but never raised — write-back
+    is best-effort and must not block enrichment.
+    """
+    svc = _get_intelligence_service()
+    if svc is None:
+        return
+
+    try:
+        written = svc.write_back_cves(raw_responses)
+        if run_id:
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "MESSAGE",
+                f"Write-back: stored {written} CVE(s) in DynamoDB for future cache hits",
+            )
+    except Exception as e:
+        if run_id:
+            emit_trace(
+                run_id,
+                "sub-agent-2",
+                "ERROR",
+                f"Write-back to DynamoDB failed: {type(e).__name__}: {str(e)[:200]}",
+            )
+
+
 def _fetch_nvd_data(
-    cve_ids: list[str], api_key: str | None, run_id: str | None = None
+    cve_ids: list[str],
+    api_key: str | None,
+    run_id: str | None = None,
+    *,
+    collect_raw: list[dict] | None = None,
 ) -> dict[str, dict]:
     """For each CVE, fetch NVD data: CWE id + CVSS v3 vector breakdown.
 
@@ -461,6 +551,9 @@ def _fetch_nvd_data(
     Padded by 10% so a clock-skew burst between us and NVD's counter
     doesn't tip us over the limit. Sequential — no parallelism — so the
     pace is the only thing keeping us under the limit.
+
+    If `collect_raw` is provided (a list), raw NVD vulnerability objects
+    are appended to it for downstream write-back to DynamoDB.
     """
     headers: dict[str, str] = {}
     if api_key:
@@ -490,6 +583,10 @@ def _fetch_nvd_data(
                 if not vulns:
                     time.sleep(delay)
                     continue
+
+                # Collect raw response for write-back if requested
+                if collect_raw is not None:
+                    collect_raw.append(vulns[0])
 
                 cve_data = vulns[0].get("cve", {}) or {}
                 metrics = cve_data.get("metrics", {}) or {}
@@ -649,28 +746,97 @@ def run_enrich(run_id: str) -> dict:
     # 3b. NVD per-CVE lookup (CWE id + CVSS v3 vector breakdown)
     nvd_data: dict[str, dict] = {}
     if cve_ids:
-        nvd_key = settings.nvd_api_key or None
-        speed_note = (
-            f"with API key (~{len(cve_ids) * 0.06:.0f}s expected)"
-            if nvd_key
-            else f"no API key — rate-limited (~{len(cve_ids) * 0.6:.0f}s expected)"
-        )
-        emit_trace(run_id, "sub-agent-2", "MESSAGE", f"Querying NVD ({speed_note})…")
-        try:
-            nvd_data = _fetch_nvd_data(list(cve_ids), nvd_key, run_id=run_id)
+        if settings.intelligence_enabled:
+            # Fast path: DynamoDB Intelligence Service
             emit_trace(
-                run_id,
-                "sub-agent-2",
-                "MESSAGE",
-                f"NVD returned data for {len(nvd_data)} CVE(s)",
+                run_id, "sub-agent-2", "MESSAGE", "Querying Intelligence Service (DynamoDB)…"
             )
-        except Exception as e:
-            emit_trace(
-                run_id,
-                "sub-agent-2",
-                "ERROR",
-                f"NVD lookup failed: {type(e).__name__}: {str(e)[:200]}",
+            try:
+                nvd_data = _fetch_nvd_data_from_intelligence(list(cve_ids), run_id=run_id)
+                emit_trace(
+                    run_id,
+                    "sub-agent-2",
+                    "MESSAGE",
+                    f"Intelligence Service returned data for {len(nvd_data)} CVE(s)",
+                )
+            except Exception as e:
+                emit_trace(
+                    run_id,
+                    "sub-agent-2",
+                    "ERROR",
+                    f"Intelligence Service lookup failed, falling back to NVD API: {type(e).__name__}: {str(e)[:200]}",
+                )
+                # Fall through to NVD API fallback below
+                nvd_data = {}
+
+            # Fallback: for CVEs not found in DynamoDB, query NVD API directly
+            # and write the results back to DynamoDB for future cache hits.
+            missed_cves = [cve for cve in cve_ids if cve not in nvd_data]
+            if missed_cves:
+                nvd_key = settings.nvd_api_key or None
+                speed_note = (
+                    f"with API key (~{len(missed_cves) * 0.06:.0f}s expected)"
+                    if nvd_key
+                    else f"no API key — rate-limited (~{len(missed_cves) * 0.6:.0f}s expected)"
+                )
+                emit_trace(
+                    run_id,
+                    "sub-agent-2",
+                    "MESSAGE",
+                    f"Falling back to NVD API for {len(missed_cves)} "
+                    f"cache-missed CVE(s) ({speed_note})…",
+                )
+                try:
+                    raw_nvd_responses: list[dict] = []
+                    fallback_data = _fetch_nvd_data(
+                        missed_cves,
+                        nvd_key,
+                        run_id=run_id,
+                        collect_raw=raw_nvd_responses,
+                    )
+                    nvd_data.update(fallback_data)
+                    emit_trace(
+                        run_id,
+                        "sub-agent-2",
+                        "MESSAGE",
+                        f"NVD API fallback returned data for {len(fallback_data)} CVE(s)",
+                    )
+
+                    # Write-back: store NVD API results into DynamoDB so
+                    # future scans don't miss the same CVEs.
+                    if raw_nvd_responses:
+                        _write_back_nvd_to_dynamo(raw_nvd_responses, run_id=run_id)
+                except Exception as e:
+                    emit_trace(
+                        run_id,
+                        "sub-agent-2",
+                        "ERROR",
+                        f"NVD API fallback failed: {type(e).__name__}: {str(e)[:200]}",
+                    )
+        else:
+            # Legacy path: Direct NVD API calls (rate-limited)
+            nvd_key = settings.nvd_api_key or None
+            speed_note = (
+                f"with API key (~{len(cve_ids) * 0.06:.0f}s expected)"
+                if nvd_key
+                else f"no API key — rate-limited (~{len(cve_ids) * 0.6:.0f}s expected)"
             )
+            emit_trace(run_id, "sub-agent-2", "MESSAGE", f"Querying NVD ({speed_note})…")
+            try:
+                nvd_data = _fetch_nvd_data(list(cve_ids), nvd_key, run_id=run_id)
+                emit_trace(
+                    run_id,
+                    "sub-agent-2",
+                    "MESSAGE",
+                    f"NVD returned data for {len(nvd_data)} CVE(s)",
+                )
+            except Exception as e:
+                emit_trace(
+                    run_id,
+                    "sub-agent-2",
+                    "ERROR",
+                    f"NVD lookup failed: {type(e).__name__}: {str(e)[:200]}",
+                )
 
     # 3c. MITRE chain: CWE → CAPEC → ATT&CK
     # All three are local table joins (refreshed monthly by /admin/mitre/refresh*).

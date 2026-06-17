@@ -1,0 +1,72 @@
+# =============================================================================
+# Agentic_VOP — NVD Backfill Workflow (Manual Dispatch)
+# =============================================================================
+# Manually triggered workflow to run the NVD Backfill CLI against a specified
+# environment. Loads historical NVD yearly feed data (2016–2026) into the
+# Intelligence_Table in DynamoDB.
+#
+# Trigger: workflow_dispatch with environment input (dev or prod)
+# Authentication: GitHub OIDC → AWS IAM (sisyfix-github-backfill-{env})
+#
+# Requirements: 14.1, 14.2
+# =============================================================================
+
+name: NVD Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (dev or prod)"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # 1. Validate — Fail fast if environment input is invalid
+  # ---------------------------------------------------------------------------
+  validate:
+    name: "Validate Input"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate environment input
+        run: |
+          if [[ "${{ inputs.environment }}" != "dev" && "${{ inputs.environment }}" != "prod" ]]; then
+            echo "::error::Invalid environment input: '${{ inputs.environment }}'. Must be 'dev' or 'prod'."
+            exit 1
+          fi
+          echo "Environment validated: ${{ inputs.environment }}"
+
+  # ---------------------------------------------------------------------------
+  # 2. Backfill — Execute the Backfill CLI against the target environment
+  # ---------------------------------------------------------------------------
+  backfill:
+    name: "Backfill · ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-backfill-${{ inputs.environment }}
+          aws-region: us-east-1
+
+      - name: Install dependencies
+        run: pip install -r lambdas/requirements.txt
+
+      - name: Run Backfill CLI
+        run: python -m lambdas.nvd_sync.backfill --env ${{ inputs.environment }}

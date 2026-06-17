@@ -4,10 +4,11 @@
 # Runs on every push (all branches) and every pull request.
 #
 # Jobs (parallel):
-#   ruff    — Python linting + formatting check (apps/api)
-#   eslint  — JavaScript/JSX linting (apps/web)
+#   ruff          — Python linting + formatting check (apps/api)
+#   ruff-lambdas  — Python linting + formatting check (lambdas/)
+#   eslint        — JavaScript/JSX linting (apps/web)
 #
-# Both jobs are blocking — any lint error fails the pipeline.
+# All jobs are blocking — any lint error fails the pipeline.
 # This is intentional: lint errors left unaddressed accumulate into
 # harder-to-fix bugs and obscure real security findings.
 # =============================================================================
@@ -59,7 +60,34 @@ jobs:
         run: uv run ruff format --check .
 
   # ---------------------------------------------------------------------------
-  # 2. ESLint — JavaScript / JSX linting
+  # 2. Ruff — Python linting + format check (Lambdas)
+  # ---------------------------------------------------------------------------
+  ruff-lambdas:
+    name: "Lint · Python Lambdas (Ruff)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Lambda code doesn't use uv — install ruff directly with pip.
+      - name: Install Ruff
+        run: pip install ruff
+
+      # Check 1: lint rules (E, W, F, B, S, UP — configured in pyproject.toml or defaults)
+      - name: Ruff lint
+        working-directory: lambdas
+        run: ruff check .
+
+      # Check 2: formatting — fails if any file would be reformatted.
+      - name: Ruff format check
+        working-directory: lambdas
+        run: ruff format --check .
+
+  # ---------------------------------------------------------------------------
+  # 3. ESLint — JavaScript / JSX linting
   # ---------------------------------------------------------------------------
   eslint:
     name: "Lint · JS/JSX (ESLint)"
