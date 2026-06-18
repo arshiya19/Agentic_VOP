@@ -486,8 +486,16 @@ def _fetch_nvd_data_from_intelligence(
         intel_map = svc.batch_get_cve_intelligence(list(cve_ids)[:100])
         for cve_id, intel in intel_map.items():
             if intel and intel.resolution == "resolved" and intel.nvd:
+                # DynamoDB stores cvss_v31_* fields (transform writes them, but
+                # the schema doesn't carry a version tag — the v31 in the field
+                # name is authoritative). Pass them through so issues coming from
+                # the cache get the same cvss_score/version/vector treatment as
+                # issues coming from the NVD-direct path.
                 results[cve_id] = {
                     "cwe_id": intel.nvd.cwe_ids[0] if intel.nvd.cwe_ids else None,
+                    "cvss_score": intel.nvd.cvss_v31_score,
+                    "cvss_version": "3.1" if intel.nvd.cvss_v31_score is not None else None,
+                    "cvss_vector": intel.nvd.cvss_v31_vector,
                     "cvss_attack_vector": intel.nvd.cvss_attack_vector,
                     "cvss_attack_complexity": intel.nvd.cvss_attack_complexity,
                     "cvss_privileges_required": intel.nvd.cvss_privileges_required,
@@ -775,9 +783,11 @@ def run_enrich(run_id: str) -> dict:
             if missed_cves:
                 nvd_key = settings.nvd_api_key or None
                 speed_note = (
-                    f"with API key (~{len(missed_cves) * 0.06:.0f}s expected)"
+                    f"with API key (~{len(missed_cves) * 0.66:.0f}s expected, "
+                    f"plus retries on NVD 429/503)"
                     if nvd_key
-                    else f"no API key — rate-limited (~{len(missed_cves) * 0.6:.0f}s expected)"
+                    else f"no API key — rate-limited (~{len(missed_cves) * 6.6:.0f}s expected, "
+                    f"plus retries)"
                 )
                 emit_trace(
                     run_id,
@@ -817,9 +827,9 @@ def run_enrich(run_id: str) -> dict:
             # Legacy path: Direct NVD API calls (rate-limited)
             nvd_key = settings.nvd_api_key or None
             speed_note = (
-                f"with API key (~{len(cve_ids) * 0.06:.0f}s expected)"
+                f"with API key (~{len(cve_ids) * 0.66:.0f}s expected)"
                 if nvd_key
-                else f"no API key — rate-limited (~{len(cve_ids) * 0.6:.0f}s expected)"
+                else f"no API key — rate-limited (~{len(cve_ids) * 6.6:.0f}s expected)"
             )
             emit_trace(run_id, "sub-agent-2", "MESSAGE", f"Querying NVD ({speed_note})…")
             try:
