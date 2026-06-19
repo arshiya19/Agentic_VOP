@@ -3,11 +3,17 @@ import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import '../styles/Settings.css'
 
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+
 export default function Settings() {
   const [activeSection, setActiveSection] = useState('general')
   const [config, setConfig] = useState({})
   const [settingsSections] = useState([])
 
+  // NVD Retry state
+  const [nvdRetryLoading, setNvdRetryLoading] = useState(false)
+  const [nvdRetryResult, setNvdRetryResult] = useState(null)
+  const [nvdRetryError, setNvdRetryError] = useState(null)
   const handleToggle = (section, key) => {
     setConfig(prev => ({
       ...prev,
@@ -16,6 +22,27 @@ export default function Settings() {
         [key]: !prev[section]?.[key]
       }
     }))
+  }
+
+  const handleNvdRetry = async () => {
+    setNvdRetryLoading(true)
+    setNvdRetryResult(null)
+    setNvdRetryError(null)
+    try {
+      const res = await fetch(`${API_URL}/admin/issues/retry_failed_nvd`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+      }
+      const data = await res.json()
+      setNvdRetryResult(data)
+    } catch (err) {
+      setNvdRetryError(err.message || 'Failed to retry NVD enrichment')
+    } finally {
+      setNvdRetryLoading(false)
+    }
   }
 
   const getSectionIcon = (iconName) => {
@@ -414,6 +441,74 @@ export default function Settings() {
             {/* Settings Content */}
             <div className="settings-panel">
               {renderSettingsContent()}
+
+              {/* Data Maintenance — always visible */}
+              <div className="settings-section">
+                <h2>Data Maintenance</h2>
+                <p className="section-description">Manual actions for data recovery and re-enrichment</p>
+
+                <div className="settings-group">
+                  <div className="setting-item" style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
+                    <div className="setting-info">
+                      <label>Retry Failed NVD Enrichment</label>
+                      <span className="setting-description">
+                        Re-fetch NVD data for issues missed due to API outages or timeouts,
+                        then re-score affected issues with complete data.
+                      </span>
+                    </div>
+                    <button
+                      className="btn-primary"
+                      onClick={handleNvdRetry}
+                      disabled={nvdRetryLoading}
+                      style={{ marginTop: '12px' }}
+                    >
+                      {nvdRetryLoading ? 'Retrying…' : 'Retry NVD Enrichment'}
+                    </button>
+
+                    {nvdRetryResult && (
+                      <div style={{
+                        marginTop: '12px',
+                        padding: '12px 16px',
+                        borderRadius: '8px',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        border: '1px solid rgba(16, 185, 129, 0.3)',
+                        fontSize: '13px',
+                        lineHeight: '1.6',
+                        width: '100%',
+                      }}>
+                        <strong style={{ color: '#10b981' }}>Completed</strong>
+                        <div style={{ marginTop: '6px', color: '#e2e8f0' }}>
+                          Issues found: {nvdRetryResult.issues_found} &nbsp;|&nbsp;
+                          CVEs to lookup: {nvdRetryResult.cves_to_lookup}
+                        </div>
+                        <div style={{ color: '#e2e8f0' }}>
+                          From cache: {nvdRetryResult.cves_from_cache} &nbsp;|&nbsp;
+                          From NVD API: {nvdRetryResult.cves_from_nvd_api} &nbsp;|&nbsp;
+                          Still missing: {nvdRetryResult.cves_still_missing}
+                        </div>
+                        <div style={{ color: '#e2e8f0' }}>
+                          Issues re-scored: {nvdRetryResult.issues_rescored}
+                        </div>
+                      </div>
+                    )}
+
+                    {nvdRetryError && (
+                      <div style={{
+                        marginTop: '12px',
+                        padding: '12px 16px',
+                        borderRadius: '8px',
+                        backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                        fontSize: '13px',
+                        color: '#ef4444',
+                        width: '100%',
+                      }}>
+                        <strong>Error:</strong> {nvdRetryError}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
 
               <div className="settings-footer">
                 <button className="btn-secondary">

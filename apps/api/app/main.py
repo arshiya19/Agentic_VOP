@@ -18,8 +18,10 @@ from .agents.sub_agent_2 import (
     _build_asset_index,
     _compute_score,
     _fetch_nvd_data,
+    _fetch_nvd_data_from_intelligence,
     _llm_decide,
     _resolve_asset,
+    _write_back_nvd_to_dynamo,
 )
 from .config import settings
 from .crypto import (
@@ -1178,4 +1180,283 @@ def reenrich_missing_cvss() -> ReenrichMissingResponse:
         issues_updated=issues_updated,
         issues_scores_filled=issues_scores_filled,
         issues_cwe_filled=issues_cwe_filled,
+    )
+
+
+class RetryNvdResponse(BaseModel):
+    """Summary returned by the NVD retry endpoint."""
+
+    issues_found: int
+    cves_to_lookup: int
+    cves_from_cache: int
+    cves_from_nvd_api: int
+    cves_still_missing: int
+    issues_rescored: int
+
+
+@app.post("/admin/issues/retry_failed_nvd", response_model=RetryNvdResponse)
+def retry_failed_nvd() -> RetryNvdResponse:
+    """Retry NVD enrichment for issues missing NVD-derived fields, then re-score.
+
+    Targets issues that have a CVE id but are missing critical NVD enrichment
+    (cvss_attack_vector is NULL — the strongest indicator that NVD data was
+    never fetched, since Sub-Agent 1 doesn't produce this field).
+
+    Flow:
+      1. Query issues with cve_id present but cvss_attack_vector missing.
+      2. Try DynamoDB Intelligence Service first (fast path).
+      3. Fall back to NVD API for cache misses (with circuit breaker).
+      4. Write-back successful NVD responses to DynamoDB.
+      5. For each issue with newly-available NVD data:
+         - Resolve the MITRE chain (CWE → CAPEC → ATT&CK).
+         - Resolve the asset for business context.
+         - Re-run the deterministic scoring formula.
+         - Re-run the LLM for updated prose.
+         - Update the issue row.
+
+    Idempotent — safe to call multiple times. Issues already enriched are
+    skipped by the WHERE filter.
+    """
+    sb = supabase_admin()
+
+    # 1. Find issues needing NVD data
+    rows = (
+        sb.table("issues")
+        .select(
+            "id, cve_id, severity, title, description, cvss_score, cvss_version, "
+            "cvss_vector, cvss_attack_vector, cwe_id, epss_score, epss_percentile, "
+            "exploit_in_kev, package, asset_identity"
+        )
+        .is_("cvss_attack_vector", "null")
+        .not_.is_("cve_id", "null")
+        .execute()
+        .data
+        or []
+    )
+
+    if not rows:
+        return RetryNvdResponse(
+            issues_found=0,
+            cves_to_lookup=0,
+            cves_from_cache=0,
+            cves_from_nvd_api=0,
+            cves_still_missing=0,
+            issues_rescored=0,
+        )
+
+    cve_ids = sorted({r["cve_id"] for r in rows if r.get("cve_id")})
+
+    # 2. Try DynamoDB first
+    nvd_data: dict[str, dict] = {}
+    if settings.intelligence_enabled:
+        nvd_data = _fetch_nvd_data_from_intelligence(cve_ids, run_id="retry-nvd")
+
+    cves_from_cache = len(nvd_data)
+
+    # 3. NVD API fallback for misses (circuit breaker protects against prolonged outage)
+    missed_cves = [cve for cve in cve_ids if cve not in nvd_data]
+    cves_from_nvd_api = 0
+    if missed_cves:
+        nvd_key = settings.nvd_api_key or None
+        raw_nvd_responses: list[dict] = []
+        fallback_data = _fetch_nvd_data(
+            missed_cves,
+            nvd_key,
+            run_id="retry-nvd",
+            collect_raw=raw_nvd_responses,
+        )
+        nvd_data.update(fallback_data)
+        cves_from_nvd_api = len(fallback_data)
+
+        # Write-back to DynamoDB for future cache hits
+        if raw_nvd_responses:
+            _write_back_nvd_to_dynamo(raw_nvd_responses, run_id="retry-nvd")
+
+    cves_still_missing = len(cve_ids) - len(nvd_data)
+
+    # 4. Load MITRE catalogs for newly-resolved CWEs
+    new_cwe_ids = {nvd_data[cve].get("cwe_id") for cve in nvd_data if nvd_data[cve].get("cwe_id")}
+    mitre_cwe_by_id: dict[str, dict] = {}
+    mitre_capec_by_id: dict[str, dict] = {}
+    mitre_attack_by_id: dict[str, dict] = {}
+
+    if new_cwe_ids:
+        cwe_rows = (
+            sb.table("mitre_cwe")
+            .select("cwe_id,name,description,likelihood_of_exploit,mitigations,related_capec")
+            .in_("cwe_id", list(new_cwe_ids))
+            .execute()
+            .data
+            or []
+        )
+        mitre_cwe_by_id = {row["cwe_id"]: row for row in cwe_rows}
+
+        capec_ids_needed: set[str] = set()
+        for cwe_row in mitre_cwe_by_id.values():
+            for capec_id in cwe_row.get("related_capec") or []:
+                capec_ids_needed.add(capec_id)
+
+        if capec_ids_needed:
+            capec_rows = (
+                sb.table("mitre_capec")
+                .select(
+                    "capec_id,name,likelihood_of_attack,typical_severity,related_attack_techniques"
+                )
+                .in_("capec_id", list(capec_ids_needed))
+                .execute()
+                .data
+                or []
+            )
+            mitre_capec_by_id = {row["capec_id"]: row for row in capec_rows}
+
+        attack_ids_needed: set[str] = set()
+        for capec_row in mitre_capec_by_id.values():
+            for tech_id in capec_row.get("related_attack_techniques") or []:
+                attack_ids_needed.add(tech_id)
+
+        if attack_ids_needed:
+            attack_rows = (
+                sb.table("mitre_attack_techniques")
+                .select("technique_id,name,tactics,platforms")
+                .in_("technique_id", list(attack_ids_needed))
+                .execute()
+                .data
+                or []
+            )
+            mitre_attack_by_id = {row["technique_id"]: row for row in attack_rows}
+
+    # 5. Load assets + active prompt for re-scoring + LLM
+    asset_rows = sb.table("assets").select("*").execute().data or []
+    asset_index = _build_asset_index(asset_rows)
+
+    prompt_row = (
+        sb.table("prompt_db")
+        .select("*")
+        .eq("agent", "sub-agent-2")
+        .eq("is_active", True)
+        .single()
+        .execute()
+        .data
+    )
+
+    # 6. Re-score each affected issue
+    issues_rescored = 0
+    workers = max(1, int(settings.llm_parallel_workers or 5))
+
+    def _rescore_one(issue: dict) -> bool:
+        cve = issue.get("cve_id")
+        if not cve or cve not in nvd_data:
+            return False
+
+        nvd = nvd_data[cve]
+        cwe_id = nvd.get("cwe_id") or issue.get("cwe_id")
+
+        # Build MITRE chain
+        cwe_row = mitre_cwe_by_id.get(cwe_id) if cwe_id else None
+        capec_rows_local: list[dict] = []
+        attack_rows_local: list[dict] = []
+        if cwe_row:
+            for capec_id in cwe_row.get("related_capec") or []:
+                row = mitre_capec_by_id.get(capec_id)
+                if row:
+                    capec_rows_local.append(row)
+            for capec_row in capec_rows_local:
+                for tech_id in capec_row.get("related_attack_techniques") or []:
+                    row = mitre_attack_by_id.get(tech_id)
+                    if row:
+                        attack_rows_local.append(row)
+
+        cwe_likelihood = (cwe_row or {}).get("likelihood_of_exploit")
+        attack_tactics_list = sorted(
+            {t for ar in attack_rows_local for t in (ar.get("tactics") or [])}
+        )
+
+        # Resolve asset
+        asset = _resolve_asset(issue, asset_index)
+
+        # Build scoring snapshot
+        issue_for_scoring = {
+            **issue,
+            "epss_score": issue.get("epss_score"),
+            "exploit_in_kev": issue.get("exploit_in_kev"),
+            "cvss_score": nvd.get("cvss_score") or issue.get("cvss_score"),
+            "cvss_attack_vector": nvd.get("cvss_attack_vector"),
+            "cwe_likelihood_of_exploit": cwe_likelihood,
+            "attack_tactics": attack_tactics_list,
+        }
+        scoring = _compute_score(issue_for_scoring, asset)
+
+        # LLM prose
+        mitre_payload = {
+            "cwe": cwe_row or {},
+            "capec": capec_rows_local,
+            "attack": attack_rows_local,
+        }
+        epss_for_llm = {
+            "epss_score": issue.get("epss_score"),
+            "epss_percentile": issue.get("epss_percentile"),
+        }
+
+        update_row: dict = {
+            "cwe_id": cwe_id,
+            "cwe_name": (cwe_row or {}).get("name"),
+            "cvss_score": nvd.get("cvss_score") or issue.get("cvss_score"),
+            "cvss_version": nvd.get("cvss_version") or issue.get("cvss_version"),
+            "cvss_vector": nvd.get("cvss_vector") or issue.get("cvss_vector"),
+            "cvss_attack_vector": nvd.get("cvss_attack_vector"),
+            "cvss_attack_complexity": nvd.get("cvss_attack_complexity"),
+            "cvss_privileges_required": nvd.get("cvss_privileges_required"),
+            "cvss_user_interaction": nvd.get("cvss_user_interaction"),
+            "cwe_likelihood_of_exploit": cwe_likelihood,
+            "attack_tactics": attack_tactics_list,
+            "attack_technique_ids": sorted(
+                {ar["technique_id"] for ar in attack_rows_local if ar.get("technique_id")}
+            ),
+            "derived_risk": scoring["derived_risk"],
+            "priority": scoring["priority"],
+            "components_summary": scoring["components_summary"],
+            "scoring_policy_version": scoring["scoring_policy_version"],
+            "exposure": (asset or {}).get("exposure"),
+            "business_criticality": (asset or {}).get("business_criticality"),
+            "asset_owner": (asset or {}).get("business_owner"),
+        }
+
+        # Re-generate LLM prose with full context
+        try:
+            decision = _llm_decide(
+                run_id="retry-nvd",
+                prompt_row=prompt_row,
+                issue=issue,
+                epss=epss_for_llm,
+                nvd=nvd,
+                in_kev=bool(issue.get("exploit_in_kev")),
+                mitre=mitre_payload,
+                asset=asset,
+                scoring=scoring,
+            )
+            update_row["risk_explanation"] = decision.risk_explanation
+            update_row["remediation_suggestion"] = decision.remediation_suggestion
+        except Exception:  # nosec B110 — LLM failure shouldn't block the NVD + score update  # noqa: S110
+            pass
+
+        update_row["enriched_at"] = datetime.now(UTC).isoformat()
+        sb.table("issues").update(update_row).eq("id", issue["id"]).execute()
+        return True
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_rescore_one, issue) for issue in rows]
+        for future in as_completed(futures):
+            try:
+                if future.result():
+                    issues_rescored += 1
+            except Exception:  # nosec B110 — per-issue failures are non-fatal  # noqa: S110
+                pass
+
+    return RetryNvdResponse(
+        issues_found=len(rows),
+        cves_to_lookup=len(cve_ids),
+        cves_from_cache=cves_from_cache,
+        cves_from_nvd_api=cves_from_nvd_api,
+        cves_still_missing=cves_still_missing,
+        issues_rescored=issues_rescored,
     )
