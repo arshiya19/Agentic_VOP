@@ -568,6 +568,23 @@ def _fetch_nvd_data(
         headers["apiKey"] = api_key
     delay = 0.66 if api_key else 6.6
 
+    # Filter to actual CVE-* IDs. NVD's API only recognizes CVE-YYYY-NNN — sending
+    # PYSEC/GHSA/RUSTSEC/OSV ids yields 404s that look like outages in the trace.
+    # OSV advisories often have a non-CVE primary id with no CVE alias (the
+    # advisory was never assigned a CVE), so dropping them here is the only
+    # honest option — there's nothing for NVD to return.
+    cve_ids = [c for c in cve_ids if c and c.upper().startswith("CVE-")]
+
+    if run_id:
+        sample = [repr(c) for c in cve_ids[:5]]
+        emit_trace(
+            run_id,
+            "sub-agent-2",
+            "MESSAGE",
+            f"NVD handoff: count={len(cve_ids)} api_key={'SET' if api_key else 'MISSING'} "
+            f"sample={sample}",
+        )
+
     results: dict[str, dict] = {}
     with httpx.Client(timeout=30, headers=headers) as client:
         for cve in cve_ids:
