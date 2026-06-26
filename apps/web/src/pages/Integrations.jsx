@@ -69,6 +69,7 @@ const INTEGRATION_CATALOG = [
   { category: 'Cloud Security', tools: [
     apiTool('aws-inspect-cloud', 'AWS Inspect'),
     apiTool('aws-securityhub-cloud', 'AWS Security Hub (CSPM)'),
+    apiTool('checkov-cspm', 'Checkov'),
     apiTool('crowdstrike-cloud', 'HorizonCSPM (Crowdstrike)'),
     apiTool('grype', 'Anchore Grype'),
     apiTool('iac-scanning-cloud', 'Checkov (IaC Scanning)'),
