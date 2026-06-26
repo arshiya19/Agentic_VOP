@@ -132,6 +132,100 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
     )
 
 
+class CancelRunResponse(BaseModel):
+    """Summary returned by the cancel-run endpoint."""
+
+    run_id: str
+    previous_status: str
+    new_status: str
+    scanners_cleaned: list[str]
+    issues_deleted: int
+    raw_findings_deleted: int
+
+
+@app.post("/agents/runs/{run_id}/cancel", response_model=CancelRunResponse)
+def cancel_run(run_id: str) -> CancelRunResponse:
+    """Cancel an in-flight agent run and wipe its scanner's data.
+
+    Effect:
+      1. Sets cancellation_requested=true on agent_runs (Master + Sub-Agents
+         poll this and bail at their next checkpoint).
+      2. Marks the run as 'cancelled'.
+      3. DELETES every row in `issues` and `raw_findings` for the scanner(s)
+         this run targeted — gives the user a clean slate for retry.
+      4. Resets the connection_registry watermark for each scanner so the
+         next fetch starts from the beginning.
+
+    Idempotent — safe to call again on an already-cancelled run.
+    """
+    sb = supabase_admin()
+
+    run = (
+        sb.table("agent_runs")
+        .select("run_id, status, targets")
+        .eq("run_id", run_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail=f"run_id {run_id} not found")
+
+    previous_status = run["status"]
+    targets = run.get("targets") or {}
+    scanners = targets.get("scanners") or []
+
+    # Flip the flag so any in-flight code paths see it on next poll
+    sb.table("agent_runs").update(
+        {
+            "cancellation_requested": True,
+            "status": "cancelled",
+            "completed_at": datetime.now(UTC).isoformat(),
+            "summary": {"cancelled_by_user": True, "cancelled_at": datetime.now(UTC).isoformat()},
+        }
+    ).eq("run_id", run_id).execute()
+
+    issues_deleted = 0
+    raw_findings_deleted = 0
+
+    for scanner in scanners:
+        # Count before delete so we can report numbers
+        i_count = (
+            sb.table("issues")
+            .select("id", count="exact")
+            .eq("source", scanner)
+            .limit(1)
+            .execute()
+            .count
+            or 0
+        )
+        r_count = (
+            sb.table("raw_findings")
+            .select("id", count="exact")
+            .eq("source", scanner)
+            .limit(1)
+            .execute()
+            .count
+            or 0
+        )
+        sb.table("issues").delete().eq("source", scanner).execute()
+        sb.table("raw_findings").delete().eq("source", scanner).execute()
+        sb.table("connection_registry").update({"last_fetched_at": None}).eq(
+            "tool", scanner
+        ).execute()
+        issues_deleted += i_count
+        raw_findings_deleted += r_count
+
+    return CancelRunResponse(
+        run_id=run_id,
+        previous_status=previous_status,
+        new_status="cancelled",
+        scanners_cleaned=scanners,
+        issues_deleted=issues_deleted,
+        raw_findings_deleted=raw_findings_deleted,
+    )
+
+
 # ----------------------------------------------------------------------------
 # Admin — agent model configuration
 # ----------------------------------------------------------------------------
