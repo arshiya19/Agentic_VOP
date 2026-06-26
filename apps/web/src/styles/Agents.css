@@ -338,6 +338,20 @@
   border-color: #334155;
 }
 
+.trace-btn-stop {
+  width: auto;
+  padding: 0 10px;
+  background: #2E0B0B;
+  border-color: #7F1D1D;
+  color: #FCA5A5;
+}
+
+.trace-btn-stop:hover {
+  background: #7F1D1D;
+  border-color: #B91C1C;
+  color: #FFFFFF;
+}
+
 .trace-stream {
   flex: 1;
   overflow-y: auto;
@@ -584,6 +598,38 @@
   word-break: break-word;
   max-height: 240px;
   overflow-y: auto;
+}
+
+.trace-detail-cve-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  background: #0B0F19;
+  border: 1px solid #1E293B;
+  border-radius: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.trace-detail-cve-list li {
+  padding: 6px 12px;
+  border-bottom: 1px solid #111827;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.trace-detail-cve-list li:last-child {
+  border-bottom: none;
+}
+
+.trace-detail-cve-list a {
+  color: #93C5FD;
+  text-decoration: none;
+}
+
+.trace-detail-cve-list a:hover {
+  color: #DBEAFE;
+  text-decoration: underline;
 }
 
 @media (max-width: 1100px) {

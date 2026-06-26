@@ -49,6 +49,7 @@ const oauthTool = (id, name) => ({
 
 const INTEGRATION_CATALOG = [
   { category: 'Application Security', tools: [
+    apiTool('burp-suite', 'Burp Suite'),
     apiTool('checkmarx-appsec', 'Checkmarx'),
     oauthTool('dependabot', 'Github Dependabot'),
     oauthTool('hackerone-appsec', 'Hackerone'),
@@ -69,6 +70,7 @@ const INTEGRATION_CATALOG = [
     apiTool('aws-inspect-cloud', 'AWS Inspect'),
     apiTool('aws-securityhub-cloud', 'AWS Security Hub (CSPM)'),
     apiTool('crowdstrike-cloud', 'HorizonCSPM (Crowdstrike)'),
+    apiTool('grype', 'Anchore Grype'),
     apiTool('iac-scanning-cloud', 'Checkov (IaC Scanning)'),
     apiTool('paloalto-cloud', 'Prisma Cloud (Palo Alto)'),
     apiTool('tenable-cloud', 'Tenable Cloud Security'),
@@ -130,6 +132,7 @@ const INTEGRATION_CATALOG = [
     apiTool('knowbefore-training', 'Knowbe4'),
   ]},
   { category: 'Vulnerability Management', tools: [
+    apiTool('qualys-vmdr-vuln', 'Qualys VMDR'),
     apiTool('crowdstrike-vuln', 'Crowdstrike'),
     apiTool('paloalto-vuln', 'Palo Alto'),
     apiTool('rapid7-vuln', 'Rapid7 InsiteVM'),
