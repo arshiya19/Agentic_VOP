@@ -30,7 +30,7 @@ from ..db import supabase_admin
 from ..models import MasterPlan
 from . import sub_agent_1, sub_agent_2
 from .llm import invoke_structured_with_retry
-from .trace import emit_trace
+from .trace import RunCancelledError, emit_trace, is_cancellation_requested
 
 
 # ============================================================================
@@ -235,6 +235,11 @@ def _fetch_node(state: MasterState) -> dict:
     step = state["plan"].steps[idx]
     step_label = f"Step {idx + 1}/{len(state['plan'].steps)}"
 
+    # Cancellation checkpoint — exit before doing any work
+    if is_cancellation_requested(run_id):
+        emit_trace(run_id, "master", "MESSAGE", f"{step_label}: cancellation requested, skipping FETCH")
+        raise RunCancelledError("Run cancelled before FETCH step")
+
     tool = step.tool
     per_scanner = dict(state["per_scanner"])
 
@@ -324,6 +329,11 @@ def _enrich_node(state: MasterState) -> dict:
     idx = state["step_idx"]
     step = state["plan"].steps[idx]
     step_label = f"Step {idx + 1}/{len(state['plan'].steps)}"
+
+    # Cancellation checkpoint — exit before doing any work
+    if is_cancellation_requested(run_id):
+        emit_trace(run_id, "master", "MESSAGE", f"{step_label}: cancellation requested, skipping ENRICH")
+        raise RunCancelledError("Run cancelled before ENRICH step")
 
     emit_trace(
         run_id,
@@ -513,6 +523,13 @@ def run_master(run_id: str) -> None:
     """Compile-once graph, invoke per run. Falls back to _fail_node on exception."""
     try:
         _MASTER_GRAPH.invoke({"run_id": run_id})
+    except RunCancelledError:
+        # User clicked Stop. The cancel endpoint already marked status='cancelled'
+        # and wiped data. Just emit a final trace and exit cleanly — don't call
+        # _fail_node (which would overwrite the cancelled status with 'failed').
+        emit_trace(
+            run_id, "master", "DONE", "Run cancelled by user — partial data cleared"
+        )
     except Exception as e:
         # Last-resort safety net: graph itself blew up before reaching summarize/fail.
         _fail_node({"run_id": run_id, "error_message": f"{type(e).__name__}: {str(e)[:300]}"})

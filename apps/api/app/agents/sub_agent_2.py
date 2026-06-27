@@ -32,7 +32,7 @@ from ..db import supabase_admin
 from ..models import LLMEnrichmentDecision
 from ..services.vuln_intelligence import VulnIntelligenceService
 from .llm import invoke_structured_with_retry
-from .trace import emit_trace
+from .trace import RunCancelledError, emit_trace, is_cancellation_requested
 
 
 _EPSS_API = "https://api.first.org/data/v1/epss"
@@ -707,6 +707,16 @@ def _fetch_nvd_data(
 
 def run_enrich(run_id: str) -> dict:
     """Enrich canonical Issues from this run. Returns counts."""
+    # Cancellation checkpoint — exit before any expensive work
+    if is_cancellation_requested(run_id):
+        emit_trace(
+            run_id,
+            "sub-agent-2",
+            "MESSAGE",
+            "Cancellation detected at enrichment entry — skipping",
+        )
+        raise RunCancelledError("Sub-Agent 2 stopped before enrichment due to cancellation")
+
     sb = supabase_admin()
 
     # Load Sub-Agent 2 prompt for the LLM decision step
@@ -855,6 +865,10 @@ def run_enrich(run_id: str) -> dict:
                     "MESSAGE",
                     f"Falling back to NVD API for {len(missed_cves)} "
                     f"cache-missed CVE(s) ({speed_note})…",
+                    payload={
+                        "missed_cves": sorted(missed_cves),
+                        "missed_cve_count": len(missed_cves),
+                    },
                 )
                 try:
                     raw_nvd_responses: list[dict] = []
@@ -1077,6 +1091,9 @@ def run_enrich(run_id: str) -> dict:
 
     def _process_one(issue: dict) -> dict:
         """Per-issue task: assemble enrichment, call LLM, update row. Runs in a worker thread."""
+        # Cancellation checkpoint — skip remaining issues once cancellation is set.
+        if is_cancellation_requested(run_id):
+            raise RunCancelledError(f"Skipping issue {issue.get('id')} — run cancelled")
         cve = issue.get("cve_id")
         epss = epss_data.get(cve, {}) if cve else {}
         epss_score = epss.get("epss_score")
@@ -1211,6 +1228,7 @@ def run_enrich(run_id: str) -> dict:
         sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
         return {"epss_hit": epss_score is not None, "kev_hit": in_kev}
 
+    cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, issue): issue for issue in issues}
         completed = 0
@@ -1224,6 +1242,8 @@ def run_enrich(run_id: str) -> dict:
                     epss_hits += 1
                 if result.get("kev_hit"):
                     kev_hits += 1
+            except RunCancelledError:
+                cancelled = True
             except Exception as e:
                 failed += 1
                 if failed <= 3:
@@ -1243,6 +1263,16 @@ def run_enrich(run_id: str) -> dict:
                     f"Enriched {completed}/{len(issues)} issues "
                     f"({enriched} succeeded, {failed} failed so far)",
                 )
+
+    if cancelled:
+        emit_trace(
+            run_id,
+            "sub-agent-2",
+            "MESSAGE",
+            f"Cancellation detected — stopped after enriching {enriched} issue(s); "
+            f"remaining skipped (data will be wiped by cancel endpoint)",
+        )
+        raise RunCancelledError("Sub-Agent 2 stopped due to user cancellation")
 
     emit_trace(
         run_id,

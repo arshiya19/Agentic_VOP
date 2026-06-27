@@ -33,7 +33,7 @@ from ..db import supabase_admin
 from ..models import LLMNormalizedIssue
 from .connectors import fetch_raw_rows
 from .llm import invoke_structured_with_retry
-from .trace import emit_trace
+from .trace import RunCancelledError, emit_trace, is_cancellation_requested
 
 
 def _sanitize(value: Any) -> Any:
@@ -312,6 +312,10 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
 
     def _process_one(persisted: dict) -> dict:
         """Per-row task: LLM-normalize then insert. Runs inside a worker thread."""
+        # Cancellation checkpoint — skip remaining rows once a stop is requested.
+        # Lightweight DB poll per row; cheap compared to the LLM call below.
+        if is_cancellation_requested(run_id):
+            raise RunCancelledError(f"Skipping row {persisted['id']} — run cancelled")
         raw_finding_id = persisted["id"]
         raw = persisted["raw"]
         llm_issue = _normalize_row(run_id, prompt_row, tool, raw, mapping_rules)
@@ -341,6 +345,7 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
         _insert_issue(sb, llm_issue, raw_finding_id, run_id)
         return {"raw_finding_id": raw_finding_id}
 
+    cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, p): p for p in persisted_raws}
         completed = 0
@@ -350,6 +355,9 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
             try:
                 future.result()
                 inserted += 1
+            except RunCancelledError:
+                # User clicked Stop — drain remaining futures but skip work.
+                cancelled = True
             except Exception as e:
                 failed += 1
                 if len(failure_examples) < 3:
@@ -374,6 +382,16 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
                     f"Processed {completed}/{len(persisted_raws)} rows "
                     f"({inserted} succeeded, {failed} failed so far)",
                 )
+
+    if cancelled:
+        emit_trace(
+            run_id,
+            "sub-agent-1",
+            "MESSAGE",
+            f"Cancellation detected — stopped after {inserted} normalized row(s) "
+            f"(remaining rows skipped, will be wiped by cancel endpoint)",
+        )
+        raise RunCancelledError("Sub-Agent 1 stopped due to user cancellation")
 
     if failed:
         emit_trace(
