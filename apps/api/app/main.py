@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .agents.connectors.file_upload import SCANNER_BUCKET, sniff_format
 from .agents.master import run_master
+from .agents.remediation.planner import persist_package, plan_remediation
 from .agents.sub_agent_1 import (
     extract_all_vectors_from_raw,
     parse_cvss_vector,
@@ -131,6 +132,100 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
         run_id=row["run_id"],
         event_id=row["event_id"],
         status=row["status"],
+    )
+
+
+class CancelRunResponse(BaseModel):
+    """Summary returned by the cancel-run endpoint."""
+
+    run_id: str
+    previous_status: str
+    new_status: str
+    scanners_cleaned: list[str]
+    issues_deleted: int
+    raw_findings_deleted: int
+
+
+@app.post("/agents/runs/{run_id}/cancel", response_model=CancelRunResponse)
+def cancel_run(run_id: str) -> CancelRunResponse:
+    """Cancel an in-flight agent run and wipe its scanner's data.
+
+    Effect:
+      1. Sets cancellation_requested=true on agent_runs (Master + Sub-Agents
+         poll this and bail at their next checkpoint).
+      2. Marks the run as 'cancelled'.
+      3. DELETES every row in `issues` and `raw_findings` for the scanner(s)
+         this run targeted — gives the user a clean slate for retry.
+      4. Resets the connection_registry watermark for each scanner so the
+         next fetch starts from the beginning.
+
+    Idempotent — safe to call again on an already-cancelled run.
+    """
+    sb = supabase_admin()
+
+    run = (
+        sb.table("agent_runs")
+        .select("run_id, status, targets")
+        .eq("run_id", run_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail=f"run_id {run_id} not found")
+
+    previous_status = run["status"]
+    targets = run.get("targets") or {}
+    scanners = targets.get("scanners") or []
+
+    # Flip the flag so any in-flight code paths see it on next poll
+    sb.table("agent_runs").update(
+        {
+            "cancellation_requested": True,
+            "status": "cancelled",
+            "completed_at": datetime.now(UTC).isoformat(),
+            "summary": {"cancelled_by_user": True, "cancelled_at": datetime.now(UTC).isoformat()},
+        }
+    ).eq("run_id", run_id).execute()
+
+    issues_deleted = 0
+    raw_findings_deleted = 0
+
+    for scanner in scanners:
+        # Count before delete so we can report numbers
+        i_count = (
+            sb.table("issues")
+            .select("id", count="exact")
+            .eq("source", scanner)
+            .limit(1)
+            .execute()
+            .count
+            or 0
+        )
+        r_count = (
+            sb.table("raw_findings")
+            .select("id", count="exact")
+            .eq("source", scanner)
+            .limit(1)
+            .execute()
+            .count
+            or 0
+        )
+        sb.table("issues").delete().eq("source", scanner).execute()
+        sb.table("raw_findings").delete().eq("source", scanner).execute()
+        sb.table("connection_registry").update({"last_fetched_at": None}).eq(
+            "tool", scanner
+        ).execute()
+        issues_deleted += i_count
+        raw_findings_deleted += r_count
+
+    return CancelRunResponse(
+        run_id=run_id,
+        previous_status=previous_status,
+        new_status="cancelled",
+        scanners_cleaned=scanners,
+        issues_deleted=issues_deleted,
+        raw_findings_deleted=raw_findings_deleted,
     )
 
 
@@ -1460,3 +1555,189 @@ def retry_failed_nvd() -> RetryNvdResponse:
         cves_still_missing=cves_still_missing,
         issues_rescored=issues_rescored,
     )
+
+
+# =============================================================================
+# Remediation Packages — Phase-1 §5 / §9 (Day 5)
+# =============================================================================
+
+class GeneratePackagesRequest(BaseModel):
+    issue_ids: list[int] = Field(..., min_length=1, max_length=20)
+
+
+class PackageGeneratedItem(BaseModel):
+    issue_id: int
+    package_id: int | None = None
+    status: str  # 'created' | 'failed'
+    error: str | None = None
+
+
+class GeneratePackagesResponse(BaseModel):
+    run_id: str
+    packages: list[PackageGeneratedItem]
+
+
+class RejectPackageRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+    rejected_by: str = Field("system", max_length=120)
+
+
+class ApprovePackageRequest(BaseModel):
+    approved_by: str = Field("system", max_length=120)
+
+
+def _create_planner_run(sb) -> str:
+    """Create one agent_runs row for a /generate batch so trace events have a
+    valid run_id and the resulting packages can be grouped under one run."""
+    import uuid as _uuid
+    import time as _time
+    run_id = str(_uuid.uuid4())
+    sb.table("agent_runs").insert({
+        "run_id": run_id,
+        "event_id": f"remediation-planner-api-{int(_time.time() * 1000)}",
+        "triggered_by": "remediation_planner_api",
+        "action": "FULL",
+        "targets": {"scanners": [], "scope": ["remediation_packages_generate"]},
+        "status": "running",
+    }).execute()
+    return run_id
+
+
+def _complete_planner_run(sb, run_id: str, *, success_count: int, total: int) -> None:
+    sb.table("agent_runs").update({
+        "status": "completed" if success_count == total else "failed",
+        "completed_at": datetime.now(UTC).isoformat(),
+        "summary": {"agent": "sub-agent-3", "packages_generated": success_count, "requested": total},
+    }).eq("run_id", run_id).execute()
+
+
+@app.post("/admin/remediation-packages/generate", response_model=GeneratePackagesResponse)
+def generate_remediation_packages(body: GeneratePackagesRequest) -> GeneratePackagesResponse:
+    """Generate + persist a Remediation Package for each issue_id.
+
+    Sequential (one LLM call per issue). For Phase-1's 5 demo issues this
+    takes ~75-100s total; acceptable since this is a one-off demo flow.
+    """
+    sb = supabase_admin()
+    run_id = _create_planner_run(sb)
+    results: list[PackageGeneratedItem] = []
+
+    for issue_id in body.issue_ids:
+        resp = (
+            sb.table("issues")
+            .select(
+                "id,source,severity,priority,cve_id,cwe_id,title,description,"
+                "asset_identity,package,runtime_hostname,runtime_ipv4,"
+                "runtime_os_family,runtime_purl"
+            )
+            .eq("id", issue_id)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            results.append(PackageGeneratedItem(
+                issue_id=issue_id, status="failed", error="issue not found"))
+            continue
+        try:
+            pkg = plan_remediation(resp.data[0], run_id=run_id, sb=sb)
+            pkg_id = persist_package(pkg, run_id=run_id, sb=sb)
+            results.append(PackageGeneratedItem(
+                issue_id=issue_id, package_id=pkg_id, status="created"))
+        except Exception as exc:  # noqa: BLE001
+            results.append(PackageGeneratedItem(
+                issue_id=issue_id, status="failed", error=f"{type(exc).__name__}: {str(exc)[:200]}"))
+
+    successes = sum(1 for r in results if r.status == "created")
+    _complete_planner_run(sb, run_id, success_count=successes, total=len(body.issue_ids))
+    return GeneratePackagesResponse(run_id=run_id, packages=results)
+
+
+@app.get("/admin/remediation-packages")
+def list_remediation_packages(
+    status: str | None = None,
+    issue_id: int | None = None,
+    limit: int = 50,
+) -> dict:
+    """List packages — paginated, filterable by status + issue_id."""
+    sb = supabase_admin()
+    q = (
+        sb.table("remediation_packages")
+        .select(
+            "id,issue_id,family,finding,status,approval_required,"
+            "recommended_pathway_index,agent_run_id,approved_by,approved_at,"
+            "rejected_reason,created_at,updated_at"
+        )
+        .order("created_at", desc=True)
+        .limit(max(1, min(200, limit)))
+    )
+    if status:
+        q = q.eq("status", status)
+    if issue_id is not None:
+        q = q.eq("issue_id", issue_id)
+    resp = q.execute()
+    return {"packages": resp.data or []}
+
+
+@app.get("/admin/remediation-packages/{pkg_id}")
+def get_remediation_package(pkg_id: int) -> dict:
+    """Full package detail — includes the pathways jsonb (with confidence
+    breakdowns, validation_metadata, rollback_plan, etc.)."""
+    sb = supabase_admin()
+    resp = sb.table("remediation_packages").select("*").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"remediation_package {pkg_id} not found")
+    return resp.data[0]
+
+
+@app.post("/admin/remediation-packages/{pkg_id}/approve")
+def approve_remediation_package(pkg_id: int, body: ApprovePackageRequest | None = None) -> dict:
+    """Transition the package: awaiting_approval → approved → ready_for_execution.
+
+    Phase-1 collapses approval into a single step (single_approver default).
+    multi_stage approvals require multiple POSTs; not enforced server-side
+    in Phase-1 — the UI controls it.
+    """
+    sb = supabase_admin()
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"remediation_package {pkg_id} not found")
+    current = resp.data[0]["status"]
+    if current in ("approved", "ready_for_execution"):
+        return {"id": pkg_id, "status": current, "message": "already approved"}
+    if current == "rejected":
+        raise HTTPException(status_code=409, detail="package was rejected; cannot approve")
+
+    approved_by = (body.approved_by if body else "system")
+    sb.table("remediation_packages").update({
+        "status": "ready_for_execution",
+        "approved_by": approved_by,
+        "approved_at": datetime.now(UTC).isoformat(),
+        "rejected_reason": None,
+    }).eq("id", pkg_id).execute()
+    return {"id": pkg_id, "status": "ready_for_execution", "approved_by": approved_by}
+
+
+@app.post("/admin/remediation-packages/{pkg_id}/reject")
+def reject_remediation_package(pkg_id: int, body: RejectPackageRequest) -> dict:
+    """Transition the package: awaiting_approval → rejected. Final state.
+
+    To re-attempt, generate a new package for the same issue (will create a
+    new row — packages are append-only history).
+    """
+    sb = supabase_admin()
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"remediation_package {pkg_id} not found")
+    current = resp.data[0]["status"]
+    if current in ("approved", "ready_for_execution"):
+        raise HTTPException(status_code=409, detail=f"package is already {current}; cannot reject")
+    if current == "rejected":
+        return {"id": pkg_id, "status": "rejected", "message": "already rejected"}
+
+    sb.table("remediation_packages").update({
+        "status": "rejected",
+        "rejected_reason": body.reason,
+        "approved_by": body.rejected_by,
+        "approved_at": datetime.now(UTC).isoformat(),
+    }).eq("id", pkg_id).execute()
+    return {"id": pkg_id, "status": "rejected", "reason": body.reason, "rejected_by": body.rejected_by}
