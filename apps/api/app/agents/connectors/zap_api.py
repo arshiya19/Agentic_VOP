@@ -77,7 +77,9 @@ def _run_spider(
     resp = client.get(f"{base_url}/JSON/spider/action/scan/", params=spider_params)
 
     if resp.status_code != 200:
-        raise RuntimeError(f"ZAP spider failed to start: HTTP {resp.status_code} — {resp.text[:200]}")
+        raise RuntimeError(
+            f"ZAP spider failed to start: HTTP {resp.status_code} — {resp.text[:200]}"
+        )
 
     scan_id = resp.json().get("scan")
     if not scan_id:
