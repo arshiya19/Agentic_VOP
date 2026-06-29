@@ -35,9 +35,16 @@ def classify_finding(issue: dict) -> Family:
 
     # 1) Checkov + public storage -> public_exposure
     if source.startswith("checkov"):
-        if ("s3" in title or "bucket" in title or "storage" in title or "blob" in title) and "public" in title:
+        if (
+            "s3" in title or "bucket" in title or "storage" in title or "blob" in title
+        ) and "public" in title:
             return "public_exposure"
-        if "security group" in title or "security_group" in title or "0.0.0.0/0" in title or " ssh" in title:
+        if (
+            "security group" in title
+            or "security_group" in title
+            or "0.0.0.0/0" in title
+            or " ssh" in title
+        ):
             return "network_exposure"
 
     # 2) SCA tools -> vulnerable_dependency (regardless of title keywords)
@@ -48,7 +55,9 @@ def classify_finding(issue: dict) -> Family:
     if source == "grype":
         if purl.startswith(("pkg:apk", "pkg:deb", "pkg:rpm")):
             return "os_vulnerability"
-        if purl.startswith(("pkg:npm", "pkg:pypi", "pkg:maven", "pkg:gem", "pkg:cargo", "pkg:nuget", "pkg:golang")):
+        if purl.startswith(
+            ("pkg:npm", "pkg:pypi", "pkg:maven", "pkg:gem", "pkg:cargo", "pkg:nuget", "pkg:golang")
+        ):
             return "vulnerable_dependency"
         return "os_vulnerability"  # most grype findings are OS-level
 
@@ -58,24 +67,33 @@ def classify_finding(issue: dict) -> Family:
 
     # 5) Injection CWEs / SAST / DAST -> injection
     INJECTION_CWES = {
-        "CWE-89",   # SQL Injection
-        "CWE-78",   # OS Command Injection
-        "CWE-94",   # Code Injection
-        "CWE-95",   # eval Injection
-        "CWE-77",   # Generic Command Injection
-        "CWE-90",   # LDAP Injection
-        "CWE-91",   # XML Injection
-        "CWE-79",   # XSS
-        "CWE-74",   # Generic Injection
+        "CWE-89",  # SQL Injection
+        "CWE-78",  # OS Command Injection
+        "CWE-94",  # Code Injection
+        "CWE-95",  # eval Injection
+        "CWE-77",  # Generic Command Injection
+        "CWE-90",  # LDAP Injection
+        "CWE-91",  # XML Injection
+        "CWE-79",  # XSS
+        "CWE-74",  # Generic Injection
     }
     if cwe in INJECTION_CWES:
         return "injection"
 
-    if any(kw in title for kw in (
-        "sql injection", "command injection", "code injection",
-        "ldap injection", "xml injection", "template injection", "xss",
-        "cross-site scripting", "cross site scripting",
-    )):
+    if any(
+        kw in title
+        for kw in (
+            "sql injection",
+            "command injection",
+            "code injection",
+            "ldap injection",
+            "xml injection",
+            "template injection",
+            "xss",
+            "cross-site scripting",
+            "cross site scripting",
+        )
+    ):
         return "injection"
 
     if source in ("sonarqube-appsec", "semgrep-appsec", "burp-suite"):

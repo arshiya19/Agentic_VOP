@@ -335,11 +335,7 @@ def _resolve_asset(issue: dict, asset_index: dict) -> dict | None:
         or pkg_obj.get("name")
         or pkg_obj.get("package_name")
     )
-    ecosystem = (
-        ai.get("ecosystem")
-        or pkg_obj.get("ecosystem")
-        or pkg_obj.get("type")
-    )
+    ecosystem = ai.get("ecosystem") or pkg_obj.get("ecosystem") or pkg_obj.get("type")
 
     # 2. SBOM match — precise when ecosystem is known
     if pkg_name and ecosystem:
@@ -476,6 +472,7 @@ def _fetch_nvd_data_from_intelligence(
     """Fetch NVD data using the DynamoDB Intelligence Service (fast path).
 
     Returns the same dict shape as _fetch_nvd_data so it's a drop-in replacement.
+    Handles batching internally — callers may pass more than 100 CVE IDs.
     """
     svc = _get_intelligence_service()
     if svc is None:
@@ -483,24 +480,24 @@ def _fetch_nvd_data_from_intelligence(
 
     results: dict[str, dict] = {}
     try:
-        intel_map = svc.batch_get_cve_intelligence(list(cve_ids)[:100])
-        for cve_id, intel in intel_map.items():
-            if intel and intel.resolution == "resolved" and intel.nvd:
-                # DynamoDB stores cvss_v31_* fields (transform writes them, but
-                # the schema doesn't carry a version tag — the v31 in the field
-                # name is authoritative). Pass them through so issues coming from
-                # the cache get the same cvss_score/version/vector treatment as
-                # issues coming from the NVD-direct path.
-                results[cve_id] = {
-                    "cwe_id": intel.nvd.cwe_ids[0] if intel.nvd.cwe_ids else None,
-                    "cvss_score": intel.nvd.cvss_v31_score,
-                    "cvss_version": "3.1" if intel.nvd.cvss_v31_score is not None else None,
-                    "cvss_vector": intel.nvd.cvss_v31_vector,
-                    "cvss_attack_vector": intel.nvd.cvss_attack_vector,
-                    "cvss_attack_complexity": intel.nvd.cvss_attack_complexity,
-                    "cvss_privileges_required": intel.nvd.cvss_privileges_required,
-                    "cvss_user_interaction": intel.nvd.cvss_user_interaction,
-                }
+        # DynamoDB BatchGetItem supports max 100 keys per call. Chunk the input
+        # so we don't silently drop CVEs beyond the first 100.
+        all_cve_ids = list(cve_ids)
+        for i in range(0, len(all_cve_ids), 100):
+            chunk = all_cve_ids[i : i + 100]
+            intel_map = svc.batch_get_cve_intelligence(chunk)
+            for cve_id, intel in intel_map.items():
+                if intel and intel.resolution == "resolved" and intel.nvd:
+                    results[cve_id] = {
+                        "cwe_id": intel.nvd.cwe_ids[0] if intel.nvd.cwe_ids else None,
+                        "cvss_score": intel.nvd.cvss_v31_score,
+                        "cvss_version": "3.1" if intel.nvd.cvss_v31_score is not None else None,
+                        "cvss_vector": intel.nvd.cvss_v31_vector,
+                        "cvss_attack_vector": intel.nvd.cvss_attack_vector,
+                        "cvss_attack_complexity": intel.nvd.cvss_attack_complexity,
+                        "cvss_privileges_required": intel.nvd.cvss_privileges_required,
+                        "cvss_user_interaction": intel.nvd.cvss_user_interaction,
+                    }
     except Exception as e:
         if run_id:
             emit_trace(
@@ -543,12 +540,70 @@ def _write_back_nvd_to_dynamo(raw_responses: list[dict], run_id: str | None = No
             )
 
 
+def _parse_nvd_response(vulns: list[dict]) -> dict:
+    """Extract CWE + CVSS fields from an NVD API response's vulnerabilities list.
+
+    Pure parsing — no HTTP, no side-effects.
+    """
+    if not vulns:
+        return {}
+
+    cve_data = vulns[0].get("cve", {}) or {}
+    metrics = cve_data.get("metrics", {}) or {}
+
+    # Prefer CVSS v3.1, fall back to v3.0
+    cvss: dict | None = None
+    cvss_version_picked: str | None = None
+    for m in metrics.get("cvssMetricV31", []) or []:
+        if m.get("type") == "Primary":
+            cvss = m.get("cvssData") or {}
+            cvss_version_picked = "3.1"
+            break
+    if cvss is None:
+        for m in metrics.get("cvssMetricV30", []) or []:
+            if m.get("type") == "Primary":
+                cvss = m.get("cvssData") or {}
+                cvss_version_picked = "3.0"
+                break
+
+    # CWE id from weaknesses[]
+    cwe_id: str | None = None
+    for w in cve_data.get("weaknesses", []) or []:
+        for d in w.get("description", []) or []:
+            v = (d.get("value") or "").strip()
+            if v.upper().startswith("CWE-"):
+                cwe_id = v
+                break
+        if cwe_id:
+            break
+
+    base_score = (cvss or {}).get("baseScore")
+    vector_string = (cvss or {}).get("vectorString")
+
+    return {
+        "cwe_id": cwe_id,
+        "cvss_score": float(base_score) if base_score is not None else None,
+        "cvss_version": cvss_version_picked,
+        "cvss_vector": vector_string,
+        "cvss_attack_vector": (cvss or {}).get("attackVector"),
+        "cvss_attack_complexity": (cvss or {}).get("attackComplexity"),
+        "cvss_privileges_required": (cvss or {}).get("privilegesRequired"),
+        "cvss_user_interaction": (cvss or {}).get("userInteraction"),
+    }
+
+
+# Circuit breaker threshold — after this many consecutive NVD failures,
+# stop attempting remaining CVEs and record them as missed.
+_CIRCUIT_BREAKER_THRESHOLD = 5
+
+
 def _fetch_nvd_data(
     cve_ids: list[str],
     api_key: str | None,
     run_id: str | None = None,
     *,
     collect_raw: list[dict] | None = None,
+    collect_missed: list[str] | None = None,
 ) -> dict[str, dict]:
     """For each CVE, fetch NVD data: CWE id + CVSS v3 vector breakdown.
 
@@ -560,8 +615,15 @@ def _fetch_nvd_data(
     doesn't tip us over the limit. Sequential — no parallelism — so the
     pace is the only thing keeping us under the limit.
 
+    Circuit breaker: after `_CIRCUIT_BREAKER_THRESHOLD` consecutive failures,
+    the loop stops early and remaining CVE IDs are appended to `collect_missed`
+    (if provided). This avoids spending minutes hammering a degraded/down API.
+
     If `collect_raw` is provided (a list), raw NVD vulnerability objects
     are appended to it for downstream write-back to DynamoDB.
+
+    If `collect_missed` is provided (a list), CVE IDs that could not be
+    fetched (individual failures + circuit-breaker skipped) are appended.
     """
     headers: dict[str, str] = {}
     if api_key:
@@ -586,8 +648,27 @@ def _fetch_nvd_data(
         )
 
     results: dict[str, dict] = {}
+    consecutive_failures = 0
+
     with httpx.Client(timeout=30, headers=headers) as client:
         for cve in cve_ids:
+            # --- Circuit breaker: stop if NVD is consistently failing ---
+            if consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+                remaining = [c for c in cve_ids if c not in results and c != cve]
+                remaining.insert(0, cve)
+                if collect_missed is not None:
+                    collect_missed.extend(remaining)
+                if run_id:
+                    emit_trace(
+                        run_id,
+                        "sub-agent-2",
+                        "MESSAGE",
+                        f"Circuit breaker open — {consecutive_failures} consecutive NVD "
+                        f"failures. Skipping remaining {len(remaining)} CVE(s) for "
+                        f"deferred retry.",
+                    )
+                break
+
             try:
                 resp = request_with_retry(
                     client,
@@ -595,12 +676,8 @@ def _fetch_nvd_data(
                     _NVD_API,
                     params={"cveId": cve},
                     timeout=30,
-                    # NVD's published rate is 50/30s with key. Even at our padded
-                    # 0.66s pace we occasionally see a 429 burst when their rolling
-                    # window aligns oddly with ours. 5 retries with exponential
-                    # backoff (0.5 → 1 → 2 → 4 → 8s) buys ~16s of patience per CVE.
                     max_attempts=5,
-                    backoff_factor=1.0,
+                    backoff_factor=2.0,
                     run_id=run_id,
                     agent="sub-agent-2",
                 )
@@ -613,50 +690,16 @@ def _fetch_nvd_data(
                 if collect_raw is not None:
                     collect_raw.append(vulns[0])
 
-                cve_data = vulns[0].get("cve", {}) or {}
-                metrics = cve_data.get("metrics", {}) or {}
+                parsed = _parse_nvd_response(vulns)
+                if parsed:
+                    results[cve] = parsed
 
-                # Prefer CVSS v3.1, fall back to v3.0
-                cvss: dict | None = None
-                cvss_version_picked: str | None = None
-                for m in metrics.get("cvssMetricV31", []) or []:
-                    if m.get("type") == "Primary":
-                        cvss = m.get("cvssData") or {}
-                        cvss_version_picked = "3.1"
-                        break
-                if cvss is None:
-                    for m in metrics.get("cvssMetricV30", []) or []:
-                        if m.get("type") == "Primary":
-                            cvss = m.get("cvssData") or {}
-                            cvss_version_picked = "3.0"
-                            break
-
-                # CWE id from weaknesses[]
-                cwe_id: str | None = None
-                for w in cve_data.get("weaknesses", []) or []:
-                    for d in w.get("description", []) or []:
-                        v = (d.get("value") or "").strip()
-                        if v.upper().startswith("CWE-"):
-                            cwe_id = v
-                            break
-                    if cwe_id:
-                        break
-
-                base_score = (cvss or {}).get("baseScore")
-                vector_string = (cvss or {}).get("vectorString")
-
-                results[cve] = {
-                    "cwe_id": cwe_id,
-                    "cvss_score": float(base_score) if base_score is not None else None,
-                    "cvss_version": cvss_version_picked,
-                    "cvss_vector": vector_string,
-                    "cvss_attack_vector": (cvss or {}).get("attackVector"),
-                    "cvss_attack_complexity": (cvss or {}).get("attackComplexity"),
-                    "cvss_privileges_required": (cvss or {}).get("privilegesRequired"),
-                    "cvss_user_interaction": (cvss or {}).get("userInteraction"),
-                }
+                # Success — reset circuit breaker counter
+                consecutive_failures = 0
             except Exception:  # nosec B110 — intentional: skip individual CVE NVD fetch failures, continue to next CVE  # noqa: S110
-                pass
+                consecutive_failures += 1
+                if collect_missed is not None:
+                    collect_missed.append(cve)
             time.sleep(delay)
 
     return results
@@ -829,18 +872,25 @@ def run_enrich(run_id: str) -> dict:
                 )
                 try:
                     raw_nvd_responses: list[dict] = []
+                    nvd_missed: list[str] = []
                     fallback_data = _fetch_nvd_data(
                         missed_cves,
                         nvd_key,
                         run_id=run_id,
                         collect_raw=raw_nvd_responses,
+                        collect_missed=nvd_missed,
                     )
                     nvd_data.update(fallback_data)
                     emit_trace(
                         run_id,
                         "sub-agent-2",
                         "MESSAGE",
-                        f"NVD API fallback returned data for {len(fallback_data)} CVE(s)",
+                        f"NVD API fallback returned data for {len(fallback_data)} CVE(s)"
+                        + (
+                            f" — {len(nvd_missed)} CVE(s) deferred (circuit breaker / failures)"
+                            if nvd_missed
+                            else ""
+                        ),
                     )
 
                     # Write-back: store NVD API results into DynamoDB so
@@ -864,12 +914,23 @@ def run_enrich(run_id: str) -> dict:
             )
             emit_trace(run_id, "sub-agent-2", "MESSAGE", f"Querying NVD ({speed_note})…")
             try:
-                nvd_data = _fetch_nvd_data(list(cve_ids), nvd_key, run_id=run_id)
+                nvd_missed_legacy: list[str] = []
+                nvd_data = _fetch_nvd_data(
+                    list(cve_ids),
+                    nvd_key,
+                    run_id=run_id,
+                    collect_missed=nvd_missed_legacy,
+                )
                 emit_trace(
                     run_id,
                     "sub-agent-2",
                     "MESSAGE",
-                    f"NVD returned data for {len(nvd_data)} CVE(s)",
+                    f"NVD returned data for {len(nvd_data)} CVE(s)"
+                    + (
+                        f" — {len(nvd_missed_legacy)} CVE(s) deferred (circuit breaker / failures)"
+                        if nvd_missed_legacy
+                        else ""
+                    ),
                 )
             except Exception as e:
                 emit_trace(

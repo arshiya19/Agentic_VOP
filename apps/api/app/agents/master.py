@@ -237,7 +237,9 @@ def _fetch_node(state: MasterState) -> dict:
 
     # Cancellation checkpoint — exit before doing any work
     if is_cancellation_requested(run_id):
-        emit_trace(run_id, "master", "MESSAGE", f"{step_label}: cancellation requested, skipping FETCH")
+        emit_trace(
+            run_id, "master", "MESSAGE", f"{step_label}: cancellation requested, skipping FETCH"
+        )
         raise RunCancelledError("Run cancelled before FETCH step")
 
     tool = step.tool
@@ -332,7 +334,9 @@ def _enrich_node(state: MasterState) -> dict:
 
     # Cancellation checkpoint — exit before doing any work
     if is_cancellation_requested(run_id):
-        emit_trace(run_id, "master", "MESSAGE", f"{step_label}: cancellation requested, skipping ENRICH")
+        emit_trace(
+            run_id, "master", "MESSAGE", f"{step_label}: cancellation requested, skipping ENRICH"
+        )
         raise RunCancelledError("Run cancelled before ENRICH step")
 
     emit_trace(
@@ -527,9 +531,7 @@ def run_master(run_id: str) -> None:
         # User clicked Stop. The cancel endpoint already marked status='cancelled'
         # and wiped data. Just emit a final trace and exit cleanly — don't call
         # _fail_node (which would overwrite the cancelled status with 'failed').
-        emit_trace(
-            run_id, "master", "DONE", "Run cancelled by user — partial data cleared"
-        )
+        emit_trace(run_id, "master", "DONE", "Run cancelled by user — partial data cleared")
     except Exception as e:
         # Last-resort safety net: graph itself blew up before reaching summarize/fail.
         _fail_node({"run_id": run_id, "error_message": f"{type(e).__name__}: {str(e)[:300]}"})
