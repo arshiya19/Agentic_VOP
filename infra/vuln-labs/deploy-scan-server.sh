@@ -1,50 +1,61 @@
 #!/bin/bash
-# Deploys the scan server to the EC2 lab instance and starts it.
-# Run from the repo root: bash infra/vuln-labs/deploy-scan-server.sh
-
+# =============================================================================
+# Deploy Scan Server to env1 (Scan Source)
+# =============================================================================
+# Copies the CSPM sample file and verifies the scan server is running.
+# The scan server itself is installed via user-data on instance creation.
+#
+# Run from the repo root:
+#   bash infra/vuln-labs/deploy-scan-server.sh
+#
+# Prerequisites:
+#   - env1 must be deployed (terraform apply from infra/vuln-labs/env1/)
+#   - The SSH key file must exist at infra/vuln-labs/env1/vop-vuln-lab-env1-key.pem
+# =============================================================================
 set -e
 
-KEY="infra/vuln-labs/lab-key.pem"
-HOST="ubuntu@98.83.143.120"
+ENV1_DIR="infra/vuln-labs/env1"
+
+# Get the public IP from Terraform state
+echo "==> Reading env1 instance IP from Terraform output..."
+PUBLIC_IP=$(cd "$ENV1_DIR" && terraform output -raw instance_public_ip)
+
+if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "" ]; then
+  echo "ERROR: Could not read instance_public_ip from env1 Terraform state."
+  echo "       Make sure env1 is deployed: cd $ENV1_DIR && terraform apply"
+  exit 1
+fi
+
+KEY="$ENV1_DIR/vop-vuln-lab-env1-key.pem"
+HOST="ubuntu@$PUBLIC_IP"
 SSH="ssh -i $KEY -o StrictHostKeyChecking=no"
 SCP="scp -i $KEY -o StrictHostKeyChecking=no"
 
-echo "==> Copying Terraform files for CSPM scanning..."
+echo "==> Target: $HOST"
+
+echo "==> Copying CSPM sample to instance for Checkov scanning..."
 $SSH $HOST "mkdir -p /opt/vuln-labs/cspm-lab"
-$SCP infra/vuln-labs/main.tf $HOST:/opt/vuln-labs/cspm-lab/
+$SCP infra/vuln-labs/vuln-samples/cspm-lab.tf $HOST:/opt/vuln-labs/cspm-lab/
 
-echo "==> Copying scan server..."
-$SCP infra/vuln-labs/scan-server.py $HOST:/opt/vuln-labs/scan-server.py
-
-echo "==> Opening port 8090 in security group..."
-SG_ID=$(cd infra/vuln-labs && terraform output -raw security_group_id)
-aws ec2 authorize-security-group-ingress \
-  --group-id "$SG_ID" \
-  --protocol tcp \
-  --port 8090 \
-  --cidr 0.0.0.0/0 \
-  --region us-east-1 2>/dev/null || echo "  (port 8090 rule already exists)"
-
-echo "==> Starting scan server on EC2 (background)..."
-$SSH $HOST "pkill -f scan-server.py 2>/dev/null || true"
-$SSH $HOST "nohup python3 /opt/vuln-labs/scan-server.py > /tmp/scan-server.log 2>&1 &"
-
-echo "==> Waiting for server to start..."
-sleep 3
+echo "==> Checking scan server status..."
+$SSH $HOST "systemctl is-active scan-server && echo 'Scan server is running' || echo 'Scan server is NOT running'"
 
 echo "==> Testing health endpoint..."
-curl -s "http://98.83.143.120:8090/health"
-echo ""
+sleep 2
+curl -sf "http://$PUBLIC_IP:8090/health" && echo "" || echo "WARNING: Health check failed. Instance may still be bootstrapping."
 
 echo ""
-echo "Done! Scan server is running at http://98.83.143.120:8090"
+echo "============================================="
+echo "Scan server: http://$PUBLIC_IP:8090"
+echo "============================================="
 echo ""
 echo "Available endpoints:"
-echo "  GET http://98.83.143.120:8090/scan/checkov     (CSPM)"
-echo "  GET http://98.83.143.120:8090/scan/semgrep     (SAST)"
-echo "  GET http://98.83.143.120:8090/scan/trivy-fs    (SCA)"
-echo "  GET http://98.83.143.120:8090/scan/trivy-image (Infra)"
+echo "  GET http://$PUBLIC_IP:8090/health          (liveness)"
+echo "  GET http://$PUBLIC_IP:8090/scan/checkov    (CSPM)"
+echo "  GET http://$PUBLIC_IP:8090/scan/semgrep    (SAST)"
+echo "  GET http://$PUBLIC_IP:8090/scan/trivy-fs   (SCA)"
+echo "  GET http://$PUBLIC_IP:8090/scan/trivy-image (Infra)"
 echo ""
 echo "Register in VOP connection_registry with:"
-echo "  endpoint: http://98.83.143.120:8090/scan/checkov"
+echo "  endpoint: http://$PUBLIC_IP:8090/scan/<scanner>"
 echo "  metadata: {\"connector_type\": \"user_endpoint\", \"response_path\": \"findings\"}"
