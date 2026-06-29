@@ -11,6 +11,7 @@ import '../styles/AgentModelConfig.css' // reuse .amc-banner-* helpers
 // appears here dynamically (driven by /admin/scanners).
 const BUILTIN_SCANNERS = [
   { tool: 'osv', label: 'OSV.dev' },
+  { tool: 'zap', label: 'OWASP ZAP' },
 ]
 
 const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
