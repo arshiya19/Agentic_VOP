@@ -13,7 +13,7 @@ later by the Day-4 Confidence Engine.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -34,12 +34,30 @@ from .confidence import compute_confidence
 # Tier 4-5 = "partial"; absent = "unvalidated". For Phase-1 our patterns
 # all cite multiple Tier 1-3 sources, so packages land as "validated".
 _TIER_1_3_KEYWORDS = (
-    "aws", "microsoft", "red hat", "canonical", "oracle", "vmware",
-    "apache", "openssl", "nvd", "cve", "cisa", "kev",
-    "ubuntu security", "debian security", "rhsa", "advisory",
+    "aws",
+    "microsoft",
+    "red hat",
+    "canonical",
+    "oracle",
+    "vmware",
+    "apache",
+    "openssl",
+    "nvd",
+    "cve",
+    "cisa",
+    "kev",
+    "ubuntu security",
+    "debian security",
+    "rhsa",
+    "advisory",
 )
 _TIER_4_5_KEYWORDS = (
-    "owasp", "cnc", "cis", "nist", "internal", "playbook",
+    "owasp",
+    "cnc",
+    "cis",
+    "nist",
+    "internal",
+    "playbook",
 )
 
 
@@ -64,8 +82,9 @@ def _validation_metadata_for(pattern: dict) -> ValidationMetadata:
     sources = list(pattern.get("primary_sources") or [])
     if not sources:
         return ValidationMetadata(
-            status="unvalidated", sources=[],
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            status="unvalidated",
+            sources=[],
+            timestamp=datetime.now(UTC).isoformat(),
             confidence="low",
         )
 
@@ -82,7 +101,7 @@ def _validation_metadata_for(pattern: dict) -> ValidationMetadata:
     return ValidationMetadata(
         status=status,
         sources=sources,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         confidence=confidence,
     )
 
@@ -100,13 +119,7 @@ def _derive_approval(score: int, priority: str | None) -> str:
 
 def _load_pattern(sb, family: str) -> dict | None:
     """Fetch the remediation_patterns row for a family."""
-    resp = (
-        sb.table("remediation_patterns")
-        .select("*")
-        .eq("family", family)
-        .limit(1)
-        .execute()
-    )
+    resp = sb.table("remediation_patterns").select("*").eq("family", family).limit(1).execute()
     rows = resp.data or []
     return rows[0] if rows else None
 
@@ -223,8 +236,7 @@ def plan_remediation(
     pattern = _load_pattern(sb, family)
     if pattern is None:
         raise RuntimeError(
-            f"No row in remediation_patterns for family='{family}'. "
-            "Apply migration 0036."
+            f"No row in remediation_patterns for family='{family}'. Apply migration 0036."
         )
 
     asset = _load_asset(sb, issue)
@@ -296,6 +308,7 @@ def plan_remediation(
 # Persistence — Day 5
 # ---------------------------------------------------------------------------
 
+
 def persist_package(
     pkg: RemediationPackage,
     *,
@@ -311,16 +324,16 @@ def persist_package(
     """
     sb = sb or supabase_admin()
     row = {
-        "issue_id":                  pkg.issue_id,
-        "family":                    pkg.family,
-        "finding":                   pkg.finding,
-        "root_cause":                pkg.root_cause,
-        "impact":                    pkg.impact,
-        "pathways":                  [p.model_dump(mode="json") for p in pkg.pathways],
+        "issue_id": pkg.issue_id,
+        "family": pkg.family,
+        "finding": pkg.finding,
+        "root_cause": pkg.root_cause,
+        "impact": pkg.impact,
+        "pathways": [p.model_dump(mode="json") for p in pkg.pathways],
         "recommended_pathway_index": pkg.recommended_pathway_index,
-        "approval_required":         pkg.approval_required or "single_approver",
-        "status":                    initial_status,
-        "agent_run_id":              run_id,
+        "approval_required": pkg.approval_required or "single_approver",
+        "status": initial_status,
+        "agent_run_id": run_id,
     }
     resp = sb.table("remediation_packages").insert(row).execute()
     rows = resp.data or []
