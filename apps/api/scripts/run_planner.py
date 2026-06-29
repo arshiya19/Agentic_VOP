@@ -20,7 +20,7 @@ import json
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 # Make the app package importable when running from apps/api/
@@ -39,23 +39,27 @@ def _create_run(sb) -> str:
     """
     run_id = str(uuid.uuid4())
     event_id = f"remediation-planner-cli-{int(time.time() * 1000)}"
-    sb.table("agent_runs").insert({
-        "run_id": run_id,
-        "event_id": event_id,
-        "triggered_by": "remediation_planner_cli",
-        "action": "FULL",
-        "targets": {"scanners": [], "scope": ["remediation_planner_demo"]},
-        "status": "running",
-    }).execute()
+    sb.table("agent_runs").insert(
+        {
+            "run_id": run_id,
+            "event_id": event_id,
+            "triggered_by": "remediation_planner_cli",
+            "action": "FULL",
+            "targets": {"scanners": [], "scope": ["remediation_planner_demo"]},
+            "status": "running",
+        }
+    ).execute()
     return run_id
 
 
 def _complete_run(sb, run_id: str, *, ok: bool, count: int) -> None:
-    sb.table("agent_runs").update({
-        "status": "completed" if ok else "failed",
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-        "summary": {"agent": "sub-agent-3", "packages_generated": count},
-    }).eq("run_id", run_id).execute()
+    sb.table("agent_runs").update(
+        {
+            "status": "completed" if ok else "failed",
+            "completed_at": datetime.now(UTC).isoformat(),
+            "summary": {"agent": "sub-agent-3", "packages_generated": count},
+        }
+    ).eq("run_id", run_id).execute()
 
 
 def _load_issue(sb, issue_id: int) -> dict:
@@ -77,8 +81,7 @@ def _load_issue(sb, issue_id: int) -> dict:
 
 def _print_summary(pkg) -> None:
     print(f"\n{'=' * 72}")
-    print(f"  Issue {pkg.issue_id} — Family: {pkg.family} — "
-          f"Approval: {pkg.approval_required}")
+    print(f"  Issue {pkg.issue_id} — Family: {pkg.family} — Approval: {pkg.approval_required}")
     print(f"{'=' * 72}")
     print(f"\nFINDING\n  {pkg.finding}")
     print(f"\nROOT CAUSE\n  {pkg.root_cause}")
@@ -102,7 +105,7 @@ def _print_summary(pkg) -> None:
         print(f"\n  ROLLBACK PLAN (supported={rb.supported}):")
         print(f"    Objective: {rb.objective}")
         if rb.preconditions:
-            print(f"    Preconditions:")
+            print("    Preconditions:")
             for p in rb.preconditions:
                 print(f"      • {p}")
         if rb.steps:
@@ -111,7 +114,7 @@ def _print_summary(pkg) -> None:
                 print(f"      {i}. {s.step}")
                 print(f"         [Source: {s.source}]")
         if rb.limitations:
-            print(f"    Limitations:")
+            print("    Limitations:")
             for lim in rb.limitations:
                 print(f"      • {lim}")
         print(f"    Explanation: {rb.explanation}")
@@ -129,22 +132,24 @@ def _print_summary(pkg) -> None:
             for ts in pw.test_scripts:
                 print(f"    • {ts.language} — {ts.description}")
 
-        print(f"\n  EXECUTION STRATEGY")
+        print("\n  EXECUTION STRATEGY")
         print(f"    {pw.execution_strategy}")
 
         if pw.advantages:
-            print(f"\n  ADVANTAGES:")
+            print("\n  ADVANTAGES:")
             for a in pw.advantages:
                 print(f"    + {a}")
         if pw.considerations:
-            print(f"  CONSIDERATIONS:")
+            print("  CONSIDERATIONS:")
             for c in pw.considerations:
                 print(f"    - {c}")
 
         if pw.validation_metadata:
             vm = pw.validation_metadata
-            print(f"\n  VALIDATION METADATA")
-            print(f"    Status: {vm.status}   Confidence: {vm.confidence}   When: {vm.timestamp[:19]}")
+            print("\n  VALIDATION METADATA")
+            print(
+                f"    Status: {vm.status}   Confidence: {vm.confidence}   When: {vm.timestamp[:19]}"
+            )
             print(f"    Sources: {', '.join(vm.sources)}")
 
         if pw.confidence_score is not None:
@@ -160,8 +165,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("issue_ids", nargs="*", type=int, default=DEMO_ISSUE_IDS)
     parser.add_argument("--json", action="store_true", help="emit full JSON instead of summary")
-    parser.add_argument("--persist", action="store_true",
-                        help="persist each generated package to remediation_packages table")
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="persist each generated package to remediation_packages table",
+    )
     args = parser.parse_args()
 
     sb = supabase_admin()
@@ -189,7 +197,9 @@ def main() -> None:
                 print(f"  💾 persisted as remediation_packages.id={pkg_id}")
     finally:
         _complete_run(sb, run_id, ok=(successes == len(args.issue_ids)), count=successes)
-        print(f"\nagent_runs row {run_id} marked completed ({successes}/{len(args.issue_ids)} packages).")
+        print(
+            f"\nagent_runs row {run_id} marked completed ({successes}/{len(args.issue_ids)} packages)."
+        )
 
 
 if __name__ == "__main__":
