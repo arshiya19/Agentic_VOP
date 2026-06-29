@@ -127,16 +127,25 @@ class RollbackPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    supported: bool = Field(..., description="True if rollback is technically possible for this finding")
+    supported: bool = Field(
+        ..., description="True if rollback is technically possible for this finding"
+    )
     objective: str = Field(..., min_length=10, max_length=400)
     preconditions: list[str] = Field(default_factory=list, max_length=10)
     steps: list[RemediationStep] = Field(default_factory=list, max_length=10)
     validation: list[ValidationTest] = Field(default_factory=list, max_length=5)
     limitations: list[str] = Field(default_factory=list, max_length=10)
-    explanation: str = Field(..., min_length=20, max_length=600,
-                             description="WHY rollback is or isn't recommended for this specific finding")
-    recommended_recovery: str = Field("", max_length=400,
-                                      description="If supported=false, the alternative path (e.g. 'Restore from backup')")
+    explanation: str = Field(
+        ...,
+        min_length=20,
+        max_length=600,
+        description="WHY rollback is or isn't recommended for this specific finding",
+    )
+    recommended_recovery: str = Field(
+        "",
+        max_length=400,
+        description="If supported=false, the alternative path (e.g. 'Restore from backup')",
+    )
 
 
 class ValidationMetadata(BaseModel):
@@ -147,8 +156,10 @@ class ValidationMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated", "partial", "unvalidated"]
-    sources: list[str] = Field(default_factory=list,
-                               description="Citation names — e.g. ['AWS Documentation', 'NVD', 'CIS AWS 2.1.5']")
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Citation names — e.g. ['AWS Documentation', 'NVD', 'CIS AWS 2.1.5']",
+    )
     timestamp: str = Field(..., description="ISO 8601 timestamp when validation was performed")
     confidence: Literal["high", "medium", "low"]
 

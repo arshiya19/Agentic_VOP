@@ -81,10 +81,10 @@ def _score_rollback_availability(pattern: dict, pathway: RemediationPathway) -> 
         return 0, "rollback not supported for this specific finding"
     strategy = pattern.get("rollback_strategy") or "not_applicable"
     mapping = {
-        "automatic":      (15, "automatic rollback — fully reversible without redeploy"),
-        "redeploy":       (10, "redeploy-based rollback — requires CI/CD round-trip"),
-        "manual":         (5,  "manual rollback procedure — requires operator intervention"),
-        "not_applicable": (0,  "no rollback path defined"),
+        "automatic": (15, "automatic rollback — fully reversible without redeploy"),
+        "redeploy": (10, "redeploy-based rollback — requires CI/CD round-trip"),
+        "manual": (5, "manual rollback procedure — requires operator intervention"),
+        "not_applicable": (0, "no rollback path defined"),
     }
     return mapping.get(strategy, (0, f"unknown rollback_strategy={strategy!r}"))
 
@@ -113,6 +113,7 @@ def _score_environmental_uncertainty(issue: dict, asset: dict, pattern: dict) ->
 # Approval policy
 # ---------------------------------------------------------------------------
 
+
 def _derive_approval(score: int, priority: str | None) -> str:
     """Map (score, priority) → approval_required.
 
@@ -132,6 +133,7 @@ def _derive_approval(score: int, priority: str | None) -> str:
 # ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
+
 
 def compute_confidence(
     *,
@@ -168,10 +170,10 @@ def compute_confidence(
     return {
         "score": total,
         "components": {
-            "deterministic_fix":         {"score": df_score, "max_score": 30, "reason": df_reason},
-            "blast_radius":              {"score": br_score, "max_score": 25, "reason": br_reason},
-            "test_coverage":             {"score": tc_score, "max_score": 20, "reason": tc_reason},
-            "rollback_availability":     {"score": rb_score, "max_score": 15, "reason": rb_reason},
+            "deterministic_fix": {"score": df_score, "max_score": 30, "reason": df_reason},
+            "blast_radius": {"score": br_score, "max_score": 25, "reason": br_reason},
+            "test_coverage": {"score": tc_score, "max_score": 20, "reason": tc_reason},
+            "rollback_availability": {"score": rb_score, "max_score": 15, "reason": rb_reason},
             "environmental_uncertainty": {"score": eu_score, "max_score": 10, "reason": eu_reason},
         },
         "approval_required": _derive_approval(total, issue.get("priority")),

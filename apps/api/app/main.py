@@ -1561,6 +1561,7 @@ def retry_failed_nvd() -> RetryNvdResponse:
 # Remediation Packages — Phase-1 §5 / §9 (Day 5)
 # =============================================================================
 
+
 class GeneratePackagesRequest(BaseModel):
     issue_ids: list[int] = Field(..., min_length=1, max_length=20)
 
@@ -1591,24 +1592,33 @@ def _create_planner_run(sb) -> str:
     valid run_id and the resulting packages can be grouped under one run."""
     import uuid as _uuid
     import time as _time
+
     run_id = str(_uuid.uuid4())
-    sb.table("agent_runs").insert({
-        "run_id": run_id,
-        "event_id": f"remediation-planner-api-{int(_time.time() * 1000)}",
-        "triggered_by": "remediation_planner_api",
-        "action": "FULL",
-        "targets": {"scanners": [], "scope": ["remediation_packages_generate"]},
-        "status": "running",
-    }).execute()
+    sb.table("agent_runs").insert(
+        {
+            "run_id": run_id,
+            "event_id": f"remediation-planner-api-{int(_time.time() * 1000)}",
+            "triggered_by": "remediation_planner_api",
+            "action": "FULL",
+            "targets": {"scanners": [], "scope": ["remediation_packages_generate"]},
+            "status": "running",
+        }
+    ).execute()
     return run_id
 
 
 def _complete_planner_run(sb, run_id: str, *, success_count: int, total: int) -> None:
-    sb.table("agent_runs").update({
-        "status": "completed" if success_count == total else "failed",
-        "completed_at": datetime.now(UTC).isoformat(),
-        "summary": {"agent": "sub-agent-3", "packages_generated": success_count, "requested": total},
-    }).eq("run_id", run_id).execute()
+    sb.table("agent_runs").update(
+        {
+            "status": "completed" if success_count == total else "failed",
+            "completed_at": datetime.now(UTC).isoformat(),
+            "summary": {
+                "agent": "sub-agent-3",
+                "packages_generated": success_count,
+                "requested": total,
+            },
+        }
+    ).eq("run_id", run_id).execute()
 
 
 @app.post("/admin/remediation-packages/generate", response_model=GeneratePackagesResponse)
@@ -1635,17 +1645,24 @@ def generate_remediation_packages(body: GeneratePackagesRequest) -> GeneratePack
             .execute()
         )
         if not resp.data:
-            results.append(PackageGeneratedItem(
-                issue_id=issue_id, status="failed", error="issue not found"))
+            results.append(
+                PackageGeneratedItem(issue_id=issue_id, status="failed", error="issue not found")
+            )
             continue
         try:
             pkg = plan_remediation(resp.data[0], run_id=run_id, sb=sb)
             pkg_id = persist_package(pkg, run_id=run_id, sb=sb)
-            results.append(PackageGeneratedItem(
-                issue_id=issue_id, package_id=pkg_id, status="created"))
+            results.append(
+                PackageGeneratedItem(issue_id=issue_id, package_id=pkg_id, status="created")
+            )
         except Exception as exc:  # noqa: BLE001
-            results.append(PackageGeneratedItem(
-                issue_id=issue_id, status="failed", error=f"{type(exc).__name__}: {str(exc)[:200]}"))
+            results.append(
+                PackageGeneratedItem(
+                    issue_id=issue_id,
+                    status="failed",
+                    error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                )
+            )
 
     successes = sum(1 for r in results if r.status == "created")
     _complete_planner_run(sb, run_id, success_count=successes, total=len(body.issue_ids))
@@ -1707,13 +1724,15 @@ def approve_remediation_package(pkg_id: int, body: ApprovePackageRequest | None 
     if current == "rejected":
         raise HTTPException(status_code=409, detail="package was rejected; cannot approve")
 
-    approved_by = (body.approved_by if body else "system")
-    sb.table("remediation_packages").update({
-        "status": "ready_for_execution",
-        "approved_by": approved_by,
-        "approved_at": datetime.now(UTC).isoformat(),
-        "rejected_reason": None,
-    }).eq("id", pkg_id).execute()
+    approved_by = body.approved_by if body else "system"
+    sb.table("remediation_packages").update(
+        {
+            "status": "ready_for_execution",
+            "approved_by": approved_by,
+            "approved_at": datetime.now(UTC).isoformat(),
+            "rejected_reason": None,
+        }
+    ).eq("id", pkg_id).execute()
     return {"id": pkg_id, "status": "ready_for_execution", "approved_by": approved_by}
 
 
@@ -1734,10 +1753,17 @@ def reject_remediation_package(pkg_id: int, body: RejectPackageRequest) -> dict:
     if current == "rejected":
         return {"id": pkg_id, "status": "rejected", "message": "already rejected"}
 
-    sb.table("remediation_packages").update({
+    sb.table("remediation_packages").update(
+        {
+            "status": "rejected",
+            "rejected_reason": body.reason,
+            "approved_by": body.rejected_by,
+            "approved_at": datetime.now(UTC).isoformat(),
+        }
+    ).eq("id", pkg_id).execute()
+    return {
+        "id": pkg_id,
         "status": "rejected",
-        "rejected_reason": body.reason,
-        "approved_by": body.rejected_by,
-        "approved_at": datetime.now(UTC).isoformat(),
-    }).eq("id", pkg_id).execute()
-    return {"id": pkg_id, "status": "rejected", "reason": body.reason, "rejected_by": body.rejected_by}
+        "reason": body.reason,
+        "rejected_by": body.rejected_by,
+    }
