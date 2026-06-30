@@ -21,7 +21,9 @@ name: Infrastructure Deploy
 on:
   push:
     branches: [main]
-    paths: ["infra/**"]
+    paths:
+      - "infra/**"
+      - "!infra/vuln-labs/**"
 
 permissions:
   id-token: write

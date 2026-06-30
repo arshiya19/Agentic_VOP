@@ -20,6 +20,7 @@ on:
     branches: ["**"]
     paths:
       - "infra/**"
+      - "!infra/vuln-labs/**"
 
 permissions:
   id-token: write
