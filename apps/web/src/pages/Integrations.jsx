@@ -11,6 +11,7 @@ import '../styles/AgentModelConfig.css' // reuse .amc-banner-* helpers
 // appears here dynamically (driven by /admin/scanners).
 const BUILTIN_SCANNERS = [
   { tool: 'osv', label: 'OSV.dev' },
+  { tool: 'zap', label: 'OWASP ZAP' },
 ]
 
 // Catalog cards use namespaced IDs (e.g. "owasp-zap-appsec") but some

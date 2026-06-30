@@ -10,9 +10,10 @@ Currently registered:
   - "dependabot_api" → GitHub Dependabot alerts via REST API v3
   - "user_endpoint"  → generic user-supplied HTTP endpoint (any tool)
   - "file_upload"    → user-uploaded scanner export (JSON/JSONL/CSV/SARIF)
+  - "zap_api"        → OWASP ZAP instance REST API
 """
 
-from . import dependabot_api, file_upload, osv_api, tenable_api, user_endpoint
+from . import dependabot_api, file_upload, osv_api, tenable_api, user_endpoint, zap_api
 
 
 def fetch_raw_rows(
@@ -41,6 +42,8 @@ def fetch_raw_rows(
         return user_endpoint.fetch(registry_entry, last_fetched_at, run_id=run_id)
     if connector_type == "file_upload":
         return file_upload.fetch(registry_entry, last_fetched_at, run_id=run_id)
+    if connector_type == "zap_api":
+        return zap_api.fetch(registry_entry, last_fetched_at)
     raise ValueError(
         f"unknown or missing connector_type {connector_type!r} for tool {tool!r}. "
         "Update connection_registry.metadata.connector_type."
