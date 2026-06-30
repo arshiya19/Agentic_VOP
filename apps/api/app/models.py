@@ -86,11 +86,17 @@ class LLMEnrichmentDecision(BaseModel):
 
 
 class RemediationStep(BaseModel):
-    """One step in a remediation or rollback plan, with its citation."""
+    """One step in a remediation or rollback plan, with its citation.
+
+    The `step` field contains rich text — action + embedded command(s) +
+    'Why' rationale. Max length is generous (2000) so each step can carry
+    a paste-ready command + 2-3 sentences of context without exceeding
+    Pydantic validation.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    step: str = Field(..., min_length=10, max_length=500)
+    step: str = Field(..., min_length=10, max_length=2000)
     source: str = Field(..., min_length=3, max_length=200)
     source_url: str = Field("", max_length=500)
 

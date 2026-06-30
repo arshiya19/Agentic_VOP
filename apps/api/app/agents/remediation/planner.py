@@ -203,6 +203,7 @@ def _pattern_payload(pattern: dict) -> dict:
         "rollback_strategy": pattern["rollback_strategy"],
         "rollback_steps": pattern["rollback_steps"],
         "validation_tests": pattern["validation_tests"],
+        "test_script_templates": pattern.get("test_script_templates") or [],
         "primary_sources": pattern["primary_sources"],
         "confidence_base": pattern["confidence_base"],
         "notes": pattern.get("notes"),

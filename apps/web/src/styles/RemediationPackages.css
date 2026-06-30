@@ -11,6 +11,52 @@
   gap: 16px;
   margin-bottom: 20px;
 }
+/* Page header — title + subtitle on left, small Remediate button on right */
+.rmp-header-flex {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.rmp-header-text { flex: 1; min-width: 0; }
+
+.rmp-header-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: #161922;
+  border: 1px solid #2a3145;
+  color: #aebcff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 80ms, border-color 80ms;
+  white-space: nowrap;
+  margin-top: 4px;
+}
+.rmp-header-btn:not(:disabled):hover {
+  background: #1c2030;
+  border-color: #4a6cee88;
+  color: #c4ceff;
+}
+.rmp-header-btn:disabled {
+  cursor: progress;
+  opacity: 0.85;
+}
+.rmp-header-btn-dot { font-size: 11px; line-height: 1; }
+.rmp-header-btn-dot.pulsing {
+  animation: rmp-pulse-dot 1s ease-in-out infinite;
+  color: #6e8cff;
+}
+@keyframes rmp-pulse-dot {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
 .rmp-stat-card {
   background: #161922;
   border: 1px solid #262a36;
@@ -22,6 +68,47 @@
 .rmp-stat-card.bad   { border-color: #c0432e44; }
 .rmp-stat-num   { font-size: 28px; font-weight: 600; color: #eef1f6; }
 .rmp-stat-label { font-size: 12px; color: #8b94a7; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* Remediate action-card (button styled to match stat cards) */
+.rmp-remediate-card {
+  background: linear-gradient(180deg, #1e2742 0%, #182135 100%);
+  border: 1px solid #4a6cee66;
+  border-radius: 10px;
+  padding: 16px 18px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: filter 100ms, transform 60ms;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.rmp-remediate-card:not(:disabled):hover {
+  filter: brightness(1.15);
+  border-color: #6e8cffaa;
+}
+.rmp-remediate-card:not(:disabled):active {
+  transform: translateY(1px);
+}
+.rmp-remediate-card:disabled {
+  cursor: progress;
+  opacity: 0.85;
+}
+.rmp-remediate-card .rmp-stat-num {
+  color: #aebcff;
+}
+.rmp-remediate-card .rmp-stat-label {
+  color: #aebcff;
+  font-weight: 600;
+}
+.rmp-action-icon { font-size: 24px; line-height: 1; }
+.rmp-spinner-num {
+  animation: rmp-spin-pulse 1s ease-in-out infinite;
+}
+@keyframes rmp-spin-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
 
 /* Toolbar */
 .rmp-toolbar {
@@ -323,8 +410,22 @@
   list-style: decimal;
   padding-left: 22px;
 }
-.rmp-steps li { margin-bottom: 14px; }
-.rmp-step-text { color: #cdd3df; line-height: 1.55; margin-bottom: 4px; }
+.rmp-steps li { margin-bottom: 18px; }
+.rmp-step-text {
+  color: #cdd3df;
+  line-height: 1.55;
+  margin-bottom: 6px;
+  white-space: pre-wrap;            /* preserve Action / Command / Why line breaks */
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+.rmp-step-text code,
+.rmp-step-text pre {                 /* in case future steps include inline code */
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #0a0c12;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
 .rmp-source {
   display: inline-block;
   font-size: 11px;
