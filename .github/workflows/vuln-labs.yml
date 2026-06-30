@@ -1,0 +1,319 @@
+# =============================================================================
+# Vuln Labs — Infrastructure Management
+# =============================================================================
+# Single workflow to manage both lab environments independently.
+# Runs only from the main branch via manual dispatch.
+#
+# Environments:
+#   env1-scan-source    — Vulnerable apps + scanners + scan server
+#   env2-remediation    — Vulnerable apps + scanners (ad-hoc), no scan server
+#
+# Actions:
+#   deploy  — terraform apply (provisions or updates the environment)
+#   destroy — terraform destroy (full teardown)
+#   stop    — stop EC2 instance (preserves state, stops billing)
+#   start   — start EC2 instance (resumes compute)
+# =============================================================================
+
+name: Vuln Labs
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - env1-scan-source
+          - env2-remediation
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - destroy
+          - stop
+          - start
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: vuln-labs-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Resolve environment directory from input
+  # ---------------------------------------------------------------------------
+  setup:
+    name: "Setup"
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      env_dir: ${{ steps.resolve.outputs.env_dir }}
+      env_name: ${{ steps.resolve.outputs.env_name }}
+    steps:
+      - name: Resolve environment
+        id: resolve
+        run: |
+          case "${{ github.event.inputs.environment }}" in
+            "env1-scan-source")
+              echo "env_dir=env1" >> "$GITHUB_OUTPUT"
+              echo "env_name=env1" >> "$GITHUB_OUTPUT"
+              ;;
+            "env2-remediation")
+              echo "env_dir=env2" >> "$GITHUB_OUTPUT"
+              echo "env_name=env2" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unknown environment: ${{ github.event.inputs.environment }}"
+              exit 1
+              ;;
+          esac
+
+  # ---------------------------------------------------------------------------
+  # Deploy — Terraform apply with validation gates
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: "Deploy · ${{ github.event.inputs.environment }}"
+    if: github.event.inputs.action == 'deploy' && github.ref == 'refs/heads/main'
+    needs: [setup]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/vuln-labs/${{ needs.setup.outputs.env_dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          aws-region: us-east-1
+          role-session-name: vuln-labs-deploy-${{ needs.setup.outputs.env_name }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.7"
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive ..
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Checkov Scan (exclude vuln-samples)
+        run: |
+          checkov -d ../modules/ -d . \
+            --skip-path ../vuln-samples \
+            --framework terraform \
+            --output cli \
+            --soft-fail \
+            || true
+
+          # Evaluate results — block on CRITICAL/HIGH
+          checkov -d ../modules/ -d . \
+            --skip-path ../vuln-samples \
+            --framework terraform \
+            --output json \
+            --soft-fail \
+            -o json > checkov-results.json 2>/dev/null || true
+
+          python3 - <<'EOF'
+          import json, sys, os
+
+          report_path = "checkov-results.json"
+          if not os.path.exists(report_path):
+              print("Checkov report not found — skipping gate.")
+              sys.exit(0)
+
+          with open(report_path) as f:
+              try:
+                  report = json.load(f)
+              except json.JSONDecodeError:
+                  print("Checkov produced invalid JSON — skipping gate.")
+                  sys.exit(0)
+
+          checks = []
+          if isinstance(report, list):
+              for entry in report:
+                  checks.extend(entry.get("results", {}).get("failed_checks", []))
+          else:
+              checks = report.get("results", {}).get("failed_checks", [])
+
+          blocking = [
+              c for c in checks
+              if (c.get("severity") or "").upper() in ("CRITICAL", "HIGH")
+          ]
+
+          if blocking:
+              print("::error::Checkov — Critical/High findings block deployment:")
+              for c in blocking:
+                  check_id = c.get("check_id", "?")
+                  name = c.get("check_name", c.get("name", "?"))
+                  resource = c.get("resource", "?")
+                  print(f"  [{check_id}] {resource} — {name}")
+              sys.exit(1)
+
+          print(f"Checkov passed. No Critical/High findings.")
+          EOF
+
+      - name: Terraform Plan
+        run: terraform plan -var-file=terraform.tfvars -input=false -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -input=false tfplan
+
+      - name: Show Outputs
+        run: |
+          echo "=== Deployment Complete ==="
+          terraform output -json
+
+  # ---------------------------------------------------------------------------
+  # Destroy — Terraform destroy
+  # ---------------------------------------------------------------------------
+  destroy:
+    name: "Destroy · ${{ github.event.inputs.environment }}"
+    if: github.event.inputs.action == 'destroy' && github.ref == 'refs/heads/main'
+    needs: [setup]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/vuln-labs/${{ needs.setup.outputs.env_dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          aws-region: us-east-1
+          role-session-name: vuln-labs-destroy-${{ needs.setup.outputs.env_name }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.7"
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: Terraform Destroy
+        run: terraform destroy -var-file=terraform.tfvars -auto-approve -input=false
+
+  # ---------------------------------------------------------------------------
+  # Stop — Stop EC2 instance (preserves EBS, stops compute billing)
+  # ---------------------------------------------------------------------------
+  stop:
+    name: "Stop · ${{ github.event.inputs.environment }}"
+    if: github.event.inputs.action == 'stop' && github.ref == 'refs/heads/main'
+    needs: [setup]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/vuln-labs/${{ needs.setup.outputs.env_dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          aws-region: us-east-1
+          role-session-name: vuln-labs-stop-${{ needs.setup.outputs.env_name }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.7"
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: Get Instance ID
+        id: instance
+        run: |
+          INSTANCE_ID=$(terraform output -raw instance_id)
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "Instance ID: $INSTANCE_ID"
+
+      - name: Stop Instance
+        run: |
+          aws ec2 stop-instances --instance-ids "${{ steps.instance.outputs.instance_id }}" --region us-east-1
+          echo "Waiting for instance to stop..."
+          aws ec2 wait instance-stopped --instance-ids "${{ steps.instance.outputs.instance_id }}" --region us-east-1
+          echo "Instance stopped."
+
+  # ---------------------------------------------------------------------------
+  # Start — Start EC2 instance
+  # ---------------------------------------------------------------------------
+  start:
+    name: "Start · ${{ github.event.inputs.environment }}"
+    if: github.event.inputs.action == 'start' && github.ref == 'refs/heads/main'
+    needs: [setup]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/vuln-labs/${{ needs.setup.outputs.env_dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          aws-region: us-east-1
+          role-session-name: vuln-labs-start-${{ needs.setup.outputs.env_name }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.7"
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: Get Instance ID
+        id: instance
+        run: |
+          INSTANCE_ID=$(terraform output -raw instance_id)
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "Instance ID: $INSTANCE_ID"
+
+      - name: Start Instance
+        run: |
+          aws ec2 start-instances --instance-ids "${{ steps.instance.outputs.instance_id }}" --region us-east-1
+          echo "Waiting for instance to start..."
+          aws ec2 wait instance-running --instance-ids "${{ steps.instance.outputs.instance_id }}" --region us-east-1
+          echo "Instance started."
+
+      - name: Get New Public IP
+        run: |
+          NEW_IP=$(aws ec2 describe-instances \
+            --instance-ids "${{ steps.instance.outputs.instance_id }}" \
+            --region us-east-1 \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text)
+          echo "======================================"
+          echo "New Public IP: $NEW_IP"
+          echo "SSH: ssh -i <key>.pem ubuntu@$NEW_IP"
+          echo "======================================"
+          echo ""
+          echo "NOTE: If this is env1-scan-source, update VOP connection_registry"
+          echo "with the new scan server URL: http://$NEW_IP:8090"

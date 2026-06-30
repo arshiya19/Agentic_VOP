@@ -8,7 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "supabase>=2.9.0",
     "pydantic>=2.9.0",
-    "pydantic-settings>=2.6.0",
+    # Pinned to remediate GHSA-4xgf-cpjx-pc3j (symlink secret leak in NestedSecretsSettingsSource).
+    "pydantic-settings>=2.14.2",
     "python-dotenv>=1.0.1",
     # LangChain + LangGraph stack — replaces direct OpenAI SDK usage.
     #   langchain-core    → base abstractions (messages, prompts, runnables)
@@ -19,6 +20,12 @@ dependencies = [
     "langchain-anthropic>=0.2.0",
     "langchain-google-genai>=2.0.0",
     "langgraph>=0.2.0",
+    # Pinned to remediate GHSA-f4xh-w4cj-qxq8 (TracingMiddleware arbitrary file read).
+    "langsmith>=0.8.18",
+    # Pinned to remediate CVE-2026-48775 (JsonPlusSerializer arbitrary object reconstruction).
+    "langgraph-checkpoint>=4.1.1",
+    # Pinned to remediate CVE-2026-48776 (unsanitized path interpolation in HTTP requests).
+    "langgraph-sdk>=0.3.15",
     # Pinned to remediate CVE-2026-44431 and CVE-2026-44432 (cross-origin redirect leak + streaming-API issue).
     "urllib3>=2.7.0",
     # Pinned to remediate CVE-2026-53540/53539/53538 (Content-Length, QuerystringParser issues).
@@ -34,6 +41,8 @@ dependencies = [
     "boto3>=1.34.0",
     # Pinned to remediate PYSEC-2026-175/177/178/179 (JWT verification bypass + SSRF).
     "pyjwt>=2.13.0",
+    # Pinned to remediate GHSA-6v7p-g79w-8964 (msgpack deserialization vulnerability).
+    "msgpack>=1.2.1",
 ]
 
 [dependency-groups]
@@ -42,6 +51,8 @@ dev = [
     "pytest>=8.3.0",
     "httpx>=0.27.0",
     "pip-audit>=2.10.0",
+    # Pinned to remediate PYSEC-2026-196.
+    "pip>=26.1.2",
 ]
 
 [build-system]
