@@ -9,11 +9,12 @@ const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 // Pinned demo issue IDs — the 5 Phase-1 vulnerabilities.
 const DEMO_ISSUE_IDS = [8585, 8586, 7481, 6394, 7832]
 
-// Hide the "Generate Demo Packages" button on the live investor demo.
-// Flip to true if you want to show live LLM generation as part of the pitch,
-// or while iterating prompts. Packages are still re-generatable via the CLI:
+// Header "Remediate" button — hidden by default. Flip to true if you want
+// to expose live LLM generation in the UI. Same behaviour as the CLI:
 //   uv run python scripts/run_planner.py --persist
-const SHOW_GENERATE_BUTTON = false
+// Kept the handleGenerate function + API endpoint intact so re-enabling
+// is a one-line change (no backend work).
+const SHOW_REMEDIATE_BUTTON = false
 
 const FAMILY_LABEL = {
   public_exposure: 'Public Exposure',
@@ -212,14 +213,37 @@ export default function Remediation() {
       <div className="remediation-layout">
         <Sidebar />
         <main className="remediation-main">
-          <div className="remediation-header">
-            <h1>Remediation</h1>
-            <p className="remediation-subtitle">
-              Generated remediation packages — validated against authoritative sources, scored for confidence, gated by human approval.
-            </p>
+          <div className="remediation-header rmp-header-flex">
+            <div className="rmp-header-text">
+              <h1>Remediation</h1>
+              <p className="remediation-subtitle">
+                Generated remediation packages — validated against authoritative sources, scored for confidence, gated by human approval.
+              </p>
+            </div>
+            {SHOW_REMEDIATE_BUTTON && (
+              <button
+                className="rmp-header-btn"
+                onClick={handleGenerate}
+                disabled={generating}
+                type="button"
+                title="Generate fresh remediation packages for the 5 demo issues"
+              >
+                {generating ? (
+                  <>
+                    <span className="rmp-header-btn-dot pulsing">●</span>
+                    <span>Remediating…</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="rmp-header-btn-dot">⚙</span>
+                    <span>Remediate</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
 
-          {/* Stats strip */}
+          {/* Stats strip — 4 columns */}
           <div className="rmp-stats">
             <div className="rmp-stat-card">
               <div className="rmp-stat-num">{globalStats.total}</div>
@@ -239,7 +263,7 @@ export default function Remediation() {
             </div>
           </div>
 
-          {/* Toolbar */}
+          {/* Toolbar — just filter pills now, action moved into stats strip */}
           <div className="rmp-toolbar">
             <div className="rmp-filter-group">
               {['all', 'awaiting_approval', 'ready_for_execution', 'rejected'].map(s => (
@@ -253,15 +277,6 @@ export default function Remediation() {
                 </button>
               ))}
             </div>
-            {SHOW_GENERATE_BUTTON && (
-              <button
-                className="rmp-generate-btn"
-                onClick={handleGenerate}
-                disabled={generating}
-              >
-                {generating ? 'Generating… (~90s)' : '+ Generate Demo Packages'}
-              </button>
-            )}
           </div>
 
           {/* List */}
@@ -453,58 +468,63 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
                   </div>
                   <p className="rmp-objective">{pw.objective}</p>
 
-                  {/* Remediation steps with sources */}
-                  <h4>Remediation Steps</h4>
-                  <ol className="rmp-steps">
-                    {pw.remediation_steps?.map((s, i) => (
-                      <li key={i}>
-                        <div className="rmp-step-text">{s.step}</div>
-                        <SourceLink source={s.source} url={s.source_url} />
-                      </li>
-                    ))}
-                  </ol>
+                  {/* Remediation steps — collapsible, open by default (headline content) */}
+                  <details className="rmp-collapsible" open>
+                    <summary>Remediation Steps ({pw.remediation_steps?.length || 0})</summary>
+                    <ol className="rmp-steps">
+                      {pw.remediation_steps?.map((s, i) => (
+                        <li key={i}>
+                          <div className="rmp-step-text">{s.step}</div>
+                          <SourceLink source={s.source} url={s.source_url} />
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
 
-                  {/* Rollback plan */}
+                  {/* Rollback plan — collapsible, closed by default (secondary content) */}
                   {pw.rollback_plan && (
-                    <div className="rmp-rollback">
-                      <h4>Rollback Plan
+                    <details className="rmp-collapsible">
+                      <summary>
+                        Rollback Plan
                         <span className={`rmp-supported-chip ${pw.rollback_plan.supported ? 'good' : 'bad'}`}>
                           {pw.rollback_plan.supported ? 'supported' : 'not supported'}
                         </span>
-                      </h4>
-                      <p className="rmp-objective">{pw.rollback_plan.objective}</p>
-                      {pw.rollback_plan.preconditions?.length > 0 && (
-                        <>
-                          <h5>Preconditions</h5>
-                          <ul>{pw.rollback_plan.preconditions.map((x, i) => <li key={i}>{x}</li>)}</ul>
-                        </>
-                      )}
-                      {pw.rollback_plan.steps?.length > 0 && (
-                        <>
-                          <h5>Steps</h5>
-                          <ol className="rmp-steps">
-                            {pw.rollback_plan.steps.map((s, i) => (
-                              <li key={i}>
-                                <div className="rmp-step-text">{s.step}</div>
-                                <SourceLink source={s.source} url={s.source_url} />
-                              </li>
-                            ))}
-                          </ol>
-                        </>
-                      )}
-                      {pw.rollback_plan.limitations?.length > 0 && (
-                        <>
-                          <h5>Limitations</h5>
-                          <ul>{pw.rollback_plan.limitations.map((x, i) => <li key={i}>{x}</li>)}</ul>
-                        </>
-                      )}
-                      {pw.rollback_plan.explanation && (
-                        <>
-                          <h5>Explanation</h5>
-                          <p className="rmp-explanation">{pw.rollback_plan.explanation}</p>
-                        </>
-                      )}
-                    </div>
+                      </summary>
+                      <div className="rmp-rollback">
+                        <p className="rmp-objective">{pw.rollback_plan.objective}</p>
+                        {pw.rollback_plan.preconditions?.length > 0 && (
+                          <>
+                            <h5>Preconditions</h5>
+                            <ul>{pw.rollback_plan.preconditions.map((x, i) => <li key={i}>{x}</li>)}</ul>
+                          </>
+                        )}
+                        {pw.rollback_plan.steps?.length > 0 && (
+                          <>
+                            <h5>Steps</h5>
+                            <ol className="rmp-steps">
+                              {pw.rollback_plan.steps.map((s, i) => (
+                                <li key={i}>
+                                  <div className="rmp-step-text">{s.step}</div>
+                                  <SourceLink source={s.source} url={s.source_url} />
+                                </li>
+                              ))}
+                            </ol>
+                          </>
+                        )}
+                        {pw.rollback_plan.limitations?.length > 0 && (
+                          <>
+                            <h5>Limitations</h5>
+                            <ul>{pw.rollback_plan.limitations.map((x, i) => <li key={i}>{x}</li>)}</ul>
+                          </>
+                        )}
+                        {pw.rollback_plan.explanation && (
+                          <>
+                            <h5>Explanation</h5>
+                            <p className="rmp-explanation">{pw.rollback_plan.explanation}</p>
+                          </>
+                        )}
+                      </div>
+                    </details>
                   )}
 
                   {/* Validation tests + test scripts */}
