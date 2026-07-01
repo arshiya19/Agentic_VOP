@@ -93,7 +93,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-ec2-infra-apply
           aws-region: us-east-1
           role-session-name: vuln-labs-deploy-${{ needs.setup.outputs.env_name }}
 
@@ -199,7 +199,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-ec2-infra-apply
           aws-region: us-east-1
           role-session-name: vuln-labs-destroy-${{ needs.setup.outputs.env_name }}
 
@@ -232,7 +232,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-ec2-infra-apply
           aws-region: us-east-1
           role-session-name: vuln-labs-stop-${{ needs.setup.outputs.env_name }}
 
@@ -276,7 +276,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-ec2-infra-apply
           aws-region: us-east-1
           role-session-name: vuln-labs-start-${{ needs.setup.outputs.env_name }}
 
