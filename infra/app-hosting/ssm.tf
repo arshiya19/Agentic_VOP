@@ -66,9 +66,10 @@ resource "aws_ssm_parameter" "required_secret" {
 resource "aws_ssm_parameter" "optional_secret" {
   for_each = local.optional_app_secrets
 
-  name  = "/sisyfix/${var.env}/app/${each.key}"
-  type  = "SecureString"
-  value = each.value
+  name      = "/sisyfix/${var.env}/app/${each.key}"
+  type      = "SecureString"
+  value     = each.value
+  overwrite = true
 
   description = "Optional app secret: ${each.key}"
 
