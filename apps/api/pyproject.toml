@@ -1,7 +1,7 @@
 [project]
 name = "agentic-vop-api"
 version = "0.1.0"
-description = "FastAPI gateway for Agentic_VOP — receives user triggers, dispatches to agents."
+description = "FastAPI gateway for Agentic_VOP — receives user triggers, dispatches to agents, manages remediation."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
