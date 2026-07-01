@@ -17,7 +17,7 @@ dependencies = [
     #   langgraph         → state-machine framework for the Master agent
     "langchain-core>=0.3.0",
     "langchain-openai>=0.2.0",
-    "langchain-anthropic>=0.2.0",
+    "langchain-anthropic>=1.4.6",
     "langchain-google-genai>=2.0.0",
     "langgraph>=0.2.0",
     # Pinned to remediate GHSA-f4xh-w4cj-qxq8 (TracingMiddleware arbitrary file read).

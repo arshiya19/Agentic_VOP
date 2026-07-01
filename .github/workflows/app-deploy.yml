@@ -1,0 +1,166 @@
+# =============================================================================
+# Agentic_VOP — Application Deploy Pipeline
+# =============================================================================
+# Triggers on push to main when app code or docker-compose changes.
+#
+# Deployment sequence:
+#   1. Authenticate to AWS via OIDC (app-deploy role)
+#   2. Retrieve SSH key and EC2 public IP from SSM Parameter Store
+#   3. SSH into EC2 and pull latest code
+#   4. Refresh .env file from SSM Parameter Store
+#   5. Rebuild and restart containers with docker compose
+#   6. Health check API and Frontend services
+#
+# Safety:
+#   - Concurrency group prevents concurrent deploys
+#   - cancel-in-progress disabled so running deploys are never interrupted
+#   - Health check failures reported in GitHub Actions run summary
+#   - OIDC authentication (no static credentials)
+#
+# Requirements: 8.1–8.8, 12.1–12.5
+# =============================================================================
+
+name: App Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "docker-compose.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: app-deploy-prod
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    name: "Deploy · App to EC2"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-app-deploy-prod
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-app-deploy-${{ github.run_id }}
+
+      - name: Retrieve SSH private key from SSM
+        id: ssh-key
+        run: |
+          SSH_KEY=$(aws ssm get-parameter \
+            --name "/sisyfix/prod/ec2/ssh-private-key" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text)
+          echo "$SSH_KEY" > /tmp/ec2_ssh_key
+          chmod 600 /tmp/ec2_ssh_key
+          echo "key_path=/tmp/ec2_ssh_key" >> "$GITHUB_OUTPUT"
+
+      - name: Retrieve EC2 public IP from SSM
+        id: ec2-ip
+        run: |
+          EC2_IP=$(aws ssm get-parameter \
+            --name "/sisyfix/prod/ec2/public-ip" \
+            --query "Parameter.Value" \
+            --output text)
+          echo "ip=$EC2_IP" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH agent
+        run: |
+          eval "$(ssh-agent -s)"
+          ssh-add /tmp/ec2_ssh_key
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ steps.ec2-ip.outputs.ip }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull latest code on EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/ec2_ssh_key ubuntu@${{ steps.ec2-ip.outputs.ip }} \
+            "cd /opt/app && git pull origin main"
+
+      - name: Refresh .env from SSM Parameter Store
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/ec2_ssh_key ubuntu@${{ steps.ec2-ip.outputs.ip }} \
+            'aws ssm get-parameters-by-path --path /sisyfix/prod/app/ --recursive --with-decryption --query "Parameters[*].[Name,Value]" --output text | while IFS=$'"'"'\t'"'"' read -r name value; do key="${name##*/}"; echo "${key}=${value}"; done > /opt/app/.env && chmod 0600 /opt/app/.env'
+
+      - name: Rebuild and restart containers
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/ec2_ssh_key ubuntu@${{ steps.ec2-ip.outputs.ip }} \
+            "cd /opt/app && docker compose up -d --build"
+
+      - name: Health check — API
+        id: health-api
+        run: |
+          EC2_IP="${{ steps.ec2-ip.outputs.ip }}"
+          LAST_RESPONSE=""
+          for i in 1 2 3 4 5; do
+            LAST_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://${EC2_IP}:8000/healthz" || echo "connection_error")
+            if [ "$LAST_RESPONSE" = "200" ]; then
+              echo "API health check passed on attempt $i"
+              echo "status=success" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $LAST_RESPONSE — retrying in 3s..."
+            sleep 3
+          done
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          echo "last_response=$LAST_RESPONSE" >> "$GITHUB_OUTPUT"
+          echo "API health check failed after 5 attempts (last response: $LAST_RESPONSE)"
+          exit 1
+
+      - name: Health check — Frontend
+        id: health-frontend
+        if: always() && steps.health-api.outcome != 'skipped'
+        run: |
+          EC2_IP="${{ steps.ec2-ip.outputs.ip }}"
+          LAST_RESPONSE=""
+          for i in 1 2 3 4 5; do
+            LAST_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://${EC2_IP}:80/" || echo "connection_error")
+            if [ "$LAST_RESPONSE" = "200" ]; then
+              echo "Frontend health check passed on attempt $i"
+              echo "status=success" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $LAST_RESPONSE — retrying in 3s..."
+            sleep 3
+          done
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          echo "last_response=$LAST_RESPONSE" >> "$GITHUB_OUTPUT"
+          echo "Frontend health check failed after 5 attempts (last response: $LAST_RESPONSE)"
+          exit 1
+
+      - name: Report health check failure
+        if: failure() && (steps.health-api.outputs.status == 'failed' || steps.health-frontend.outputs.status == 'failed')
+        run: |
+          echo "## ❌ Health Check Failure" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Commit:** \`${GITHUB_SHA::8}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.health-api.outputs.status }}" = "failed" ]; then
+            echo "| Service | Status | Last Response |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---------|--------|---------------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **API** (:8000/healthz) | ❌ Failed | \`${{ steps.health-api.outputs.last_response }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ steps.health-frontend.outputs.status }}" = "failed" ]; then
+            if [ "${{ steps.health-api.outputs.status }}" != "failed" ]; then
+              echo "| Service | Status | Last Response |" >> "$GITHUB_STEP_SUMMARY"
+              echo "|---------|--------|---------------|" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "| **Frontend** (:80/) | ❌ Failed | \`${{ steps.health-frontend.outputs.last_response }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f /tmp/ec2_ssh_key

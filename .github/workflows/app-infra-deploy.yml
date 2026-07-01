@@ -1,0 +1,106 @@
+# =============================================================================
+# Agentic_VOP — App Infrastructure Deploy Pipeline
+# =============================================================================
+# Two trigger modes:
+#   1. Auto deploy — on push to main when infra/app-hosting/** changes
+#   2. Manual destroy — via workflow_dispatch (teardown infrastructure)
+#
+# Uses a dedicated OIDC role and state file, isolated from data-pipeline infra.
+#
+# Safety:
+#   - Concurrency group prevents concurrent applies/destroys
+#   - cancel-in-progress disabled so running operations are never interrupted
+#   - OIDC authentication (no static credentials)
+#
+# Requirements: 10.4, 10.7
+# =============================================================================
+
+name: App Infrastructure Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/app-hosting/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - destroy
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: app-infra-apply-prod
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Deploy — auto on push, or manual dispatch with action=deploy
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: "Deploy · app-hosting (prod)"
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-ec2-infra-apply
+          aws-region: us-east-1
+          role-session-name: gh-app-infra-deploy-prod-${{ github.run_id }}
+          role-duration-seconds: 900
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.7"
+
+      - name: Terraform Init
+        working-directory: infra/app-hosting
+        run: terraform init -backend-config=backend/prod.hcl
+
+      - name: Terraform Apply
+        working-directory: infra/app-hosting
+        run: terraform apply -auto-approve -var-file=environments/prod.tfvars
+
+  # ---------------------------------------------------------------------------
+  # Destroy — manual dispatch only (full infrastructure teardown)
+  # ---------------------------------------------------------------------------
+  destroy:
+    name: "Destroy · app-hosting (prod)"
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-ec2-infra-apply
+          aws-region: us-east-1
+          role-session-name: gh-app-infra-destroy-prod-${{ github.run_id }}
+          role-duration-seconds: 900
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.7"
+
+      - name: Terraform Init
+        working-directory: infra/app-hosting
+        run: terraform init -backend-config=backend/prod.hcl
+
+      - name: Terraform Destroy
+        working-directory: infra/app-hosting
+        run: terraform destroy -auto-approve -var-file=environments/prod.tfvars
