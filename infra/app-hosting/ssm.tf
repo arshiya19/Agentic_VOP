@@ -22,11 +22,17 @@ locals {
     "TENABLE_SECRET_KEY"      = "PLACEHOLDER"
     "GITHUB_TOKEN"            = "PLACEHOLDER"
     "NVD_API_KEY"             = "PLACEHOLDER"
-    "INTELLIGENCE_TABLE_NAME" = "PLACEHOLDER"
-    "INTELLIGENCE_AWS_REGION" = "PLACEHOLDER"
+    "INTELLIGENCE_TABLE_NAME" = "sisyfix-prod-vulnerability-intelligence"
+    "INTELLIGENCE_AWS_REGION" = "us-east-1"
+    "INTELLIGENCE_ENABLED"    = "true"
+    "LLM_PARALLEL_WORKERS"    = "5"
+    "MAX_SYNC_CACHE_MISSES"   = "10"
     "VITE_SUPABASE_URL"       = "PLACEHOLDER"
     "VITE_SUPABASE_ANON_KEY"  = "PLACEHOLDER"
     "VITE_API_BASE_URL"       = "PLACEHOLDER"
+    "VITE_USER_API_KEY"       = "PLACEHOLDER"
+    "VITE_ADMIN_API_KEY"      = "PLACEHOLDER"
+    "VITE_BYPASS_AUTH"        = "false"
   }
 }
 
