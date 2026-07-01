@@ -713,6 +713,11 @@ resource "aws_iam_role_policy" "break_glass_operator" {
 # Used by: app-hosting, vuln-labs, and future EC2 workloads.
 # =============================================================================
 
+import {
+  to = aws_iam_role.ec2_infra_apply
+  id = "sisyfix-github-ec2-infra-apply"
+}
+
 resource "aws_iam_role" "ec2_infra_apply" {
   name                 = "sisyfix-github-ec2-infra-apply"
   max_session_duration = 3600
