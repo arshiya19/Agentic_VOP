@@ -24,6 +24,7 @@ on:
     paths:
       - "infra/**"
       - "!infra/vuln-labs/**"
+      - "!infra/app-hosting/**"
 
 permissions:
   id-token: write
