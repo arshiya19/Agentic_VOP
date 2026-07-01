@@ -766,18 +766,10 @@ resource "aws_iam_role_policy" "ec2_infra_apply" {
           "ec2:TerminateInstances",
           "ec2:StartInstances",
           "ec2:StopInstances",
-          "ec2:DescribeInstances",
-          "ec2:DescribeInstanceStatus",
-          "ec2:DescribeInstanceTypes",
-          "ec2:DescribeInstanceAttribute",
           "ec2:ModifyInstanceAttribute",
-          "ec2:DescribeImages",
-          "ec2:DescribeVolumes",
-          "ec2:DescribeAvailabilityZones",
-          "ec2:DescribeAccountAttributes",
+          "ec2:Describe*",
           "ec2:CreateTags",
-          "ec2:DeleteTags",
-          "ec2:DescribeTags"
+          "ec2:DeleteTags"
         ]
         Resource = "*"
         Condition = {
@@ -792,25 +784,21 @@ resource "aws_iam_role_policy" "ec2_infra_apply" {
         Action = [
           "ec2:CreateVpc",
           "ec2:DeleteVpc",
-          "ec2:DescribeVpcs",
-          "ec2:DescribeVpcAttribute",
           "ec2:ModifyVpcAttribute",
           "ec2:CreateSubnet",
           "ec2:DeleteSubnet",
-          "ec2:DescribeSubnets",
           "ec2:ModifySubnetAttribute",
           "ec2:CreateInternetGateway",
           "ec2:DeleteInternetGateway",
-          "ec2:DescribeInternetGateways",
           "ec2:AttachInternetGateway",
           "ec2:DetachInternetGateway",
           "ec2:CreateRouteTable",
           "ec2:DeleteRouteTable",
-          "ec2:DescribeRouteTables",
           "ec2:CreateRoute",
           "ec2:DeleteRoute",
           "ec2:AssociateRouteTable",
           "ec2:DisassociateRouteTable",
+          "ec2:DeleteNetworkInterface",
           "ec2:CreateTags",
           "ec2:DeleteTags"
         ]
@@ -827,8 +815,6 @@ resource "aws_iam_role_policy" "ec2_infra_apply" {
         Action = [
           "ec2:CreateSecurityGroup",
           "ec2:DeleteSecurityGroup",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeSecurityGroupRules",
           "ec2:AuthorizeSecurityGroupIngress",
           "ec2:RevokeSecurityGroupIngress",
           "ec2:AuthorizeSecurityGroupEgress",
@@ -849,7 +835,6 @@ resource "aws_iam_role_policy" "ec2_infra_apply" {
         Action = [
           "ec2:CreateKeyPair",
           "ec2:DeleteKeyPair",
-          "ec2:DescribeKeyPairs",
           "ec2:ImportKeyPair"
         ]
         Resource = "*"
