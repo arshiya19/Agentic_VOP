@@ -14,19 +14,19 @@ locals {
     "SECRETS_ENCRYPTION_KEY"           = "CHANGE_ME"
   }
 
-  # Optional app secrets — initial value is empty; operators set values if needed
+  # Optional app secrets — initial value is a placeholder; operators set values if needed
   optional_app_secrets = {
-    "ANTHROPIC_API_KEY"       = ""
-    "GOOGLE_API_KEY"          = ""
-    "TENABLE_ACCESS_KEY"      = ""
-    "TENABLE_SECRET_KEY"      = ""
-    "GITHUB_TOKEN"            = ""
-    "NVD_API_KEY"             = ""
-    "INTELLIGENCE_TABLE_NAME" = ""
-    "INTELLIGENCE_AWS_REGION" = ""
-    "VITE_SUPABASE_URL"       = ""
-    "VITE_SUPABASE_ANON_KEY"  = ""
-    "VITE_API_BASE_URL"       = ""
+    "ANTHROPIC_API_KEY"       = "PLACEHOLDER"
+    "GOOGLE_API_KEY"          = "PLACEHOLDER"
+    "TENABLE_ACCESS_KEY"      = "PLACEHOLDER"
+    "TENABLE_SECRET_KEY"      = "PLACEHOLDER"
+    "GITHUB_TOKEN"            = "PLACEHOLDER"
+    "NVD_API_KEY"             = "PLACEHOLDER"
+    "INTELLIGENCE_TABLE_NAME" = "PLACEHOLDER"
+    "INTELLIGENCE_AWS_REGION" = "PLACEHOLDER"
+    "VITE_SUPABASE_URL"       = "PLACEHOLDER"
+    "VITE_SUPABASE_ANON_KEY"  = "PLACEHOLDER"
+    "VITE_API_BASE_URL"       = "PLACEHOLDER"
   }
 }
 

@@ -911,7 +911,8 @@ resource "aws_iam_role_policy" "ec2_infra_apply" {
           "ssm:RemoveTagsFromResource"
         ]
         Resource = [
-          "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter/sisyfix/*"
+          "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter/sisyfix/*",
+          "arn:aws:ssm:${var.aws_region}:${local.account_id}:*"
         ]
       },
       {
