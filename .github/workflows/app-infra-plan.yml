@@ -1,27 +1,27 @@
 # =============================================================================
-# Agentic_VOP — Infrastructure Plan (PR Validation)
+# Agentic_VOP — App Hosting Infrastructure Plan (PR Validation)
 # =============================================================================
-# Runs on pull requests that modify files under infra/.
+# Runs on pull requests that modify files under infra/app-hosting/.
 #
 # Steps:
 #   1. terraform fmt -check   — Enforce canonical formatting
 #   2. terraform validate     — Syntax and provider validation
-#   3. Checkov                — IaC static analysis (CRITICAL/HIGH block)
-#   4. terraform plan         — Preview changes, post as PR comment
+#   3. terraform plan         — Preview changes
+#   4. Checkov (HCL)          — IaC static analysis on HCL files
+#   5. Checkov (Plan)         — IaC static analysis on plan JSON
+#   6. Post plan as PR comment
 #
 # Authentication: GitHub OIDC → AWS role sisyfix-github-infra-plan
-# Requirements: 12.1–12.3, 12.6, 20.5–20.7
+# Requirements: 10.5, 10.8, 11.1–11.8
 # =============================================================================
 
-name: Infrastructure Plan
+name: App Infrastructure Plan
 
 on:
   pull_request:
     branches: ["**"]
     paths:
-      - "infra/**"
-      - "!infra/vuln-labs/**"
-      - "!infra/app-hosting/**"
+      - "infra/app-hosting/**"
 
 permissions:
   id-token: write
@@ -29,16 +29,16 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: infra-plan-${{ github.event.pull_request.number }}
+  group: app-infra-plan-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   plan:
-    name: "Terraform Plan"
+    name: "App Infra - Terraform Plan"
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: infra
+        working-directory: infra/app-hosting
 
     steps:
       # -----------------------------------------------------------------
@@ -48,13 +48,13 @@ jobs:
 
       # -----------------------------------------------------------------
       # AWS Authentication via GitHub OIDC
-      # Requirement 12.6: Use sisyfix-github-infra-plan role for PRs
+      # Requirement 10.8: Use sisyfix-github-infra-plan role for PRs
       # -----------------------------------------------------------------
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-plan
-          role-session-name: github-actions-infra-plan
+          role-session-name: github-actions-app-infra-plan
           aws-region: us-east-1
 
       # -----------------------------------------------------------------
@@ -69,25 +69,44 @@ jobs:
       # Terraform Init
       # -----------------------------------------------------------------
       - name: Terraform Init
-        run: terraform init -backend-config=backend/dev.hcl -input=false
+        run: terraform init -backend-config=backend/prod.hcl -input=false
 
       # -----------------------------------------------------------------
       # Step 1: terraform fmt -check
-      # Requirement 12.1: Run terraform fmt -check on PRs
+      # Requirement 11.1: Fail if any file is not canonically formatted
       # -----------------------------------------------------------------
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
 
       # -----------------------------------------------------------------
       # Step 2: terraform validate
-      # Requirement 12.1: Run terraform validate on PRs
+      # Requirement 11.2: Fail if validation errors are found
       # -----------------------------------------------------------------
       - name: Terraform Validate
         run: terraform validate
 
       # -----------------------------------------------------------------
-      # Step 3: Checkov — IaC static analysis
-      # Requirements 20.5–20.7: Run Checkov on HCL and plan output
+      # Step 3: terraform plan
+      # -----------------------------------------------------------------
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var-file=environments/prod.tfvars \
+            -input=false \
+            -no-color \
+            -out=tfplan \
+            2>&1 | tee plan_output.txt
+
+      # -----------------------------------------------------------------
+      # Convert plan to JSON for Checkov plan scan
+      # -----------------------------------------------------------------
+      - name: Convert Plan to JSON
+        run: terraform show -json tfplan > tfplan.json
+
+      # -----------------------------------------------------------------
+      # Step 4: Checkov (HCL) — IaC static analysis on HCL files
+      # Requirement 11.3: Run Checkov against HCL files (terraform framework)
       # -----------------------------------------------------------------
       - name: Install Checkov
         run: pip install checkov
@@ -97,27 +116,28 @@ jobs:
         run: |
           checkov -d . \
             --framework terraform \
-            --output cli \
-            --output json \
+            -o cli \
+            -o json \
             --output-file-path . \
-            --soft-fail \
+            --soft-fail-on LOW,MEDIUM \
             || true
 
-      - name: Evaluate Checkov Results
+      - name: Evaluate Checkov HCL Results
+        id: checkov_hcl_eval
         run: |
           python3 - <<'EOF'
           import json, sys, os
 
           report_path = "results_json.json"
           if not os.path.exists(report_path):
-              print("::warning::Checkov report not found — skipping gate evaluation.")
+              print("::warning::Checkov HCL report not found — skipping gate evaluation.")
               sys.exit(0)
 
           with open(report_path) as f:
               try:
                   report = json.load(f)
               except json.JSONDecodeError:
-                  print("::warning::Checkov produced invalid JSON — skipping gate evaluation.")
+                  print("::warning::Checkov HCL report invalid JSON — skipping gate evaluation.")
                   sys.exit(0)
 
           # Checkov JSON can be a list of check types or a single object
@@ -128,8 +148,6 @@ jobs:
           else:
               checks = report.get("results", {}).get("failed_checks", [])
 
-          # Classify findings by severity
-          # Checkov uses severity field: CRITICAL, HIGH, MEDIUM, LOW
           blocking = []
           warnings = []
 
@@ -147,79 +165,45 @@ jobs:
                   # Checks without explicit severity — treat as warnings
                   warnings.append(check)
 
-          # Requirement 20.7: Display MEDIUM/LOW as workflow warnings
+          # Requirement 11.6: Emit MEDIUM/LOW as GitHub Actions warnings (non-blocking)
           if warnings:
-              print("::warning::Checkov — Medium/Low findings (non-blocking):")
-              for c in warnings[:20]:
+              for c in warnings[:50]:
                   check_id = c.get("check_id", "?")
                   name = c.get("check_name", c.get("name", "?"))
                   resource = c.get("resource", "?")
-                  print(f"  [{check_id}] {resource} — {name}")
+                  print(f"::warning::Checkov HCL [{check_id}] {resource} — {name}")
 
-          # Requirement 20.6: Fail on CRITICAL/HIGH findings
+          # Requirement 11.5: Fail on CRITICAL/HIGH findings
           if blocking:
-              print("::error::Checkov — Critical/High findings BLOCK this pipeline:")
+              print("::error::Checkov HCL — Critical/High findings BLOCK this pipeline:")
               for c in blocking:
                   check_id = c.get("check_id", "?")
                   name = c.get("check_name", c.get("name", "?"))
                   resource = c.get("resource", "?")
                   sev = c.get("severity", "HIGH")
-                  print(f"  [{sev}] {check_id} {resource} — {name}")
+                  print(f"::error::[{sev}] {check_id} {resource} — {name}")
               sys.exit(1)
 
-          print(f"Checkov passed. Critical/High: 0 | Medium/Low: {len(warnings)}")
+          print(f"Checkov HCL passed. Critical/High: 0 | Medium/Low: {len(warnings)}")
           EOF
 
       # -----------------------------------------------------------------
-      # Step 4: terraform plan
-      # Requirement 12.1: Run terraform plan on PRs
+      # Step 5: Checkov (Plan) — IaC static analysis on plan JSON
+      # Requirement 11.4: Run Checkov against plan JSON (terraform_plan framework)
       # -----------------------------------------------------------------
-      - name: Terraform Plan
-        id: plan
-        run: |
-          terraform plan \
-            -var-file=environments/dev.tfvars \
-            -input=false \
-            -no-color \
-            -out=tfplan.binary \
-            2>&1 | tee plan_output.txt
-
-      - name: Save Plan Output
-        id: plan_output
-        run: |
-          # Read plan output and truncate to 65,536 characters
-          # Requirement 12.2: Truncate to 65,536 chars if exceeded
-          PLAN_OUTPUT=$(cat plan_output.txt)
-          CHAR_COUNT=${#PLAN_OUTPUT}
-
-          if [ "$CHAR_COUNT" -gt 65536 ]; then
-            PLAN_OUTPUT="${PLAN_OUTPUT:0:65500}
-
-          ... (truncated — output exceeded 65,536 characters. Full output: $CHAR_COUNT chars)"
-          fi
-
-          # Write to file for the comment step
-          echo "$PLAN_OUTPUT" > plan_comment.txt
-
-      # -----------------------------------------------------------------
-      # Checkov on Plan (JSON)
-      # Requirement 20.5: Run Checkov on saved plan output
-      # -----------------------------------------------------------------
-      - name: Convert Plan to JSON
-        run: terraform show -json tfplan.binary > tfplan.json
-
       - name: Checkov Scan (Plan)
         id: checkov_plan
         run: |
           checkov -f tfplan.json \
             --framework terraform_plan \
-            --output cli \
-            --output json \
+            -o cli \
+            -o json \
             --output-file-path ./plan_checkov \
-            --soft-fail \
+            --soft-fail-on LOW,MEDIUM \
             || true
 
       - name: Evaluate Checkov Plan Results
+        id: checkov_plan_eval
         run: |
           python3 - <<'EOF'
           import json, sys, os
@@ -259,14 +243,15 @@ jobs:
               else:
                   warnings.append(check)
 
+          # Requirement 11.6: Emit MEDIUM/LOW as GitHub Actions warnings (non-blocking)
           if warnings:
-              print("::warning::Checkov Plan — Medium/Low findings (non-blocking):")
-              for c in warnings[:20]:
+              for c in warnings[:50]:
                   check_id = c.get("check_id", "?")
                   name = c.get("check_name", c.get("name", "?"))
                   resource = c.get("resource", "?")
-                  print(f"  [{check_id}] {resource} — {name}")
+                  print(f"::warning::Checkov Plan [{check_id}] {resource} — {name}")
 
+          # Requirement 11.5: Fail on CRITICAL/HIGH findings
           if blocking:
               print("::error::Checkov Plan — Critical/High findings BLOCK this pipeline:")
               for c in blocking:
@@ -274,16 +259,31 @@ jobs:
                   name = c.get("check_name", c.get("name", "?"))
                   resource = c.get("resource", "?")
                   sev = c.get("severity", "HIGH")
-                  print(f"  [{sev}] {check_id} {resource} — {name}")
+                  print(f"::error::[{sev}] {check_id} {resource} — {name}")
               sys.exit(1)
 
           print(f"Checkov Plan passed. Critical/High: 0 | Medium/Low: {len(warnings)}")
           EOF
 
       # -----------------------------------------------------------------
-      # Post Plan as PR Comment
-      # Requirement 12.2: Post plan output as PR comment
+      # Step 6: Post Plan as PR Comment
+      # Requirement 11.8: Post terraform plan output as PR comment
+      # Truncate to 65,536 characters if needed
       # -----------------------------------------------------------------
+      - name: Prepare Plan Comment
+        if: always() && steps.plan.outcome == 'success'
+        run: |
+          PLAN_OUTPUT=$(cat plan_output.txt)
+          CHAR_COUNT=${#PLAN_OUTPUT}
+
+          if [ "$CHAR_COUNT" -gt 65536 ]; then
+            PLAN_OUTPUT="${PLAN_OUTPUT:0:65500}
+
+          ... (truncated — output exceeded 65,536 characters. Full output: $CHAR_COUNT chars)"
+          fi
+
+          echo "$PLAN_OUTPUT" > plan_comment.txt
+
       - name: Post Plan Comment on PR
         if: always() && steps.plan.outcome == 'success'
         uses: actions/github-script@v7
@@ -291,9 +291,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const planOutput = fs.readFileSync('infra/plan_comment.txt', 'utf8');
+            const planOutput = fs.readFileSync('infra/app-hosting/plan_comment.txt', 'utf8');
 
-            const body = `### Terraform Plan Output\n\n<details>\n<summary>Click to expand plan</summary>\n\n\`\`\`\n${planOutput}\n\`\`\`\n\n</details>\n\n*Workflow: ${context.workflow} | Run: ${context.runId}*`;
+            const body = `### App Hosting — Terraform Plan Output\n\n<details>\n<summary>Click to expand plan</summary>\n\n\`\`\`\n${planOutput}\n\`\`\`\n\n</details>\n\n*Workflow: ${context.workflow} | Run: ${context.runId}*`;
 
             // Find and update existing comment or create new one
             const { data: comments } = await github.rest.issues.listComments({
@@ -303,7 +303,7 @@ jobs:
             });
 
             const botComment = comments.find(c =>
-              c.user.type === 'Bot' && c.body.includes('### Terraform Plan Output')
+              c.user.type === 'Bot' && c.body.includes('### App Hosting — Terraform Plan Output')
             );
 
             if (botComment) {
@@ -324,14 +324,14 @@ jobs:
 
       # -----------------------------------------------------------------
       # Upload Checkov reports as artifacts
-      # Requirement 20.8: Retain scan reports for 14 days
+      # Requirement 11.7: Retain scan reports for 14 days
       # -----------------------------------------------------------------
       - name: Upload Checkov HCL Report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: checkov-hcl-report
-          path: infra/results_json.json
+          name: app-infra-checkov-hcl-report
+          path: infra/app-hosting/results_json.json
           retention-days: 14
           if-no-files-found: ignore
 
@@ -339,7 +339,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: checkov-plan-report
-          path: infra/plan_checkov/results_json.json
+          name: app-infra-checkov-plan-report
+          path: infra/app-hosting/plan_checkov/results_json.json
           retention-days: 14
           if-no-files-found: ignore

@@ -709,7 +709,232 @@ resource "aws_iam_role_policy" "break_glass_operator" {
 }
 
 # =============================================================================
-# 8. EXPLICIT DENY: Dev roles cannot access prod resources (Req 15.3)
+# 8. EC2 INFRA APPLY ROLE (single role for all EC2-based provisioning)
+# Used by: app-hosting, vuln-labs, and future EC2 workloads.
+# =============================================================================
+
+resource "aws_iam_role" "ec2_infra_apply" {
+  name                 = "sisyfix-github-ec2-infra-apply"
+  max_session_duration = 3600
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowGitHubOIDC"
+        Effect = "Allow"
+        Principal = {
+          Federated = local.github_oidc_provider_arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Component = "ci-cd"
+    Role      = "ec2-infra-apply"
+  }
+}
+
+resource "aws_iam_role_policy" "ec2_infra_apply" {
+  name = "sisyfix-ec2-infra-apply-policy"
+  role = aws_iam_role.ec2_infra_apply.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EC2Management"
+        Effect = "Allow"
+        Action = [
+          "ec2:RunInstances",
+          "ec2:TerminateInstances",
+          "ec2:StartInstances",
+          "ec2:StopInstances",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceStatus",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeInstanceAttribute",
+          "ec2:ModifyInstanceAttribute",
+          "ec2:DescribeImages",
+          "ec2:DescribeVolumes",
+          "ec2:DescribeAvailabilityZones",
+          "ec2:DescribeAccountAttributes",
+          "ec2:CreateTags",
+          "ec2:DeleteTags",
+          "ec2:DescribeTags"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:RequestedRegion" = var.aws_region
+          }
+        }
+      },
+      {
+        Sid    = "VPCManagement"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateVpc",
+          "ec2:DeleteVpc",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeVpcAttribute",
+          "ec2:ModifyVpcAttribute",
+          "ec2:CreateSubnet",
+          "ec2:DeleteSubnet",
+          "ec2:DescribeSubnets",
+          "ec2:CreateInternetGateway",
+          "ec2:DeleteInternetGateway",
+          "ec2:DescribeInternetGateways",
+          "ec2:AttachInternetGateway",
+          "ec2:DetachInternetGateway",
+          "ec2:CreateRouteTable",
+          "ec2:DeleteRouteTable",
+          "ec2:DescribeRouteTables",
+          "ec2:CreateRoute",
+          "ec2:DeleteRoute",
+          "ec2:AssociateRouteTable",
+          "ec2:DisassociateRouteTable",
+          "ec2:CreateTags",
+          "ec2:DeleteTags"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:RequestedRegion" = var.aws_region
+          }
+        }
+      },
+      {
+        Sid    = "SecurityGroupManagement"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSecurityGroup",
+          "ec2:DeleteSecurityGroup",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSecurityGroupRules",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress",
+          "ec2:AuthorizeSecurityGroupEgress",
+          "ec2:RevokeSecurityGroupEgress",
+          "ec2:CreateTags",
+          "ec2:DeleteTags"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:RequestedRegion" = var.aws_region
+          }
+        }
+      },
+      {
+        Sid    = "KeyPairManagement"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateKeyPair",
+          "ec2:DeleteKeyPair",
+          "ec2:DescribeKeyPairs",
+          "ec2:ImportKeyPair"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:RequestedRegion" = var.aws_region
+          }
+        }
+      },
+      {
+        Sid    = "IAMForEC2"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:UpdateRole",
+          "iam:UpdateAssumeRolePolicy",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:GetRolePolicy",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:TagRole",
+          "iam:UntagRole",
+          "iam:PassRole",
+          "iam:CreateInstanceProfile",
+          "iam:DeleteInstanceProfile",
+          "iam:GetInstanceProfile",
+          "iam:AddRoleToInstanceProfile",
+          "iam:RemoveRoleFromInstanceProfile",
+          "iam:ListInstanceProfilesForRole",
+          "iam:TagInstanceProfile",
+          "iam:UntagInstanceProfile",
+          "iam:GetOpenIDConnectProvider",
+          "iam:ListOpenIDConnectProviders"
+        ]
+        Resource = [
+          "arn:aws:iam::${local.account_id}:role/sisyfix-*",
+          "arn:aws:iam::${local.account_id}:instance-profile/sisyfix-*",
+          "arn:aws:iam::${local.account_id}:oidc-provider/token.actions.githubusercontent.com"
+        ]
+      },
+      {
+        Sid    = "SSMManagement"
+        Effect = "Allow"
+        Action = [
+          "ssm:PutParameter",
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:GetParametersByPath",
+          "ssm:DeleteParameter",
+          "ssm:DescribeParameters",
+          "ssm:ListTagsForResource",
+          "ssm:AddTagsToResource",
+          "ssm:RemoveTagsFromResource"
+        ]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter/sisyfix/*"
+        ]
+      },
+      {
+        Sid    = "TerraformStateAccess"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::sisyfix-terraform-state-486655355038",
+          "arn:aws:s3:::sisyfix-terraform-state-486655355038/*"
+        ]
+      },
+      {
+        Sid    = "TerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem"
+        ]
+        Resource = "arn:aws:dynamodb:${var.aws_region}:${local.account_id}:table/sisyfix-terraform-locks"
+      }
+    ]
+  })
+}
+
+# =============================================================================
+# 9. EXPLICIT DENY: Dev roles cannot access prod resources (Req 15.3)
 # =============================================================================
 
 resource "aws_iam_role_policy" "infra_apply_deny_prod" {

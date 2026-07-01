@@ -26,6 +26,8 @@ on:
     paths:
       - "lambdas/**"
       - "infra/**"
+      - "!infra/vuln-labs/**"
+      - "!infra/app-hosting/**"
   pull_request:
     branches: [main]
     paths:
