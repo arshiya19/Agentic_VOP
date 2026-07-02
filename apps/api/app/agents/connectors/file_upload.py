@@ -38,7 +38,10 @@ import io
 import json
 from typing import Any
 
-from ...db import supabase_admin
+import httpx
+
+from ...config import settings
+from ..http_utils import request_with_retry
 from ._shape_utils import (
     infer_response_path,
     parse_sarif,
@@ -48,6 +51,44 @@ from ._shape_utils import (
 
 
 SCANNER_BUCKET = "scanner_uploads"
+
+# Read timeout for storage download. The supabase-py SDK's default is ~10–30s,
+# which trips on large scanner exports (e.g. 30+ MB Trivy JSON). Bypass the SDK
+# and call the storage REST API with an explicit, generous timeout.
+DOWNLOAD_TIMEOUT_SECONDS = 120
+
+
+def _download_with_retry(file_pointer: str, *, run_id: str | None) -> bytes:
+    """Download an object from the scanner_uploads bucket with retry + a long
+    read timeout. Raises a clear TimeoutError on final failure so callers see
+    something more actionable than a bare httpx.ReadTimeout.
+    """
+    base = settings.agentic_vop_supabase_url.rstrip("/")
+    key = settings.agentic_vop_supabase_service_key
+    url = f"{base}/storage/v1/object/{SCANNER_BUCKET}/{file_pointer}"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
+    }
+
+    try:
+        with httpx.Client(timeout=DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=True) as client:
+            resp = request_with_retry(
+                client,
+                "GET",
+                url,
+                headers=headers,
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                run_id=run_id,
+                agent="sub-agent-1",
+            )
+            return resp.content
+    except (httpx.ReadTimeout, httpx.PoolTimeout, TimeoutError) as exc:
+        raise TimeoutError(
+            f"file_upload connector: download of '{file_pointer}' timed out after "
+            f"{DOWNLOAD_TIMEOUT_SECONDS}s. The file may be too large or storage is slow — "
+            f"try a smaller export or re-upload."
+        ) from exc
 
 
 # ----------------------------------------------------------------------------
@@ -163,8 +204,7 @@ def fetch(
             "Upload a file via POST /admin/scanners/{tool}/upload first."
         )
 
-    sb = supabase_admin()
-    content: bytes = sb.storage.from_(SCANNER_BUCKET).download(file_pointer)
+    content: bytes = _download_with_retry(file_pointer, run_id=run_id)
     if not content:
         raise ValueError(
             f"file_upload connector: download of '{file_pointer}' returned empty content."

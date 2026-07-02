@@ -14,6 +14,17 @@ const BUILTIN_SCANNERS = [
   { tool: 'zap', label: 'OWASP ZAP' },
 ]
 
+// Catalog cards use namespaced IDs (e.g. "owasp-zap-appsec") but some
+// scanners are registered under shorter slugs in connection_registry
+// (e.g. "zap"). This map lets the "configured" dot light up for those
+// scanners too without forcing a DB rename.
+//   key   = catalog id (tool.id in INTEGRATION_CATALOG)
+//   value = array of slugs that should also count as "this is configured"
+const CATALOG_ID_ALIASES = {
+  'owasp-zap-appsec': ['zap', 'owasp-zap'],
+  'github-dependabot-appsec': ['dependabot', 'github-dependabot'],
+}
+
 const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 const apiTool = (id, name) => ({
@@ -39,12 +50,14 @@ const oauthTool = (id, name) => ({
 
 const INTEGRATION_CATALOG = [
   { category: 'Application Security', tools: [
+    apiTool('burp-suite', 'Burp Suite'),
     apiTool('checkmarx-appsec', 'Checkmarx'),
     oauthTool('dependabot', 'Github Dependabot'),
     oauthTool('hackerone-appsec', 'Hackerone'),
     apiTool('owasp-zap-appsec', 'OWASP ZAP'),
     apiTool('semgrep-appsec', 'Semgrep'),
     apiTool('snyk-appsec', 'Snyk'),
+    apiTool('sonarqube-appsec', 'SonarQube'),
     apiTool('veracode-appsec', 'Veracode'),
   ]},
   { category: 'Asset Management', tools: [
@@ -57,7 +70,9 @@ const INTEGRATION_CATALOG = [
   { category: 'Cloud Security', tools: [
     apiTool('aws-inspect-cloud', 'AWS Inspect'),
     apiTool('aws-securityhub-cloud', 'AWS Security Hub (CSPM)'),
+    apiTool('checkov-cspm', 'Checkov'),
     apiTool('crowdstrike-cloud', 'HorizonCSPM (Crowdstrike)'),
+    apiTool('grype', 'Anchore Grype'),
     apiTool('iac-scanning-cloud', 'Checkov (IaC Scanning)'),
     apiTool('paloalto-cloud', 'Prisma Cloud (Palo Alto)'),
     apiTool('tenable-cloud', 'Tenable Cloud Security'),
@@ -119,6 +134,7 @@ const INTEGRATION_CATALOG = [
     apiTool('knowbefore-training', 'Knowbe4'),
   ]},
   { category: 'Vulnerability Management', tools: [
+    apiTool('qualys-vmdr-vuln', 'Qualys VMDR'),
     apiTool('crowdstrike-vuln', 'Crowdstrike'),
     apiTool('paloalto-vuln', 'Palo Alto'),
     apiTool('rapid7-vuln', 'Rapid7 InsiteVM'),
@@ -443,7 +459,10 @@ export default function Integrations() {
 
               <div className="integration-grid-modern">
                 {filteredTools.map(tool => {
-                  const configured = registeredByTool.has(tool.id)
+                  const aliases = CATALOG_ID_ALIASES[tool.id] || []
+                  const configured =
+                    registeredByTool.has(tool.id) ||
+                    aliases.some((slug) => registeredByTool.has(slug))
                   return (
                     <div
                       key={tool.id}

@@ -16,13 +16,20 @@
   flex: 1;
   padding: 24px 32px;
   background: #0B0F19;
-  overflow-y: auto;
   height: 100%;
+  /* Flex column so we can pin the header and let the card consume the rest.
+   * `overflow: hidden` here is critical — without it the inner flex children
+   * would push past the viewport and the page itself would scroll. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
-/* Header */
+/* Header — stays pinned at the top of the page area while the table scrolls */
 .issues-header {
   margin-bottom: 24px;
+  flex-shrink: 0;
 }
 
 .issues-header h1 {
@@ -38,12 +45,24 @@
   margin: 0;
 }
 
-/* Main Card */
+/* Main Card — fills the remaining vertical space below the page header.
+ * Internal layout: filters/toolbar at top (fixed), table in the middle (scrolls),
+ * pagination at the bottom (fixed). */
 .issues-card {
   background: #151C2C;
   border: 1px solid #1E293B;
   border-radius: 12px;
   overflow: hidden;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The filters bar and pagination footer never scroll — only the table does. */
+.issues-card > .issues-filters,
+.issues-card > .issues-pagination {
+  flex-shrink: 0;
 }
 
 /* Filters Section */
@@ -179,12 +198,21 @@
   color: #64748B;
 }
 
-/* Table Container */
+/* Table Container — the ONLY scrollable region inside the card.
+ * Horizontal scroll for wide tables, vertical scroll for long lists,
+ * everything else (page header, filters, pagination) stays pinned. */
 .issues-table-container {
+  flex: 1;
   overflow-x: auto;
-  overflow-y: visible;
-  height: auto;
-  max-height: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Sticky table header so the column titles stay visible while rows scroll. */
+.issues-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 /* Table */

@@ -17,6 +17,16 @@ const RANGE_TO_DAYS = { '14d': 14, '30d': 30, '90d': 90 }
 
 const SEVERITY_RANK = { Critical: 4, High: 3, Medium: 2, Low: 1, Info: 0 }
 
+// Empty bucket helper for the Exposure Map cards — every card carries the
+// same shape so the renderer doesn't need branching.
+const emptyExposureBucket = () => ({
+  assetCount: 0,
+  findingCount: 0,
+  critical: 0,
+  high: 0,
+  medium: 0,
+})
+
 export function useDashboardData(chartRange = '14d') {
   const [stats, setStats] = useState({
     total: 0,
@@ -29,6 +39,16 @@ export function useDashboardData(chartRange = '14d') {
   const [latestCves, setLatestCves] = useState([])
   const [topRiskDrivers, setTopRiskDrivers] = useState([])
   const [chartData, setChartData] = useState([])
+  const [exposureMap, setExposureMap] = useState({
+    // Row 1 — context cards
+    internetFacing:   emptyExposureBucket(),
+    crownJewel:       emptyExposureBucket(),
+    regulatory:       { ...emptyExposureBucket(), tags: [] },
+    // Row 2 — threat-zone cards
+    zoneInternet:     emptyExposureBucket(),
+    zoneExtranet:     emptyExposureBucket(),
+    zoneIntranet:     emptyExposureBucket(),
+  })
   const [loading, setLoading] = useState(true)
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null)
 
@@ -42,7 +62,7 @@ export function useDashboardData(chartRange = '14d') {
       const days = RANGE_TO_DAYS[chartRange] ?? 14
       const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
 
-      const [countRes, severityRes, topRiskRes, recentRes] = await Promise.all([
+      const [countRes, severityRes, topRiskRes, recentRes, exposureRes] = await Promise.all([
         // 1. Total issue count (head=true means we only get the count, no rows)
         supabase.from('issues').select('*', { count: 'exact', head: true }),
 
@@ -65,6 +85,16 @@ export function useDashboardData(chartRange = '14d') {
           .gte('created_at', since)
           .order('created_at', { ascending: false })
           .limit(2000),
+
+        // 5. Exposure-map: pull issues joined to their asset (via issue_with_asset
+        //    view created by migration 0018). Only the columns we need for the
+        //    6 cards' rollups.
+        supabase
+          .from('issue_with_asset')
+          .select(
+            'severity, asset_id, asset_exposure, asset_business_criticality, ' +
+              'asset_compliance_tags, asset_network_zone'
+          ),
       ])
 
       if (!mounted) return
@@ -143,6 +173,77 @@ export function useDashboardData(chartRange = '14d') {
           }))
       )
 
+      // ---- Exposure Map: roll up issues joined to their asset ----
+      // Each card tracks (assetCount, findingCount, critical, high, medium).
+      // Asset counts are sets so duplicates across issues don't double-count.
+      const newExposure = {
+        internetFacing: emptyExposureBucket(),
+        crownJewel:     emptyExposureBucket(),
+        regulatory:     { ...emptyExposureBucket(), tags: [] },
+        zoneInternet:   emptyExposureBucket(),
+        zoneExtranet:   emptyExposureBucket(),
+        zoneIntranet:   emptyExposureBucket(),
+      }
+      const assetSets = {
+        internetFacing: new Set(),
+        crownJewel:     new Set(),
+        regulatory:     new Set(),
+        zoneInternet:   new Set(),
+        zoneExtranet:   new Set(),
+        zoneIntranet:   new Set(),
+      }
+      const regulatoryAssetsByTag = {} // tag -> Set<asset_id>
+      const regulatoryFindingsByTag = {} // tag -> count
+
+      const tally = (bucketKey, row) => {
+        newExposure[bucketKey].findingCount += 1
+        if (row.severity === 'Critical') newExposure[bucketKey].critical += 1
+        else if (row.severity === 'High') newExposure[bucketKey].high += 1
+        else if (row.severity === 'Medium') newExposure[bucketKey].medium += 1
+        if (row.asset_id) assetSets[bucketKey].add(row.asset_id)
+      }
+
+      for (const row of exposureRes.data || []) {
+        // Skip rows where the issue didn't attribute to an asset (no card applies).
+        if (!row.asset_id) continue
+
+        // ----- Row 1: context cards -----
+        if (row.asset_exposure === 'public') tally('internetFacing', row)
+        if (
+          typeof row.asset_business_criticality === 'number' &&
+          row.asset_business_criticality >= 4
+        ) {
+          tally('crownJewel', row)
+        }
+        const tags = row.asset_compliance_tags || []
+        if (tags.length > 0) {
+          tally('regulatory', row)
+          for (const tag of tags) {
+            if (!regulatoryAssetsByTag[tag]) regulatoryAssetsByTag[tag] = new Set()
+            regulatoryAssetsByTag[tag].add(row.asset_id)
+            regulatoryFindingsByTag[tag] = (regulatoryFindingsByTag[tag] || 0) + 1
+          }
+        }
+
+        // ----- Row 2: threat-zone cards -----
+        if (row.asset_network_zone === 'internet') tally('zoneInternet', row)
+        else if (row.asset_network_zone === 'extranet') tally('zoneExtranet', row)
+        else if (row.asset_network_zone === 'intranet') tally('zoneIntranet', row)
+      }
+
+      for (const key of Object.keys(assetSets)) {
+        newExposure[key].assetCount = assetSets[key].size
+      }
+      // Regulatory card carries a per-tag breakdown for the chip list.
+      newExposure.regulatory.tags = Object.keys(regulatoryAssetsByTag)
+        .sort()
+        .map((tag) => ({
+          tag,
+          assets: regulatoryAssetsByTag[tag].size,
+          findings: regulatoryFindingsByTag[tag] || 0,
+        }))
+      setExposureMap(newExposure)
+
       setLastUpdatedAt(new Date())
       setLoading(false)
     }
@@ -173,5 +274,13 @@ export function useDashboardData(chartRange = '14d') {
     }
   }, [chartRange])
 
-  return { stats, latestCves, topRiskDrivers, chartData, loading, lastUpdatedAt }
+  return {
+    stats,
+    latestCves,
+    topRiskDrivers,
+    chartData,
+    exposureMap,
+    loading,
+    lastUpdatedAt,
+  }
 }
