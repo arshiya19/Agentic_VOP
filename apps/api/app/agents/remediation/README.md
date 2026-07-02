@@ -16,7 +16,7 @@ the data model, why we made each architectural call, and how to run / iterate.
 ## 1. The 60-second pitch
 
 An issue lands in the `issues` table after Sub-Agent 1 (normalize) + Sub-Agent 2
-(enrich + score). Today the pipeline stops there and Phase-1 adds this remediation folder:
+(enrich + score). Today the pipeline stops there. Phase-1 adds this remediation folder:
 
 1. Operator (or CLI) triggers **`plan_remediation(issue)`**.
 2. **`classifier.py`** deterministically maps the issue to one of 5 families
