@@ -10,7 +10,7 @@ set -euo pipefail
 LOG_FILE="/var/log/user-data.log"
 
 log() {
-  local msg="[$$(date '+%Y-%m-%d %H:%M:%S')] $${1}"
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $${1}"
   echo "$${msg}" | tee -a "$${LOG_FILE}"
 }
 
@@ -28,7 +28,7 @@ run_step() {
   if "$@" >> "$${LOG_FILE}" 2>&1; then
     log "DONE: $${step_name}"
   else
-    fail "$${step_name}" "exit code $$?"
+    fail "$${step_name}" "exit code $?"
   fi
 }
 
@@ -58,9 +58,9 @@ install_docker() {
   chmod a+r /etc/apt/keyrings/docker.gpg
 
   local arch
-  arch=$$(dpkg --print-architecture)
+  arch=$(dpkg --print-architecture)
   local codename
-  codename=$$(lsb_release -cs)
+  codename=$(lsb_release -cs)
   echo "deb [arch=$${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $${codename} stable" | \
     tee /etc/apt/sources.list.d/docker.list > /dev/null
 
@@ -160,7 +160,7 @@ run_step "Docker Compose up" start_app
 # Step 7: Write bootstrap completion marker
 # ==============================================================================
 write_marker() {
-  echo "Bootstrap completed at $$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > /opt/app/BOOTSTRAP_COMPLETE
+  echo "Bootstrap completed at $(date -u '+%Y-%m-%dT%H:%M:%SZ')" > /opt/app/BOOTSTRAP_COMPLETE
 }
 run_step "Write BOOTSTRAP_COMPLETE marker" write_marker
 
