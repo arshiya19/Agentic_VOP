@@ -12,6 +12,45 @@ import { supabase } from '../lib/supabase'
 
 const FETCH_LIMIT = 500
 
+// Maps the issue `source` slug to a security-domain category label.
+// These align with the categories shown on the Integrations page.
+const SOURCE_TO_TYPE = {
+  osv:              'SCA',
+  dependabot:      'SCA',
+  snyk:            'SCA',
+  'snyk-appsec':   'AppSec',
+  trivy:           'Cloud Security',
+  'trivy-cloud':   'Cloud Security',
+  grype:           'Cloud Security',
+  tenable:         'VM',
+  'tenable-cloud': 'Cloud Security',
+  'tenable-nessus-vuln': 'VM',
+  qualys:          'VM',
+  'qualys-vmdr-vuln': 'VM',
+  owasp:           'DAST',
+  zap:             'DAST',
+  'owasp-zap':     'DAST',
+  'owasp-zap-appsec': 'DAST',
+  'semgrep-appsec': 'SAST',
+  'sonarqube-appsec': 'SAST',
+  'checkmarx-appsec': 'SAST',
+  'veracode-appsec': 'SAST',
+  'burp-suite':    'DAST',
+  'crowdstrike-vuln': 'VM',
+  'rapid7-vuln':   'VM',
+  'aws-inspect-cloud': 'CSPM',
+  'aws-securityhub-cloud': 'CSPM',
+  'checkov-cspm':  'CSPM',
+  'iac-scanning-cloud': 'IaC',
+  'paloalto-cloud': 'CSPM',
+  'wiz-cloud':     'CSPM',
+}
+
+function getIssueType(source) {
+  if (!source) return ''
+  return SOURCE_TO_TYPE[source] || SOURCE_TO_TYPE[source.toLowerCase()] || ''
+}
+
 export function useIssuesData() {
   const [issues, setIssues] = useState([])
   const [loading, setLoading] = useState(true)
@@ -53,7 +92,7 @@ export function useIssuesData() {
           row?.asset_identity?.repo ||
           row?.asset_identity?.target ||
           '',
-        asset_type: row.asset_type || '',
+        asset_type: getIssueType(row.source),
         cve_id: row.cve_id || '',
         severity: row.severity || '',
         derived_risk: row.derived_risk,

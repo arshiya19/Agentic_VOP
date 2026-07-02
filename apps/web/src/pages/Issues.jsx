@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import ColumnToggle from '../components/ColumnToggle'
@@ -37,7 +38,8 @@ const ISSUE_COLUMNS = [
 ]
 
 export default function Issues() {
-  const [searchTerm, setSearchTerm] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchTerm, setSearchTerm] = useState(() => searchParams.get('search') || '')
   const [selectedSeverity, setSelectedSeverity] = useState([])
   const [currentPage, setCurrentPage] = useState(1)
   const { issues } = useIssuesData()
@@ -45,6 +47,15 @@ export default function Issues() {
   // Items-per-page adapts to viewport height — zoom out or use a tall screen
   // and you'll see more rows automatically instead of empty space.
   const [itemsPerPage, setItemsPerPage] = useState(() => computeItemsPerPage())
+
+  // Sync searchTerm with URL query param when navigating from Dashboard
+  useEffect(() => {
+    const urlSearch = searchParams.get('search') || ''
+    if (urlSearch !== searchTerm) {
+      setSearchTerm(urlSearch)
+      setCurrentPage(1)
+    }
+  }, [searchParams])
 
   useEffect(() => {
     const onResize = () => setItemsPerPage(computeItemsPerPage())
@@ -123,7 +134,17 @@ export default function Issues() {
                     type="text"
                     placeholder="Search by CVE, description, or asset..."
                     value={searchTerm}
-                    onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      setSearchTerm(val)
+                      setCurrentPage(1)
+                      // Keep URL in sync so bookmarking/sharing works
+                      if (val) {
+                        setSearchParams({ search: val })
+                      } else {
+                        setSearchParams({})
+                      }
+                    }}
                   />
                 </div>
 
