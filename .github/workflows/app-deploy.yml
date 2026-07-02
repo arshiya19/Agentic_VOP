@@ -90,7 +90,7 @@ jobs:
       - name: Refresh .env from SSM Parameter Store
         run: |
           ssh -o StrictHostKeyChecking=no -i /tmp/ec2_ssh_key ubuntu@${{ steps.ec2-ip.outputs.ip }} \
-            'aws ssm get-parameters-by-path --path /sisyfix/prod/app/ --recursive --with-decryption --query "Parameters[*].[Name,Value]" --output text | while IFS=$'"'"'\t'"'"' read -r name value; do key="${name##*/}"; echo "${key}=${value}"; done > /opt/app/.env && chmod 0600 /opt/app/.env'
+            'sudo rm -f /opt/app/.env && aws ssm get-parameters-by-path --path /sisyfix/prod/app/ --recursive --with-decryption --query "Parameters[*].[Name,Value]" --output text | while IFS=$'"'"'\t'"'"' read -r name value; do key="${name##*/}"; echo "${key}=${value}"; done > /opt/app/.env && chmod 0600 /opt/app/.env'
 
       - name: Rebuild and restart containers
         run: |
