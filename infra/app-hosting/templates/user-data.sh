@@ -5,6 +5,7 @@ set -euo pipefail
 # EC2 Bootstrap Script (user-data)
 # Installs dependencies, clones repo, injects secrets, and starts the app stack.
 # Template variables: aws_region, env, github_repository
+# Version: 2026-07-02-v2
 # ==============================================================================
 
 LOG_FILE="/var/log/user-data.log"
