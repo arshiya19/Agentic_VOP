@@ -80,8 +80,17 @@ run_step "Install Docker Engine + Compose" install_docker
 clone_repository() {
   apt-get install -y git
   git clone "https://github.com/${github_repository}.git" /opt/app
+  chown -R ubuntu:ubuntu /opt/app
 }
 run_step "Clone repository" clone_repository
+
+# ==============================================================================
+# Step 3.1: Grant ubuntu user access to Docker
+# ==============================================================================
+grant_docker_access() {
+  usermod -aG docker ubuntu
+}
+run_step "Grant ubuntu Docker access" grant_docker_access
 
 # ==============================================================================
 # Step 4: Fetch secrets from SSM Parameter Store and write .env
