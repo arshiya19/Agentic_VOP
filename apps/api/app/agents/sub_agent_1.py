@@ -33,7 +33,7 @@ from ..db import supabase_admin
 from ..models import LLMNormalizedIssue
 from .connectors import fetch_raw_rows
 from .llm import invoke_structured_with_retry
-from .trace import emit_trace
+from .trace import RunCancelledError, emit_trace, is_cancellation_requested
 
 
 def _sanitize(value: Any) -> Any:
@@ -49,6 +49,136 @@ def _sanitize(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize(v) for v in value]
     return value
+
+
+def parse_cvss_vector(vector: str | None) -> tuple[float | None, str | None]:
+    """Deterministically compute (base_score, version) from a CVSS vector string.
+
+    Handles V2, V3.0, V3.1, V4.0 vectors. Used as a post-LLM step so the LLM
+    only has to *recognize* a vector in the raw row (cheap) — the actual
+    multi-factor subscore math is done by the `cvss` library (reliable).
+
+    Returns (None, None) when the input is empty, malformed, or an unknown
+    version. Callers should treat this as "leave cvss_score / cvss_version
+    alone" and let downstream enrichment (NVD) try to fill them instead.
+    """
+    if not vector or not isinstance(vector, str):
+        return None, None
+    vector = vector.strip()
+    if not vector:
+        return None, None
+
+    try:
+        if vector.startswith("CVSS:4"):
+            from cvss import CVSS4
+
+            return float(CVSS4(vector).base_score), "4.0"
+        if vector.startswith("CVSS:3.1"):
+            from cvss import CVSS3
+
+            return float(CVSS3(vector).base_score), "3.1"
+        if vector.startswith("CVSS:3"):
+            from cvss import CVSS3
+
+            return float(CVSS3(vector).base_score), "3.0"
+        # Bare V2 vectors look like "AV:N/AC:L/Au:N/C:P/I:P/A:P" — no CVSS: prefix.
+        if vector.startswith(("AV:", "(AV:")):
+            from cvss import CVSS2
+
+            return float(CVSS2(vector).base_score), "2.0"
+    except Exception:  # noqa: BLE001 — any parse failure → leave fields null
+        return None, None
+
+    return None, None
+
+
+# Preference order for picking the best CVSS vector when a scanner emits multiple
+# versions for the same finding (NVD's `metrics` often has V31 + V2; OSV starts
+# shipping V4 alongside V3.1). Higher number wins.
+_CVSS_VERSION_RANK = {"4.0": 4, "3.1": 3, "3.0": 2, "2.0": 1}
+
+
+def pick_best_cvss_vector(vectors: list[str | None]) -> str | None:
+    """From a list of CVSS vector strings, return the highest-version one.
+
+    Preference: V4 > V3.1 > V3.0 > V2. Vectors that fail to parse are ignored.
+    Returns None when no input parses cleanly.
+    """
+    best_rank = 0
+    best_vector: str | None = None
+    for v in vectors:
+        if not v:
+            continue
+        _, version = parse_cvss_vector(v)
+        if version is None:
+            continue
+        rank = _CVSS_VERSION_RANK.get(version, 0)
+        if rank > best_rank:
+            best_rank = rank
+            best_vector = v
+    return best_vector
+
+
+def extract_all_vectors_from_raw(raw: dict) -> list[str]:
+    """Find every CVSS vector string in a raw scanner payload.
+
+    Walks the common shapes — top-level fields, OSV's severity[].score array,
+    NVD's metrics.cvssMetricV{40,31,30,2}[].cvssData.vectorString, and nested
+    cvss/cvss3 objects. Returns all distinct vectors found so callers can
+    `pick_best_cvss_vector(...)` to choose the strongest one.
+    """
+
+    def _looks_like_vector(v) -> bool:
+        if not isinstance(v, str):
+            return False
+        s = v.strip()
+        return s.startswith(("CVSS:3", "CVSS:4", "CVSS:2", "AV:", "(AV:"))
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(v):
+        if _looks_like_vector(v):
+            s = v.strip()
+            if s not in seen:
+                seen.add(s)
+                found.append(s)
+
+    if not isinstance(raw, dict):
+        return found
+
+    def _as_list(v) -> list:
+        # Some scanners ship `severity` as a string ("HIGH") instead of a list
+        # of dicts — guard so the caller doesn't crash on non-iterables.
+        return v if isinstance(v, list) else []
+
+    # 1. Top-level keys.
+    for key in ("vector", "vector_string", "vectorString", "cvss_vector"):
+        _add(raw.get(key))
+
+    # 2. OSV-style severity arrays (severity / severity_entries).
+    for entry in _as_list(raw.get("severity")) + _as_list(raw.get("severity_entries")):
+        if isinstance(entry, dict):
+            _add(entry.get("score"))
+            _add(entry.get("vector"))
+            _add(entry.get("vectorString"))
+
+    # 3. NVD-style metrics.cvssMetricV*[].cvssData.vectorString.
+    metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+    for mkey in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for entry in _as_list(metrics.get(mkey)):
+            cdata = entry.get("cvssData") if isinstance(entry, dict) else None
+            if isinstance(cdata, dict):
+                _add(cdata.get("vectorString"))
+
+    # 4. Nested cvss / cvss3 / cvss40 objects.
+    for parent_key in ("cvss", "cvss3", "cvss31", "cvss40", "cvssV3", "cvssV2"):
+        parent = raw.get(parent_key)
+        if isinstance(parent, dict):
+            for key in ("vector", "vectorString", "vector_string"):
+                _add(parent.get(key))
+
+    return found
 
 
 def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
@@ -182,6 +312,10 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
 
     def _process_one(persisted: dict) -> dict:
         """Per-row task: LLM-normalize then insert. Runs inside a worker thread."""
+        # Cancellation checkpoint — skip remaining rows once a stop is requested.
+        # Lightweight DB poll per row; cheap compared to the LLM call below.
+        if is_cancellation_requested(run_id):
+            raise RunCancelledError(f"Skipping row {persisted['id']} — run cancelled")
         raw_finding_id = persisted["id"]
         raw = persisted["raw"]
         llm_issue = _normalize_row(run_id, prompt_row, tool, raw, mapping_rules)
@@ -189,9 +323,29 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
         # produced it, regardless of what the LLM returned. This is the
         # single source of truth for "where this finding came from".
         llm_issue.source = tool
+        # CVSS resolution — combines deterministic raw scan + the LLM's pick,
+        # then chooses the highest-version vector available (V4 > V3.1 > V3.0 > V2).
+        # Runs for every scanner so any future tool that ships any CVSS vector
+        # gets the best one without per-connector work.
+        candidate_vectors = extract_all_vectors_from_raw(raw)
+        if llm_issue.cvss_vector:
+            candidate_vectors.append(llm_issue.cvss_vector)
+        best_vector = pick_best_cvss_vector(candidate_vectors)
+        if best_vector:
+            llm_issue.cvss_vector = best_vector
+        # Compute numeric score + version from the chosen vector when missing.
+        if llm_issue.cvss_vector and (
+            llm_issue.cvss_score is None or llm_issue.cvss_version is None
+        ):
+            score, version = parse_cvss_vector(llm_issue.cvss_vector)
+            if score is not None and llm_issue.cvss_score is None:
+                llm_issue.cvss_score = score
+            if version is not None and llm_issue.cvss_version is None:
+                llm_issue.cvss_version = version
         _insert_issue(sb, llm_issue, raw_finding_id, run_id)
         return {"raw_finding_id": raw_finding_id}
 
+    cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, p): p for p in persisted_raws}
         completed = 0
@@ -201,6 +355,9 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
             try:
                 future.result()
                 inserted += 1
+            except RunCancelledError:
+                # User clicked Stop — drain remaining futures but skip work.
+                cancelled = True
             except Exception as e:
                 failed += 1
                 if len(failure_examples) < 3:
@@ -225,6 +382,16 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
                     f"Processed {completed}/{len(persisted_raws)} rows "
                     f"({inserted} succeeded, {failed} failed so far)",
                 )
+
+    if cancelled:
+        emit_trace(
+            run_id,
+            "sub-agent-1",
+            "MESSAGE",
+            f"Cancellation detected — stopped after {inserted} normalized row(s) "
+            f"(remaining rows skipped, will be wiped by cancel endpoint)",
+        )
+        raise RunCancelledError("Sub-Agent 1 stopped due to user cancellation")
 
     if failed:
         emit_trace(
@@ -358,6 +525,7 @@ def _insert_issue(sb, llm_issue: LLMNormalizedIssue, raw_finding_id: int, run_id
         "severity": llm_issue.severity,
         "cvss_score": llm_issue.cvss_score,
         "cvss_version": llm_issue.cvss_version,
+        "cvss_vector": llm_issue.cvss_vector,
         "solution": llm_issue.solution,
         "asset_identity": llm_issue.asset_identity,
         "package": llm_issue.package,

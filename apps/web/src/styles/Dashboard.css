@@ -887,10 +887,10 @@
 .compliance-tags-container {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 1;
-  justify-content: center;
+  gap: 4px;
   flex-wrap: wrap;
+  margin-top: 6px;
+  /* Inside the header content now; left-aligned, no centering */
 }
 
 .compliance-tag {
@@ -1302,4 +1302,147 @@
 .col-impact {
   width: 80px;
   text-align: center;
+}
+
+/* =============================================================================
+ * Exposure Map — row labels + severity badges (added with 2nd threat-zone row)
+ * ============================================================================= */
+
+/* Row labels — clear, readable, sit above each row */
+.exposure-map-row-label {
+  padding: 12px 20px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #E2E8F0;
+  background: var(--dash-bg-surface);
+}
+
+.exposure-map-row-hint {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--dash-text-secondary, #94A3B8);
+  font-size: 11px;
+  opacity: 1;
+}
+
+/* Card switches to horizontal layout — header on the LEFT, value/findings/
+ * badges right-aligned on the RIGHT. Overrides the column-based base layout
+ * in .exposure-compact above. */
+.exposure-map-grid .exposure-compact {
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+}
+
+.exposure-map-grid .exposure-compact-header {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Right-side stack: big number + label, then finding count, then C/H/M chips.
+ * Vertical stack, right-aligned. */
+.exposure-compact-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  margin-top: 0;
+  padding-top: 0;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.exposure-compact-strip-primary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.exposure-compact-strip-primary .value-number {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  color: #FFFFFF;
+}
+
+.exposure-compact-strip-primary .value-label {
+  font-size: 11px;
+  color: var(--dash-text-secondary, #94A3B8);
+}
+
+.exposure-finding-count {
+  font-size: 11px;
+  color: var(--dash-text-secondary, #94A3B8);
+  white-space: nowrap;
+}
+
+/* ---- Severity bar (replaces the old chip-style C/H/M badges) ----
+ * One thin horizontal track with three colored segments sized by proportion;
+ * compact legend below shows the exact counts. */
+.severity-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  width: 150px;
+}
+
+.severity-bar-track {
+  display: flex;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.severity-bar-track .seg {
+  height: 100%;
+  transition: width 0.25s ease;
+}
+
+.severity-bar-track .seg-critical { background: #EF4444; }
+.severity-bar-track .seg-high     { background: #F97316; }
+.severity-bar-track .seg-medium   { background: #EAB308; }
+
+.severity-bar-legend {
+  display: inline-flex;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.sb-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.sb-leg .sb-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.sb-leg.sb-critical { color: #FCA5A5; }
+.sb-leg.sb-critical .sb-dot { background: #EF4444; }
+
+.sb-leg.sb-high { color: #FDBA74; }
+.sb-leg.sb-high .sb-dot { background: #F97316; }
+
+.sb-leg.sb-medium { color: #FCD34D; }
+.sb-leg.sb-medium .sb-dot { background: #EAB308; }
+
+
+/* SOC2 chip styling — pairs with the existing PCI/HIPAA/GDPR chip styles. */
+.compliance-tag.soc2 {
+  color: #C4B5FD;
+  background: rgba(139, 92, 246, 0.15);
+  border-color: rgba(139, 92, 246, 0.3);
 }

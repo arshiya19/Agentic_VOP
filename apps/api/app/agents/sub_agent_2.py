@@ -32,7 +32,7 @@ from ..db import supabase_admin
 from ..models import LLMEnrichmentDecision
 from ..services.vuln_intelligence import VulnIntelligenceService
 from .llm import invoke_structured_with_retry
-from .trace import emit_trace
+from .trace import RunCancelledError, emit_trace, is_cancellation_requested
 
 
 _EPSS_API = "https://api.first.org/data/v1/epss"
@@ -62,6 +62,303 @@ def _get_intelligence_service() -> VulnIntelligenceService | None:
     return _intelligence_service if settings.intelligence_enabled else None
 
 
+# ---- MITRE projection helpers ----------------------------------------------
+# Used to compute the 9 MITRE-derived columns we promote onto `issues` (added
+# in migration 0020). Kept module-level so they don't get rebuilt per call.
+
+_LIKELIHOOD_RANK = {"Low": 1, "Medium": 2, "High": 3}
+_SEVERITY_RANK = {"Low": 1, "Medium": 2, "High": 3, "Very High": 4}
+
+
+def _max_label(values, rank_map):
+    """Return the highest-ranked label in `values` according to `rank_map`.
+
+    Used to collapse "max likelihood across CAPECs" and "max severity across
+    CAPECs" into a single text value per issue. Returns None when no labels
+    in `values` are recognised.
+    """
+    ranks = [rank_map[v] for v in values if v in rank_map]
+    if not ranks:
+        return None
+    target = max(ranks)
+    for label, rank in rank_map.items():
+        if rank == target:
+            return label
+    return None
+
+
+# =============================================================================
+# Prioritization formula — hybrid: deterministic Python score + LLM prose
+# =============================================================================
+# Ported from the previous chatbot-cyberisk `vop_reprio` engine and extended
+# with EPSS, CISA KEV, ATT&CK tactics, and compliance-scope weighting.
+#
+# Output:
+#   derived_risk           — 0-100 score (existing column; the formula produces
+#                            a 0-10 score internally, then * 10)
+#   priority               — P0..P3 banding
+#   components_summary     — every factor stored as jsonb for audit
+#   scoring_policy_version — version string so we can A/B test policies
+# =============================================================================
+
+SCORING_POLICY_VERSION = "reprio-v1.0"
+
+_SEV_TO_BASE = {
+    "Critical": 9.5,
+    "High": 8.0,
+    "Medium": 5.5,
+    "Low": 2.0,
+    "Info": 0.5,
+}
+_ENV_WEIGHTS = {
+    "production": 1.20,
+    "staging": 1.00,
+    "qa": 0.85,
+    "development": 0.80,
+    "sandbox": 0.70,
+}
+_CRIT_WEIGHTS = {5: 1.20, 4: 1.10, 3: 1.00, 2: 0.95, 1: 0.90}
+_DATA_CLASS_WEIGHTS = {
+    "restricted": 1.20,
+    "confidential": 1.10,
+    "internal": 1.00,
+    "public": 0.90,
+}
+_EXPOSURE_WEIGHTS = {"public": 1.15, "internal": 1.00}
+_AV_WEIGHTS = {
+    "NETWORK": 1.20,
+    "ADJACENT": 1.10,
+    "LOCAL": 1.00,
+    "PHYSICAL": 0.90,
+}
+_CWE_LIKELIHOOD_WEIGHTS = {"High": 1.10, "Medium": 1.00, "Low": 0.95}
+
+# ATT&CK tactic bonuses applied additively to the tactic factor
+_TACTIC_BONUSES = {
+    "initial-access": 0.08,
+    "execution": 0.05,
+    "privilege-escalation": 0.05,
+    "lateral-movement": 0.04,
+    "exfiltration": 0.04,
+}
+
+# KEV-listed findings get bumped to at least this 0-10 score (== priority P1+).
+_KEV_FLOOR = 8.5
+
+
+def _compute_score(issue: dict, asset: dict | None) -> dict:
+    """Deterministic risk-score formula.
+
+    Args:
+      issue: row from `issues` table (or partial dict with the scoring inputs).
+      asset: row from `assets` table (or None when the issue is unattributed).
+
+    Returns:
+      {
+        'derived_risk':           0-100 score,
+        'priority':               'P0' | 'P1' | 'P2' | 'P3',
+        'components_summary':     {...all factors used...},
+        'scoring_policy_version': 'reprio-v1.0',
+      }
+
+    Pure function — no DB calls, no LLM, no side effects. Same input always
+    produces the same output.
+    """
+    a = asset or {}
+
+    # --- Base score: CVSS if present, else severity-mapped, else mid-range
+    base = issue.get("cvss_score") or _SEV_TO_BASE.get(issue.get("severity"), 5.0)
+    base = float(base)
+
+    # --- Asset-context multipliers (default 1.0 when asset is unattributed)
+    env_f = _ENV_WEIGHTS.get(a.get("environment"), 1.00)
+    crit_f = _CRIT_WEIGHTS.get(a.get("business_criticality"), 1.00)
+    data_f = _DATA_CLASS_WEIGHTS.get(a.get("data_classification"), 1.00)
+    exposure_f = _EXPOSURE_WEIGHTS.get(a.get("exposure"), 1.00)
+
+    # --- Threat-intel multipliers
+    av_f = _AV_WEIGHTS.get(issue.get("cvss_attack_vector"), 1.00)
+    cwe_f = _CWE_LIKELIHOOD_WEIGHTS.get(issue.get("cwe_likelihood_of_exploit"), 1.00)
+
+    # EPSS: scale 0..1 → 0.9..1.25 (higher EPSS = stronger boost)
+    epss = float(issue.get("epss_score") or 0)
+    epss_f = round(0.9 + epss * 0.35, 4)
+
+    # ATT&CK tactics: additive bonuses for high-impact tactics
+    tactics = issue.get("attack_tactics") or []
+    tactic_f = 1.00
+    for tactic, bonus in _TACTIC_BONUSES.items():
+        if tactic in tactics:
+            tactic_f += bonus
+    tactic_f = round(tactic_f, 4)
+
+    # Compliance scope: each compliance tag adds 5% (so PCI+SOC2 = 1.10)
+    compliance_tags = a.get("compliance_tags") or []
+    compliance_f = round(1.00 + 0.05 * len(compliance_tags), 4)
+
+    # --- Combine
+    raw_score = (
+        base
+        * env_f
+        * crit_f
+        * data_f
+        * exposure_f
+        * av_f
+        * cwe_f
+        * epss_f
+        * tactic_f
+        * compliance_f
+    )
+
+    # --- KEV floor (CISA-listed actively-exploited)
+    kev_floor_applied = False
+    if issue.get("exploit_in_kev"):
+        if raw_score < _KEV_FLOOR:
+            raw_score = _KEV_FLOOR
+            kev_floor_applied = True
+
+    # --- Clamp to 0..9.9 then scale to 0..99 for the existing column shape.
+    # We deliberately cap below 10.0 (max display 99, not 100) because a score
+    # of exactly 100 implies certainty / theoretical maximum, which doesn't
+    # match how security risk actually behaves — there's always residual
+    # uncertainty. Industry convention (Tenable, Qualys, ArmorCode) caps the
+    # public-facing score below the formula maximum.
+    clamped_score = round(max(0.0, min(9.9, raw_score)), 1)
+    derived_risk = round(clamped_score * 10, 2)
+
+    # --- Priority banding (matches the old repo's P0..P3 model)
+    if clamped_score >= 9.0:
+        priority = "P0"
+    elif clamped_score >= 7.0:
+        priority = "P1"
+    elif clamped_score >= 4.0:
+        priority = "P2"
+    else:
+        priority = "P3"
+
+    components_summary = {
+        "base": round(base, 2),
+        "env_f": env_f,
+        "crit_f": crit_f,
+        "data_f": data_f,
+        "exposure_f": exposure_f,
+        "av_f": av_f,
+        "cwe_f": cwe_f,
+        "epss_f": epss_f,
+        "tactic_f": tactic_f,
+        "compliance_f": compliance_f,
+        "kev_floor_applied": kev_floor_applied,
+        "raw_score": round(raw_score, 3),
+        "clamped_score": clamped_score,
+    }
+
+    return {
+        "derived_risk": derived_risk,
+        "priority": priority,
+        "components_summary": components_summary,
+        "scoring_policy_version": SCORING_POLICY_VERSION,
+    }
+
+
+def _build_asset_index(assets: list[dict]) -> dict:
+    """Build O(1) lookup dicts for asset attribution.
+
+    Indexes by:
+      - canonical name + each alias            (project / repo / direct names)
+      - hostname                               (host scanners)
+      - ip_address                             (host scanners)
+      - (ecosystem, package_name)              (SBOM — package scanners)
+
+    The SBOM index is the primary path for package-level findings (OSV, Trivy,
+    Snyk, Dependabot). It lets a scanner emit just `{name: lodash, ecosystem: npm}`
+    and the matcher finds the asset whose `dependencies.npm` contains `lodash`
+    — no per-scanner alias tables needed.
+    """
+    by_name_or_alias: dict[str, dict] = {}
+    by_hostname: dict[str, dict] = {}
+    by_ip: dict[str, dict] = {}
+    by_sbom: dict[tuple[str, str], dict] = {}
+
+    for a in assets:
+        if a.get("name"):
+            by_name_or_alias[a["name"]] = a
+        for alias in a.get("aliases") or []:
+            by_name_or_alias[alias] = a
+        if a.get("hostname"):
+            by_hostname[a["hostname"]] = a
+        if a.get("ip_address"):
+            by_ip[a["ip_address"]] = a
+        for ecosystem, pkgs in (a.get("dependencies") or {}).items():
+            for pkg in pkgs or []:
+                by_sbom[(ecosystem.lower(), pkg.lower())] = a
+
+    return {
+        "name_or_alias": by_name_or_alias,
+        "hostname": by_hostname,
+        "ip_address": by_ip,
+        "sbom": by_sbom,
+    }
+
+
+def _resolve_asset(issue: dict, asset_index: dict) -> dict | None:
+    """Match one issue's asset_identity (+ package field) to a row in `assets`.
+
+    Priority chain (first match wins):
+      1. Direct asset identifier (project / repo)         → name / aliases
+      2. SBOM match (ecosystem + package name)            → assets.dependencies
+      3. Package-name-only fallback (no ecosystem known)  → aliases
+      4. Host identifiers (hostname / ipv4)               → hostname / ip_address
+
+    SBOM matching (step 2) is the scalable path for package scanners. Each
+    asset declares its dependencies once in `assets.dependencies`; every
+    package-level scanner (OSV, Trivy, Snyk, Dependabot) auto-attributes
+    without scanner-specific configuration.
+
+    Returns None when nothing matches (the issue stays "unattributed" and
+    the formula uses default 1.0 multipliers for all asset-context factors).
+    """
+    ai = issue.get("asset_identity") or {}
+    pkg_obj = issue.get("package") or {}
+    name_or_alias = asset_index["name_or_alias"]
+
+    # 1. Direct asset identifiers — strongest signal
+    for key in ("project", "repo"):
+        v = ai.get(key)
+        if v and v in name_or_alias:
+            return name_or_alias[v]
+
+    # Package name + ecosystem can live in either `asset_identity` (Trivy's
+    # PkgName / package_name) or the dedicated `package` field (OSV-style).
+    pkg_name = (
+        ai.get("PkgName")
+        or ai.get("package_name")
+        or pkg_obj.get("name")
+        or pkg_obj.get("package_name")
+    )
+    ecosystem = ai.get("ecosystem") or pkg_obj.get("ecosystem") or pkg_obj.get("type")
+
+    # 2. SBOM match — precise when ecosystem is known
+    if pkg_name and ecosystem:
+        key = (ecosystem.lower(), pkg_name.lower())
+        if key in asset_index["sbom"]:
+            return asset_index["sbom"][key]
+
+    # 3. Package-name-only fallback via aliases (when ecosystem missing)
+    if pkg_name and pkg_name in name_or_alias:
+        return name_or_alias[pkg_name]
+
+    # 4. Host identifiers
+    hostname = ai.get("hostname")
+    if hostname and hostname in asset_index["hostname"]:
+        return asset_index["hostname"][hostname]
+
+    ip = ai.get("ipv4")
+    if ip and ip in asset_index["ip_address"]:
+        return asset_index["ip_address"][ip]
+
+    return None
+
+
 def _sanitize(value):
     """Recursively strip Postgres-incompatible NUL bytes from any string fields."""
     if isinstance(value, str):
@@ -81,20 +378,28 @@ def _llm_decide(
     nvd: dict,
     in_kev: bool,
     mitre: dict | None = None,
+    asset: dict | None = None,
+    scoring: dict | None = None,
 ) -> LLMEnrichmentDecision:
-    """Call ChatOpenAI with structured output for the per-issue risk decision.
+    """Call the LLM to produce the prose narrative for an already-scored issue.
 
     Tiered retry — escalate temperature first, then escalate the model on the
     final attempt for issues the small model can't reason about.
 
-    `mitre` is the full MITRE chain payload — shape:
+    As of prompt v1.4, the LLM does NOT compute the score. The deterministic
+    formula `_compute_score()` produces derived_risk/priority/components_summary
+    before this call; we pass them to the LLM as additional context so the
+    explanation can cite the ACTUAL factors that drove the number.
+
+    `mitre` is the full MITRE chain payload —
         {"cwe": {...} | {}, "capec": [...], "attack": [...]}
-    Sections may be empty when the local catalogs haven't been seeded or
-    when the CVE has no CWE id.
+    `asset` is the resolved asset row (or None for unattributed findings).
+    `scoring` is the formula's output (derived_risk, priority, components).
+    Any may be empty/None — the prompt handles missing sections gracefully.
     """
     params = prompt_row.get("parameters") or {}
     base_temp = float(params.get("temperature", 0.2))
-    max_tokens = int(params.get("max_tokens", 800))
+    max_tokens = int(params.get("max_tokens", 500))
     primary_model = prompt_row["model"]
     fallback_model = params.get("fallback_model", "gpt-4o")
 
@@ -113,6 +418,13 @@ def _llm_decide(
             "in_kev": in_kev,
             "nvd": nvd or {},
             "mitre": mitre or {"cwe": {}, "capec": [], "attack": []},
+            "asset": _asset_for_llm(asset),
+        },
+        "scoring": {
+            "derived_risk": (scoring or {}).get("derived_risk"),
+            "priority": (scoring or {}).get("priority"),
+            "policy_version": (scoring or {}).get("scoring_policy_version"),
+            "components": (scoring or {}).get("components_summary") or {},
         },
     }
 
@@ -132,12 +444,35 @@ def _llm_decide(
     )
 
 
+def _asset_for_llm(asset: dict | None) -> dict:
+    """Trim an asset row to the fields useful for explanation prose.
+
+    We DON'T pass every column (description, repo_url, etc. would just bloat
+    tokens). The LLM cares about the categorical signals — env, exposure,
+    criticality, compliance — same ones the formula uses.
+    """
+    if not asset:
+        return {}
+    return {
+        "name": asset.get("name"),
+        "asset_type": asset.get("asset_type"),
+        "environment": asset.get("environment"),
+        "exposure": asset.get("exposure"),
+        "business_criticality": asset.get("business_criticality"),
+        "data_classification": asset.get("data_classification"),
+        "compliance_tags": asset.get("compliance_tags") or [],
+        "network_zone": asset.get("network_zone"),
+        "business_owner": asset.get("business_owner"),
+    }
+
+
 def _fetch_nvd_data_from_intelligence(
     cve_ids: list[str], run_id: str | None = None
 ) -> dict[str, dict]:
     """Fetch NVD data using the DynamoDB Intelligence Service (fast path).
 
     Returns the same dict shape as _fetch_nvd_data so it's a drop-in replacement.
+    Handles batching internally — callers may pass more than 100 CVE IDs.
     """
     svc = _get_intelligence_service()
     if svc is None:
@@ -145,16 +480,24 @@ def _fetch_nvd_data_from_intelligence(
 
     results: dict[str, dict] = {}
     try:
-        intel_map = svc.batch_get_cve_intelligence(list(cve_ids)[:100])
-        for cve_id, intel in intel_map.items():
-            if intel and intel.resolution == "resolved" and intel.nvd:
-                results[cve_id] = {
-                    "cwe_id": intel.nvd.cwe_ids[0] if intel.nvd.cwe_ids else None,
-                    "cvss_attack_vector": intel.nvd.cvss_attack_vector,
-                    "cvss_attack_complexity": intel.nvd.cvss_attack_complexity,
-                    "cvss_privileges_required": intel.nvd.cvss_privileges_required,
-                    "cvss_user_interaction": intel.nvd.cvss_user_interaction,
-                }
+        # DynamoDB BatchGetItem supports max 100 keys per call. Chunk the input
+        # so we don't silently drop CVEs beyond the first 100.
+        all_cve_ids = list(cve_ids)
+        for i in range(0, len(all_cve_ids), 100):
+            chunk = all_cve_ids[i : i + 100]
+            intel_map = svc.batch_get_cve_intelligence(chunk)
+            for cve_id, intel in intel_map.items():
+                if intel and intel.resolution == "resolved" and intel.nvd:
+                    results[cve_id] = {
+                        "cwe_id": intel.nvd.cwe_ids[0] if intel.nvd.cwe_ids else None,
+                        "cvss_score": intel.nvd.cvss_v31_score,
+                        "cvss_version": "3.1" if intel.nvd.cvss_v31_score is not None else None,
+                        "cvss_vector": intel.nvd.cvss_v31_vector,
+                        "cvss_attack_vector": intel.nvd.cvss_attack_vector,
+                        "cvss_attack_complexity": intel.nvd.cvss_attack_complexity,
+                        "cvss_privileges_required": intel.nvd.cvss_privileges_required,
+                        "cvss_user_interaction": intel.nvd.cvss_user_interaction,
+                    }
     except Exception as e:
         if run_id:
             emit_trace(
@@ -197,29 +540,135 @@ def _write_back_nvd_to_dynamo(raw_responses: list[dict], run_id: str | None = No
             )
 
 
+def _parse_nvd_response(vulns: list[dict]) -> dict:
+    """Extract CWE + CVSS fields from an NVD API response's vulnerabilities list.
+
+    Pure parsing — no HTTP, no side-effects.
+    """
+    if not vulns:
+        return {}
+
+    cve_data = vulns[0].get("cve", {}) or {}
+    metrics = cve_data.get("metrics", {}) or {}
+
+    # Prefer CVSS v3.1, fall back to v3.0
+    cvss: dict | None = None
+    cvss_version_picked: str | None = None
+    for m in metrics.get("cvssMetricV31", []) or []:
+        if m.get("type") == "Primary":
+            cvss = m.get("cvssData") or {}
+            cvss_version_picked = "3.1"
+            break
+    if cvss is None:
+        for m in metrics.get("cvssMetricV30", []) or []:
+            if m.get("type") == "Primary":
+                cvss = m.get("cvssData") or {}
+                cvss_version_picked = "3.0"
+                break
+
+    # CWE id from weaknesses[]
+    cwe_id: str | None = None
+    for w in cve_data.get("weaknesses", []) or []:
+        for d in w.get("description", []) or []:
+            v = (d.get("value") or "").strip()
+            if v.upper().startswith("CWE-"):
+                cwe_id = v
+                break
+        if cwe_id:
+            break
+
+    base_score = (cvss or {}).get("baseScore")
+    vector_string = (cvss or {}).get("vectorString")
+
+    return {
+        "cwe_id": cwe_id,
+        "cvss_score": float(base_score) if base_score is not None else None,
+        "cvss_version": cvss_version_picked,
+        "cvss_vector": vector_string,
+        "cvss_attack_vector": (cvss or {}).get("attackVector"),
+        "cvss_attack_complexity": (cvss or {}).get("attackComplexity"),
+        "cvss_privileges_required": (cvss or {}).get("privilegesRequired"),
+        "cvss_user_interaction": (cvss or {}).get("userInteraction"),
+    }
+
+
+# Circuit breaker threshold — after this many consecutive NVD failures,
+# stop attempting remaining CVEs and record them as missed.
+_CIRCUIT_BREAKER_THRESHOLD = 5
+
+
 def _fetch_nvd_data(
     cve_ids: list[str],
     api_key: str | None,
     run_id: str | None = None,
     *,
     collect_raw: list[dict] | None = None,
+    collect_missed: list[str] | None = None,
 ) -> dict[str, dict]:
     """For each CVE, fetch NVD data: CWE id + CVSS v3 vector breakdown.
 
-    Throttle: 0.06s between calls with key (~50 req / 30s allowed),
-              0.6s without (~5 req / 30s allowed).
+    Throttle math (NVD's published rolling 30s window):
+      with key   : 50 req / 30s  →  0.6s between calls
+      without key: 5  req / 30s  →  6.0s between calls
+
+    Padded by 10% so a clock-skew burst between us and NVD's counter
+    doesn't tip us over the limit. Sequential — no parallelism — so the
+    pace is the only thing keeping us under the limit.
+
+    Circuit breaker: after `_CIRCUIT_BREAKER_THRESHOLD` consecutive failures,
+    the loop stops early and remaining CVE IDs are appended to `collect_missed`
+    (if provided). This avoids spending minutes hammering a degraded/down API.
 
     If `collect_raw` is provided (a list), raw NVD vulnerability objects
     are appended to it for downstream write-back to DynamoDB.
+
+    If `collect_missed` is provided (a list), CVE IDs that could not be
+    fetched (individual failures + circuit-breaker skipped) are appended.
     """
     headers: dict[str, str] = {}
     if api_key:
         headers["apiKey"] = api_key
-    delay = 0.06 if api_key else 0.6
+    delay = 0.66 if api_key else 6.6
+
+    # Filter to actual CVE-* IDs. NVD's API only recognizes CVE-YYYY-NNN — sending
+    # PYSEC/GHSA/RUSTSEC/OSV ids yields 404s that look like outages in the trace.
+    # OSV advisories often have a non-CVE primary id with no CVE alias (the
+    # advisory was never assigned a CVE), so dropping them here is the only
+    # honest option — there's nothing for NVD to return.
+    cve_ids = [c for c in cve_ids if c and c.upper().startswith("CVE-")]
+
+    if run_id:
+        sample = [repr(c) for c in cve_ids[:5]]
+        emit_trace(
+            run_id,
+            "sub-agent-2",
+            "MESSAGE",
+            f"NVD handoff: count={len(cve_ids)} api_key={'SET' if api_key else 'MISSING'} "
+            f"sample={sample}",
+        )
 
     results: dict[str, dict] = {}
+    consecutive_failures = 0
+
     with httpx.Client(timeout=30, headers=headers) as client:
         for cve in cve_ids:
+            # --- Circuit breaker: stop if NVD is consistently failing ---
+            if consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+                remaining = [c for c in cve_ids if c not in results and c != cve]
+                remaining.insert(0, cve)
+                if collect_missed is not None:
+                    collect_missed.extend(remaining)
+                if run_id:
+                    emit_trace(
+                        run_id,
+                        "sub-agent-2",
+                        "MESSAGE",
+                        f"Circuit breaker open — {consecutive_failures} consecutive NVD "
+                        f"failures. Skipping remaining {len(remaining)} CVE(s) for "
+                        f"deferred retry.",
+                    )
+                break
+
             try:
                 resp = request_with_retry(
                     client,
@@ -227,6 +676,8 @@ def _fetch_nvd_data(
                     _NVD_API,
                     params={"cveId": cve},
                     timeout=30,
+                    max_attempts=5,
+                    backoff_factor=2.0,
                     run_id=run_id,
                     agent="sub-agent-2",
                 )
@@ -239,41 +690,16 @@ def _fetch_nvd_data(
                 if collect_raw is not None:
                     collect_raw.append(vulns[0])
 
-                cve_data = vulns[0].get("cve", {}) or {}
-                metrics = cve_data.get("metrics", {}) or {}
+                parsed = _parse_nvd_response(vulns)
+                if parsed:
+                    results[cve] = parsed
 
-                # Prefer CVSS v3.1, fall back to v3.0
-                cvss: dict | None = None
-                for m in metrics.get("cvssMetricV31", []) or []:
-                    if m.get("type") == "Primary":
-                        cvss = m.get("cvssData") or {}
-                        break
-                if cvss is None:
-                    for m in metrics.get("cvssMetricV30", []) or []:
-                        if m.get("type") == "Primary":
-                            cvss = m.get("cvssData") or {}
-                            break
-
-                # CWE id from weaknesses[]
-                cwe_id: str | None = None
-                for w in cve_data.get("weaknesses", []) or []:
-                    for d in w.get("description", []) or []:
-                        v = (d.get("value") or "").strip()
-                        if v.upper().startswith("CWE-"):
-                            cwe_id = v
-                            break
-                    if cwe_id:
-                        break
-
-                results[cve] = {
-                    "cwe_id": cwe_id,
-                    "cvss_attack_vector": (cvss or {}).get("attackVector"),
-                    "cvss_attack_complexity": (cvss or {}).get("attackComplexity"),
-                    "cvss_privileges_required": (cvss or {}).get("privilegesRequired"),
-                    "cvss_user_interaction": (cvss or {}).get("userInteraction"),
-                }
+                # Success — reset circuit breaker counter
+                consecutive_failures = 0
             except Exception:  # nosec B110 — intentional: skip individual CVE NVD fetch failures, continue to next CVE  # noqa: S110
-                pass
+                consecutive_failures += 1
+                if collect_missed is not None:
+                    collect_missed.append(cve)
             time.sleep(delay)
 
     return results
@@ -281,6 +707,16 @@ def _fetch_nvd_data(
 
 def run_enrich(run_id: str) -> dict:
     """Enrich canonical Issues from this run. Returns counts."""
+    # Cancellation checkpoint — exit before any expensive work
+    if is_cancellation_requested(run_id):
+        emit_trace(
+            run_id,
+            "sub-agent-2",
+            "MESSAGE",
+            "Cancellation detected at enrichment entry — skipping",
+        )
+        raise RunCancelledError("Sub-Agent 2 stopped before enrichment due to cancellation")
+
     sb = supabase_admin()
 
     # Load Sub-Agent 2 prompt for the LLM decision step
@@ -303,6 +739,17 @@ def run_enrich(run_id: str) -> dict:
         "MESSAGE",
         f"Loaded {len(issues)} canonical Issues to enrich. "
         f"Using prompt {prompt_row['agent']}@{prompt_row['version']} ({prompt_row['model']})",
+    )
+
+    # 1b. Batch-load the assets table so the formula has business context
+    # available for every issue. One query feeds all subsequent issue lookups.
+    asset_rows = sb.table("assets").select("*").execute().data or []
+    asset_index = _build_asset_index(asset_rows)
+    emit_trace(
+        run_id,
+        "sub-agent-2",
+        "MESSAGE",
+        f"Loaded {len(asset_rows)} asset rows for scoring context",
     )
 
     if not issues:
@@ -406,9 +853,11 @@ def run_enrich(run_id: str) -> dict:
             if missed_cves:
                 nvd_key = settings.nvd_api_key or None
                 speed_note = (
-                    f"with API key (~{len(missed_cves) * 0.06:.0f}s expected)"
+                    f"with API key (~{len(missed_cves) * 0.66:.0f}s expected, "
+                    f"plus retries on NVD 429/503)"
                     if nvd_key
-                    else f"no API key — rate-limited (~{len(missed_cves) * 0.6:.0f}s expected)"
+                    else f"no API key — rate-limited (~{len(missed_cves) * 6.6:.0f}s expected, "
+                    f"plus retries)"
                 )
                 emit_trace(
                     run_id,
@@ -416,21 +865,32 @@ def run_enrich(run_id: str) -> dict:
                     "MESSAGE",
                     f"Falling back to NVD API for {len(missed_cves)} "
                     f"cache-missed CVE(s) ({speed_note})…",
+                    payload={
+                        "missed_cves": sorted(missed_cves),
+                        "missed_cve_count": len(missed_cves),
+                    },
                 )
                 try:
                     raw_nvd_responses: list[dict] = []
+                    nvd_missed: list[str] = []
                     fallback_data = _fetch_nvd_data(
                         missed_cves,
                         nvd_key,
                         run_id=run_id,
                         collect_raw=raw_nvd_responses,
+                        collect_missed=nvd_missed,
                     )
                     nvd_data.update(fallback_data)
                     emit_trace(
                         run_id,
                         "sub-agent-2",
                         "MESSAGE",
-                        f"NVD API fallback returned data for {len(fallback_data)} CVE(s)",
+                        f"NVD API fallback returned data for {len(fallback_data)} CVE(s)"
+                        + (
+                            f" — {len(nvd_missed)} CVE(s) deferred (circuit breaker / failures)"
+                            if nvd_missed
+                            else ""
+                        ),
                     )
 
                     # Write-back: store NVD API results into DynamoDB so
@@ -448,18 +908,29 @@ def run_enrich(run_id: str) -> dict:
             # Legacy path: Direct NVD API calls (rate-limited)
             nvd_key = settings.nvd_api_key or None
             speed_note = (
-                f"with API key (~{len(cve_ids) * 0.06:.0f}s expected)"
+                f"with API key (~{len(cve_ids) * 0.66:.0f}s expected)"
                 if nvd_key
-                else f"no API key — rate-limited (~{len(cve_ids) * 0.6:.0f}s expected)"
+                else f"no API key — rate-limited (~{len(cve_ids) * 6.6:.0f}s expected)"
             )
             emit_trace(run_id, "sub-agent-2", "MESSAGE", f"Querying NVD ({speed_note})…")
             try:
-                nvd_data = _fetch_nvd_data(list(cve_ids), nvd_key, run_id=run_id)
+                nvd_missed_legacy: list[str] = []
+                nvd_data = _fetch_nvd_data(
+                    list(cve_ids),
+                    nvd_key,
+                    run_id=run_id,
+                    collect_missed=nvd_missed_legacy,
+                )
                 emit_trace(
                     run_id,
                     "sub-agent-2",
                     "MESSAGE",
-                    f"NVD returned data for {len(nvd_data)} CVE(s)",
+                    f"NVD returned data for {len(nvd_data)} CVE(s)"
+                    + (
+                        f" — {len(nvd_missed_legacy)} CVE(s) deferred (circuit breaker / failures)"
+                        if nvd_missed_legacy
+                        else ""
+                    ),
                 )
             except Exception as e:
                 emit_trace(
@@ -620,6 +1091,9 @@ def run_enrich(run_id: str) -> dict:
 
     def _process_one(issue: dict) -> dict:
         """Per-issue task: assemble enrichment, call LLM, update row. Runs in a worker thread."""
+        # Cancellation checkpoint — skip remaining issues once cancellation is set.
+        if is_cancellation_requested(run_id):
+            raise RunCancelledError(f"Skipping issue {issue.get('id')} — run cancelled")
         cve = issue.get("cve_id")
         epss = epss_data.get(cve, {}) if cve else {}
         epss_score = epss.get("epss_score")
@@ -661,6 +1135,57 @@ def run_enrich(run_id: str) -> dict:
 
         decision = _llm_decide(run_id, prompt_row, issue, epss, nvd, in_kev, mitre_payload)
 
+        # ---- MITRE projection columns (added in migration 0020) ----
+        # Compute the 9 denormalized columns from the chain payload so the
+        # prioritization + remediation engines can query without joining
+        # back to the catalog tables on every read.
+        cwe_likelihood = (cwe_row or {}).get("likelihood_of_exploit")
+        cwe_abstraction = (cwe_row or {}).get("abstraction")
+        # Dedupe + sort the mitigation phases across all CWE mitigations.
+        mitigation_phases = sorted(
+            {
+                phase
+                for m in (cwe_row or {}).get("mitigations") or []
+                for phase in (m.get("phase") or [])
+                if phase
+            }
+        )
+        capec_ids_list = list((cwe_row or {}).get("related_capec") or [])
+        capec_max_likelihood = _max_label(
+            [cr.get("likelihood_of_attack") for cr in capec_rows], _LIKELIHOOD_RANK
+        )
+        capec_max_severity = _max_label(
+            [cr.get("typical_severity") for cr in capec_rows], _SEVERITY_RANK
+        )
+        attack_tech_ids = sorted(
+            {ar["technique_id"] for ar in attack_rows if ar.get("technique_id")}
+        )
+        attack_tactics_list = sorted({t for ar in attack_rows for t in (ar.get("tactics") or [])})
+        attack_platforms_list = sorted(
+            {p for ar in attack_rows for p in (ar.get("platforms") or [])}
+        )
+
+        # ---- Hybrid scoring (formula + LLM-for-prose) ----
+        # 1. Resolve asset via the same priority chain as issue_with_asset view.
+        asset = _resolve_asset(issue, asset_index)
+
+        # 2. Build a snapshot of the issue augmented with MITRE projection
+        #    fields, so _compute_score sees the final state the row will have.
+        issue_for_scoring = {
+            **issue,
+            "epss_score": epss_score,
+            "exploit_in_kev": in_kev,
+            "cvss_attack_vector": nvd.get("cvss_attack_vector"),
+            "cwe_likelihood_of_exploit": cwe_likelihood,
+            "attack_tactics": attack_tactics_list,
+        }
+        scoring = _compute_score(issue_for_scoring, asset)
+
+        # 3. LLM gets the computed score + factors and writes only the prose.
+        decision = _llm_decide(
+            run_id, prompt_row, issue, epss, nvd, in_kev, mitre_payload, asset, scoring
+        )
+
         update_row = {
             "epss_score": epss_score,
             "epss_percentile": epss_percentile,
@@ -672,16 +1197,38 @@ def run_enrich(run_id: str) -> dict:
             "cvss_attack_complexity": nvd.get("cvss_attack_complexity"),
             "cvss_privileges_required": nvd.get("cvss_privileges_required"),
             "cvss_user_interaction": nvd.get("cvss_user_interaction"),
-            "likelihood": decision.likelihood,
-            "impact": decision.impact,
-            "derived_risk": decision.derived_risk,
+            # ---- Asset-context snapshot (denormalized from assets table) ----
+            # Mirrors the vestigial columns originally specced in 0001. Lets
+            # SQL queries read asset context without joining. Snapshot is fresh
+            # for each enrichment run; if asset metadata changes later, the
+            # issue's snapshot stays as-of-this-run until the next rescore.
+            "exposure": (asset or {}).get("exposure"),
+            "business_criticality": (asset or {}).get("business_criticality"),
+            "asset_owner": (asset or {}).get("business_owner"),
+            # ---- Formula-computed scoring (migration 0022) ----
+            "derived_risk": scoring["derived_risk"],
+            "priority": scoring["priority"],
+            "components_summary": scoring["components_summary"],
+            "scoring_policy_version": scoring["scoring_policy_version"],
+            # ---- LLM-generated prose (prompt v1.4) ----
             "risk_explanation": decision.risk_explanation,
             "remediation_suggestion": decision.remediation_suggestion,
             "enriched_at": datetime.now(UTC).isoformat(),
+            # ---- MITRE projection (migration 0020) ----
+            "cwe_likelihood_of_exploit": cwe_likelihood,
+            "cwe_abstraction": cwe_abstraction,
+            "cwe_mitigation_phases": mitigation_phases,
+            "capec_ids": capec_ids_list,
+            "capec_max_likelihood_of_attack": capec_max_likelihood,
+            "capec_max_typical_severity": capec_max_severity,
+            "attack_technique_ids": attack_tech_ids,
+            "attack_tactics": attack_tactics_list,
+            "attack_platforms": attack_platforms_list,
         }
         sb.table("issues").update(_sanitize(update_row)).eq("id", issue["id"]).execute()
         return {"epss_hit": epss_score is not None, "kev_hit": in_kev}
 
+    cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, issue): issue for issue in issues}
         completed = 0
@@ -695,6 +1242,8 @@ def run_enrich(run_id: str) -> dict:
                     epss_hits += 1
                 if result.get("kev_hit"):
                     kev_hits += 1
+            except RunCancelledError:
+                cancelled = True
             except Exception as e:
                 failed += 1
                 if failed <= 3:
@@ -714,6 +1263,16 @@ def run_enrich(run_id: str) -> dict:
                     f"Enriched {completed}/{len(issues)} issues "
                     f"({enriched} succeeded, {failed} failed so far)",
                 )
+
+    if cancelled:
+        emit_trace(
+            run_id,
+            "sub-agent-2",
+            "MESSAGE",
+            f"Cancellation detected — stopped after enriching {enriched} issue(s); "
+            f"remaining skipped (data will be wiped by cancel endpoint)",
+        )
+        raise RunCancelledError("Sub-Agent 2 stopped due to user cancellation")
 
     emit_trace(
         run_id,

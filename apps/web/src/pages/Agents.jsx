@@ -281,6 +281,43 @@ export default function Agents() {
     // Wire to your backend when ready
   }
 
+  const handleStopActiveRun = async () => {
+    const activeRun = runs.find(r => r.status === 'running' || r.status === 'queued')
+    if (!activeRun) return
+
+    const scanners = (activeRun.targets?.scanners || []).join(', ') || 'this scanner'
+    const ok = window.confirm(
+      `Stop the running fetch?\n\n` +
+      `This will:\n` +
+      `  • Halt the fetch immediately\n` +
+      `  • DELETE all issues and raw_findings for ${scanners}\n` +
+      `  • Reset the watermark so the next fetch starts fresh\n\n` +
+      `Continue?`
+    )
+    if (!ok) return
+
+    const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    try {
+      const res = await fetch(`${API_URL}/agents/runs/${activeRun.run_id}/cancel`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const txt = await res.text()
+        alert(`Failed to stop run: ${res.status} — ${txt}`)
+        return
+      }
+      const data = await res.json()
+      alert(
+        `Stopped run ${data.run_id}\n\n` +
+        `Scanners cleaned: ${data.scanners_cleaned.join(', ')}\n` +
+        `Issues deleted: ${data.issues_deleted}\n` +
+        `Raw findings deleted: ${data.raw_findings_deleted}`
+      )
+    } catch (err) {
+      alert(`Network error stopping run: ${err.message || err}`)
+    }
+  }
+
   return (
     <div className="agents-page-wrapper">
       <Topbar />
@@ -466,6 +503,18 @@ export default function Agents() {
                       <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"></path>
                     </svg>
                   </button>
+                  {runs.some(r => r.status === 'running' || r.status === 'queued') && (
+                    <button
+                      className="trace-btn trace-btn-stop"
+                      onClick={handleStopActiveRun}
+                      title="Stop the running fetch and wipe its scanner's data"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                        <rect x="6" y="6" width="12" height="12" rx="1"></rect>
+                      </svg>
+                      <span style={{ marginLeft: 6, fontSize: 12 }}>Stop</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -544,6 +593,26 @@ export default function Agents() {
                     {selectedTrace.message || '—'}
                   </pre>
                 </div>
+                {selectedTrace.payload?.missed_cves?.length > 0 && (
+                  <div className="trace-detail-section">
+                    <div className="trace-detail-section-label">
+                      Cache-missed CVEs ({selectedTrace.payload.missed_cve_count ?? selectedTrace.payload.missed_cves.length}) — went to NVD API
+                    </div>
+                    <ul className="trace-detail-cve-list">
+                      {selectedTrace.payload.missed_cves.map((cve) => (
+                        <li key={cve}>
+                          <a
+                            href={`https://nvd.nist.gov/vuln/detail/${cve}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {cve}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <div className="trace-detail-section">
                   <div className="trace-detail-section-label">Payload</div>
                   <pre className="trace-detail-payload">
