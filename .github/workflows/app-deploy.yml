@@ -85,7 +85,7 @@ jobs:
       - name: Pull latest code on EC2
         run: |
           ssh -o StrictHostKeyChecking=no -i /tmp/ec2_ssh_key ubuntu@${{ steps.ec2-ip.outputs.ip }} \
-            "git config --global --add safe.directory /opt/app && cd /opt/app && git pull origin main"
+            "sudo chown -R ubuntu:ubuntu /opt/app && cd /opt/app && git pull origin main"
 
       - name: Refresh .env from SSM Parameter Store
         run: |
