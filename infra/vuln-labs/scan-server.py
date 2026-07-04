@@ -39,7 +39,13 @@ def ensure_results_dir():
 
 
 def run_checkov():
-    """Run Checkov and cache results."""
+    """Run Checkov and cache only the 3 key findings (1 per resource type)."""
+    # Only report these specific checks — one per resource category
+    TARGET_CHECKS = {
+        "CKV_AWS_24",   # Security Group: SSH open to 0.0.0.0/0
+        "CKV_AWS_145",  # S3 Bucket: No KMS encryption
+        "CKV_AWS_63",   # IAM: Policy allows * actions
+    }
     try:
         result = subprocess.run(
             ["checkov", "-d", CSPM_PATH, "--output", "json", "--quiet", "--compact"],
@@ -59,16 +65,17 @@ def run_checkov():
             results = check_group.get("results", {})
             failed = results.get("failed_checks", [])
             for f in failed:
-                findings.append({
-                    "check_id": f.get("check_id"),
-                    "check_name": f.get("name") or f.get("check_id"),
-                    "severity": f.get("severity") or "MEDIUM",
-                    "resource": f.get("resource"),
-                    "file_path": f.get("file_path"),
-                    "file_line_range": f.get("file_line_range"),
-                    "guideline": f.get("guideline"),
-                    "check_type": check_group.get("check_type", "terraform"),
-                })
+                if f.get("check_id") in TARGET_CHECKS:
+                    findings.append({
+                        "check_id": f.get("check_id"),
+                        "check_name": f.get("name") or f.get("check_id"),
+                        "severity": f.get("severity") or "MEDIUM",
+                        "resource": f.get("resource"),
+                        "file_path": f.get("file_path"),
+                        "file_line_range": f.get("file_line_range"),
+                        "guideline": f.get("guideline"),
+                        "check_type": check_group.get("check_type", "terraform"),
+                    })
 
         result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
         with open(os.path.join(RESULTS_DIR, "checkov.json"), "w") as f:
@@ -82,9 +89,11 @@ def run_checkov():
 def run_semgrep():
     """Run Semgrep and cache results."""
     try:
+        # Use p/python rules (bundled, no internet download needed) instead of auto
         result = subprocess.run(
-            ["semgrep", "scan", "--config", "auto", SAST_PATH, "--json"],
-            capture_output=True, text=True, timeout=120
+            ["semgrep", "scan", "--config", "p/python", "--config", "p/security-audit",
+             SAST_PATH, "--json", "--no-git-ignore"],
+            capture_output=True, text=True, timeout=180
         )
         data = json.loads(result.stdout) if result.stdout else {}
         results = data.get("results", [])

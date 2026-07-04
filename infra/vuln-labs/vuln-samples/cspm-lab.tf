@@ -5,9 +5,10 @@
 # instance at /opt/vuln-labs/cspm-lab/ where Checkov scans it to produce
 # CSPM findings for the VOP platform.
 #
-# Intentional findings (2):
+# Intentional findings (3):
 #   1. S3 bucket — no encryption, no versioning, no public access block
 #   2. Security group — SSH open to the world (0.0.0.0/0)
+#   3. IAM role — overly permissive policy (Action: *, Resource: *)
 #
 # Everything else in this file follows best practices.
 # =============================================================================
