@@ -113,6 +113,7 @@ fetch_secrets() {
     done
 
   chmod 0600 "$${env_file}"
+  chown ubuntu:ubuntu "$${env_file}"
 }
 run_step "Fetch secrets from SSM" fetch_secrets
 

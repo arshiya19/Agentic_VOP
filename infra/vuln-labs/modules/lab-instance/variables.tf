@@ -26,7 +26,7 @@ variable "aws_region" {
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t4g.micro"
+  default     = "t3.micro"
 }
 
 variable "install_scanners" {
