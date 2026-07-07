@@ -52,7 +52,6 @@ jobs:
   # ---------------------------------------------------------------------------
   setup:
     name: "Setup"
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       env_dir: ${{ steps.resolve.outputs.env_dir }}
@@ -81,7 +80,7 @@ jobs:
   # ---------------------------------------------------------------------------
   deploy:
     name: "Deploy · ${{ github.event.inputs.environment }}"
-    if: github.event.inputs.action == 'deploy' && github.ref == 'refs/heads/main'
+    if: github.event.inputs.action == 'deploy'
     needs: [setup]
     runs-on: ubuntu-latest
     defaults:
@@ -187,7 +186,7 @@ jobs:
   # ---------------------------------------------------------------------------
   destroy:
     name: "Destroy · ${{ github.event.inputs.environment }}"
-    if: github.event.inputs.action == 'destroy' && github.ref == 'refs/heads/main'
+    if: github.event.inputs.action == 'destroy'
     needs: [setup]
     runs-on: ubuntu-latest
     defaults:
@@ -220,7 +219,7 @@ jobs:
   # ---------------------------------------------------------------------------
   stop:
     name: "Stop · ${{ github.event.inputs.environment }}"
-    if: github.event.inputs.action == 'stop' && github.ref == 'refs/heads/main'
+    if: github.event.inputs.action == 'stop'
     needs: [setup]
     runs-on: ubuntu-latest
     defaults:
@@ -264,7 +263,7 @@ jobs:
   # ---------------------------------------------------------------------------
   start:
     name: "Start · ${{ github.event.inputs.environment }}"
-    if: github.event.inputs.action == 'start' && github.ref == 'refs/heads/main'
+    if: github.event.inputs.action == 'start'
     needs: [setup]
     runs-on: ubuntu-latest
     defaults:
