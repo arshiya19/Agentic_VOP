@@ -20,6 +20,7 @@ Endpoints:
 import json
 import os
 import subprocess
+import time
 import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -308,6 +309,21 @@ class ScanHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ensure_results_dir()
+
+    # Wait for lab setup to complete before scanning.
+    # The user-data script writes this marker file as its very last step.
+    SETUP_MARKER = "/opt/vuln-labs/SETUP_COMPLETE"
+    MAX_WAIT = 300  # 5 minutes max
+    waited = 0
+    while not os.path.exists(SETUP_MARKER) and waited < MAX_WAIT:
+        print(f"[startup] Waiting for lab setup to complete ({waited}s)...")
+        time.sleep(10)
+        waited += 10
+
+    if not os.path.exists(SETUP_MARKER):
+        print(f"[startup] WARNING: {SETUP_MARKER} not found after {MAX_WAIT}s. Running scans anyway.")
+    else:
+        print(f"[startup] Lab setup complete. Starting scans.")
 
     # Run all scans once at startup
     print("Running initial scans at startup...")
