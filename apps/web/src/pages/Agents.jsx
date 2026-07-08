@@ -5,6 +5,9 @@ import AgentModelConfig from '../components/AgentModelConfig'
 import { supabase } from '../lib/supabase'
 import '../styles/Agents.css'
 
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const DEMO_POLL_MS = 2000
+
 const ROLE_OPTIONS = [
   { key: 'all', label: 'All' },
   { key: 'master', label: 'Master' },
@@ -62,11 +65,71 @@ export default function Agents() {
   const [selectedTrace, setSelectedTrace] = useState(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [modelConfigOpen, setModelConfigOpen] = useState(false)
+  // Contextual switch: 'real' (supabase realtime on public.*) or 'demo' (poll
+  // backend demo endpoints). Set by Integrations page's trigger buttons; can
+  // be overridden manually via the pill at the top of the page.
+  const [pipelineMode, setPipelineMode] = useState(
+    () => localStorage.getItem('pipelineMode') || 'real'
+  )
+
+  // Listen for pipelineMode changes from other components (Integrations page)
+  // and from other tabs (native `storage` event).
+  useEffect(() => {
+    const handler = () => {
+      setPipelineMode(localStorage.getItem('pipelineMode') || 'real')
+    }
+    window.addEventListener('pipelineModeChanged', handler)
+    window.addEventListener('storage', handler)
+    return () => {
+      window.removeEventListener('pipelineModeChanged', handler)
+      window.removeEventListener('storage', handler)
+    }
+  }, [])
 
   useEffect(() => {
     let mounted = true
 
-    // ----- Trace events: initial load + Realtime stream (newest on top) -----
+    // Clear both lists when switching modes so demo/real never bleed into each other.
+    setTraceEvents([])
+    setRuns([])
+    setSelectedTrace(null)
+
+    if (pipelineMode === 'demo') {
+      // ----- Demo mode: poll backend endpoints (no realtime on demo schema) -----
+      const poll = async () => {
+        try {
+          const runsRes = await fetch(`${API_URL}/agents/demo/runs`)
+          if (!mounted || !runsRes.ok) return
+          const runsData = await runsRes.json()
+          if (!mounted) return
+          const demoRuns = runsData.runs || []
+          setRuns(demoRuns)
+
+          // Fetch traces for ALL demo runs so the trace stream shows every run.
+          const allTraces = []
+          for (const r of demoRuns.slice(0, 5)) {
+            try {
+              const tRes = await fetch(`${API_URL}/agents/demo/runs/${r.run_id}/traces`)
+              if (!tRes.ok) continue
+              const tData = await tRes.json()
+              allTraces.push(...(tData.traces || []))
+            } catch (_e) { /* skip this run's traces */ }
+          }
+          if (!mounted) return
+          // Sort DESC (newest first) to match real-mode display.
+          allTraces.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+          setTraceEvents(allTraces.map(mapTraceRow))
+        } catch (_err) { /* transient network error, retry next tick */ }
+      }
+      poll()
+      const interval = setInterval(poll, DEMO_POLL_MS)
+      return () => {
+        mounted = false
+        clearInterval(interval)
+      }
+    }
+
+    // ----- Real mode: existing supabase realtime on public.* (unchanged) -----
     supabase
       .from('agent_trace_events')
       .select('*')
@@ -84,13 +147,11 @@ export default function Agents() {
         { event: 'INSERT', schema: 'public', table: 'agent_trace_events' },
         (payload) => {
           if (!mounted) return
-          // Prepend so newest event appears at the top
           setTraceEvents((prev) => [mapTraceRow(payload.new), ...prev])
         }
       )
       .subscribe()
 
-    // ----- Agent runs: initial load + Realtime stream (INSERT + UPDATE) -----
     supabase
       .from('agent_runs')
       .select('*')
@@ -124,7 +185,12 @@ export default function Agents() {
       supabase.removeChannel(traceChannel)
       supabase.removeChannel(runsChannel)
     }
-  }, [])
+  }, [pipelineMode])
+
+  const setModeManual = (mode) => {
+    localStorage.setItem('pipelineMode', mode)
+    window.dispatchEvent(new Event('pipelineModeChanged'))
+  }
 
   // ----- Derived: agents (master + 2 sub-agents with live status) -----
   const agents = useMemo(() => {
@@ -324,11 +390,44 @@ export default function Agents() {
       <div className="agents-layout">
         <Sidebar />
         <main className="agents-main">
-          <div className="agents-header">
-            <h1>Agents</h1>
-            <p className="agents-subtitle">
-              Live trace of master agent and sub-agent communication
-            </p>
+          <div className="agents-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <h1>Agents</h1>
+              <p className="agents-subtitle">
+                Live trace of master agent and sub-agent communication
+                {pipelineMode === 'demo' && ' — DEMO PIPELINE (5 pre-seeded issues)'}
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setModeManual('real')}
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: 999,
+                  border: '1px solid ' + (pipelineMode === 'real' ? '#22c55e' : '#334155'),
+                  background: pipelineMode === 'real' ? 'rgba(34,197,94,0.15)' : 'transparent',
+                  color: pipelineMode === 'real' ? '#22c55e' : '#94a3b8',
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Real Pipeline
+              </button>
+              <button
+                type="button"
+                onClick={() => setModeManual('demo')}
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: 999,
+                  border: '1px solid ' + (pipelineMode === 'demo' ? '#3b82f6' : '#334155'),
+                  background: pipelineMode === 'demo' ? 'rgba(59,130,246,0.15)' : 'transparent',
+                  color: pipelineMode === 'demo' ? '#3b82f6' : '#94a3b8',
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Demo Pipeline
+              </button>
+            </div>
           </div>
 
           <div className="agents-stats-row">

@@ -29,6 +29,24 @@ class Settings(BaseSettings):
     # Get one free from https://nvd.nist.gov/developers/request-an-api-key)
     nvd_api_key: str = ""
 
+    # Tavily web-search API key. Required by the agentic Sub-Agent 3 (Phase-2)
+    # for live remediation research. Free tier = 1000 searches/month, plenty
+    # for dev. Get one at https://tavily.com. When empty, the agent skips
+    # live search and falls back to hybrid pattern-based planner.
+    tavily_api_key: str = ""
+
+    # Per-package budget for the agentic Sub-Agent 3. Prevents runaway costs.
+    # Both caps are enforced; whichever is hit first triggers fallback to the
+    # hybrid pattern-based planner.
+    #
+    # Budget accommodates BOTH phases:
+    #   Research phase — 8-10 calls (searches + fetches to build the draft)
+    #   Verification phase — 3-4 calls (cross-source consensus checks on the
+    #     most impactful commands from the draft; see verifier.py)
+    # Bumped to 16 (was 12) so verification has real room to run.
+    agent_max_tool_calls: int = 16
+    agent_max_cost_usd: float = 1.50
+
     # Parallel LLM workers — Sub-Agent 1 + Sub-Agent 2 run this many threads
     # concurrently. 5 gives ~150K TPM peak — comfortably under OpenAI's default
     # 200K TPM limit for gpt-4o-mini. Bump to 10+ if you have a higher tier.

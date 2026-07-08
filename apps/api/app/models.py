@@ -137,10 +137,12 @@ class RollbackPlan(BaseModel):
         ..., description="True if rollback is technically possible for this finding"
     )
     objective: str = Field(..., min_length=10, max_length=400)
-    preconditions: list[str] = Field(default_factory=list, max_length=10)
-    steps: list[RemediationStep] = Field(default_factory=list, max_length=10)
-    validation: list[ValidationTest] = Field(default_factory=list, max_length=5)
-    limitations: list[str] = Field(default_factory=list, max_length=10)
+    preconditions: list[str] = Field(default_factory=list, max_length=15)
+    # Caps raised to match remediation_steps ceiling — rollback complexity
+    # scales with remediation complexity.
+    steps: list[RemediationStep] = Field(default_factory=list, max_length=20)
+    validation: list[ValidationTest] = Field(default_factory=list, max_length=10)
+    limitations: list[str] = Field(default_factory=list, max_length=15)
     explanation: str = Field(
         ...,
         min_length=20,
@@ -183,13 +185,20 @@ class RemediationPathway(BaseModel):
     # LLM-generated
     objective: str = Field(..., min_length=10, max_length=300)
     security_coverage: Literal["complete", "partial", "interim"]
-    remediation_steps: list[RemediationStep] = Field(..., min_length=1, max_length=10)
+    # Caps raised (was 10/10/5) to let the agent produce as many steps as the
+    # remediation actually needs — simple config fixes stay small (3-5 steps),
+    # complex remediations (Log4Shell, staged rollout, multi-region) can now
+    # go up to ~20. Cap remains as a hallucination guard, not a design target.
+    remediation_steps: list[RemediationStep] = Field(..., min_length=1, max_length=20)
     rollback_plan: RollbackPlan
-    validation_tests: list[ValidationTest] = Field(..., min_length=1, max_length=10)
-    test_scripts: list[TestScript] = Field(default_factory=list, max_length=5)
+    validation_tests: list[ValidationTest] = Field(..., min_length=1, max_length=12)
+    test_scripts: list[TestScript] = Field(default_factory=list, max_length=8)
     execution_strategy: str = Field(..., min_length=50, max_length=600)
-    advantages: list[str] = Field(default_factory=list, max_length=6)
-    considerations: list[str] = Field(default_factory=list, max_length=6)
+    advantages: list[str] = Field(default_factory=list, max_length=8)
+    # Bumped from 6 to 15 so the verifier can emit its full report (depth flags,
+    # placeholder flags, low-authority flags, destructive flags, cross-source
+    # summary) alongside any LLM-generated considerations.
+    considerations: list[str] = Field(default_factory=list, max_length=15)
 
     # Code-attached (deterministic — filled by planner/confidence engine)
     validation_metadata: ValidationMetadata | None = None

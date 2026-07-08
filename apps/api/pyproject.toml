@@ -46,6 +46,13 @@ dependencies = [
     "pyjwt>=2.13.0",
     # Pinned to remediate GHSA-6v7p-g79w-8964 (msgpack deserialization vulnerability).
     "msgpack>=1.2.1",
+    # Tavily web-search API for the agentic Sub-Agent 3 (Phase-2 remediation).
+    # Free tier = 1000 searches/month. Get key at https://tavily.com.
+    "tavily-python>=0.5.0",
+    # Content extraction for the agent's url_fetch tool — strips HTML down to
+    # readable text/markdown, preserves code blocks + headings. Uses lxml
+    # (already pinned above) under the hood.
+    "trafilatura>=1.12.0",
 ]
 
 [dependency-groups]

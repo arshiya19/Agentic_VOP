@@ -33,6 +33,7 @@ def request_with_retry(
     retry_statuses: set[int] = RETRYABLE_STATUS_CODES,
     run_id: str | None = None,
     agent: str | None = None,
+    emit_fn: Any = None,
 ) -> httpx.Response:
     """Send an HTTP request with retry/backoff for transient failures.
 
@@ -72,11 +73,11 @@ def request_with_retry(
             if response is not None and response.status_code not in retry_statuses:
                 raise
             if attempt < max_attempts:
-                _log_retry(run_id, agent, attempt, max_attempts, exc)
+                _log_retry(run_id, agent, attempt, max_attempts, exc, emit_fn=emit_fn)
         except RETRYABLE_ERROR_TYPES as exc:
             last_error = exc
             if attempt < max_attempts:
-                _log_retry(run_id, agent, attempt, max_attempts, exc)
+                _log_retry(run_id, agent, attempt, max_attempts, exc, emit_fn=emit_fn)
 
         if attempt >= max_attempts:
             break
@@ -93,14 +94,19 @@ def _log_retry(
     attempt: int,
     max_attempts: int,
     error: Exception,
+    *,
+    emit_fn: Any = None,
 ) -> None:
-    """Log retry attempt for debugging."""
+    """Log retry attempt for debugging. `emit_fn` (DI) defaults to public-schema
+    emit_trace; demo callers pass emit_trace_demo to route into demo schema."""
     if run_id and agent:
-        from .trace import emit_trace  # noqa: PLC0415
+        if emit_fn is None:
+            from .trace import emit_trace  # noqa: PLC0415
+            emit_fn = emit_trace
 
         error_type = type(error).__name__
         error_msg = str(error)[:150]
-        emit_trace(
+        emit_fn(
             run_id,
             agent,
             "MESSAGE",

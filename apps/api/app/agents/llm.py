@@ -44,20 +44,28 @@ class _TokenUsageCallback(BaseCallbackHandler):
     sees identical events to the previous SDK-proxy implementation.
     """
 
-    def __init__(self, run_id: str, agent: str, model: str) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        agent: str,
+        model: str,
+        emit_fn: Any = None,
+    ) -> None:
         self._run_id = run_id
         self._agent = agent
         self._model = model
+        # Dependency-injected emit function; defaults to public-schema emit_trace.
+        # Non-default callers (demo pipeline, tests) pass their own to route the
+        # trace event to a different sink without touching this class.
+        self._emit_fn = emit_fn
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:  # noqa: ARG002
         usage = self._extract_usage(response)
         if usage is None:
             return
 
-        # Import here to avoid the circular trace → db → config → llm path.
-        from .trace import emit_trace  # noqa: PLC0415
-
-        emit_trace(
+        emit = self._emit_fn or emit_trace
+        emit(
             self._run_id,
             self._agent,
             "MESSAGE",
@@ -139,6 +147,7 @@ def invoke_structured_with_retry(
     messages: list,
     attempts: list[tuple[float, str, int]],
     method: str = "function_calling",
+    emit_fn: Any = None,
 ) -> Any:
     """Invoke ChatOpenAI.with_structured_output with tiered retry.
 
@@ -156,6 +165,7 @@ def invoke_structured_with_retry(
     `dict[str, Any]` fields in the schema; pass `method="json_schema"`
     to opt into strict mode for schemas without free-form objects.
     """
+    emit = emit_fn or emit_trace
     last_err: Exception | None = None
     for idx, (temperature, model, max_tokens) in enumerate(attempts, start=1):
         try:
@@ -165,6 +175,7 @@ def invoke_structured_with_retry(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                emit_fn=emit_fn,
             )
             structured_llm = llm.with_structured_output(schema, method=method)
             result = structured_llm.invoke(messages)
@@ -175,7 +186,7 @@ def invoke_structured_with_retry(
                 )
             return result
         except Exception as e:  # noqa: BLE001
-            emit_trace(
+            emit(
                 run_id,
                 agent,
                 "MESSAGE",
@@ -212,6 +223,7 @@ def get_chat_llm(
     model: str,
     temperature: float = 0.1,
     max_tokens: int | None = None,
+    emit_fn: Any = None,
 ) -> BaseChatModel:
     """Return a configured chat model (OpenAI / Anthropic / Google) that
     traces token usage per call.
@@ -231,7 +243,7 @@ def get_chat_llm(
         temperature: sampling temperature; retry helper escalates per attempt.
         max_tokens: completion cap; loaded from prompt_db.parameters when present.
     """
-    callback = _TokenUsageCallback(run_id=run_id, agent=agent, model=model)
+    callback = _TokenUsageCallback(run_id=run_id, agent=agent, model=model, emit_fn=emit_fn)
     provider = _infer_provider(model)
 
     if provider == "anthropic":

@@ -18,6 +18,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from ...config import settings
 from ...db import supabase_admin
 from ...models import (
     LLMRemediationOutput,
@@ -157,24 +158,46 @@ def _load_asset(sb, issue: dict) -> dict:
 
 
 def _load_prompt(sb) -> dict:
-    """Load the active sub-agent-3 prompt row."""
+    """Load the sub-agent-3 v1.4 (HYBRID pattern-based) prompt row.
+
+    Explicitly selects v1.4 because both v1.4 (hybrid) and v2.0 (agentic)
+    are active in prompt_db after migration 0048 — this function is called
+    by the hybrid fallback path and needs the pattern-adaptation prompt.
+    The agentic path uses a separate loader in agent_v2._load_prompt_v2.
+    """
     resp = (
         sb.table("prompt_db")
         .select("agent,version,model,prompt_text,parameters")
         .eq("agent", "sub-agent-3")
-        .eq("is_active", True)
-        .order("version", desc=True)
+        .eq("version", "v1.4")
         .limit(1)
         .execute()
     )
     rows = resp.data or []
     if not rows:
-        raise RuntimeError("No active prompt row for agent='sub-agent-3' in prompt_db")
+        raise RuntimeError(
+            "No sub-agent-3 v1.4 prompt row in prompt_db. "
+            "Apply migration 0047_sub_agent_3_prompt_v1_4.sql."
+        )
     return rows[0]
 
 
 def _issue_payload(issue: dict) -> dict:
-    """Trim the issue row to the fields Sub-Agent 3 actually uses."""
+    """Trim the issue row to the fields Sub-Agent 3 actually uses.
+
+    Includes two upstream-derived hints:
+      solution              — scanner-provided remediation text (Sub-Agent 1
+                              extracts this from raw scanner output when
+                              present: Snyk `remediation`, Trivy `FixedVersion`,
+                              Tenable/Qualys `solution`, etc.).
+      remediation_suggestion — Sub-Agent 2's LLM-generated summary derived
+                              from the whole enriched context.
+
+    Sub-Agent 3's prompt (v1.4+) treats these as ADDITIONAL CONTEXT — the
+    curated pattern from remediation_patterns remains authoritative for
+    rollback / test scripts / sources. Hints inform placeholder filling and
+    can align/override when they don't conflict with the pattern.
+    """
     return {
         "id": issue.get("id"),
         "source": issue.get("source"),
@@ -190,6 +213,9 @@ def _issue_payload(issue: dict) -> dict:
         "runtime_ipv4": issue.get("runtime_ipv4"),
         "runtime_os_family": issue.get("runtime_os_family"),
         "runtime_purl": issue.get("runtime_purl"),
+        # Upstream hints (v1.4)
+        "solution": issue.get("solution"),
+        "remediation_suggestion": issue.get("remediation_suggestion"),
     }
 
 
@@ -227,7 +253,21 @@ def plan_remediation(
     sb = sb or supabase_admin()
     run_id = run_id or str(uuid.uuid4())
 
-    family = classify_finding(issue)
+    # Fetch raw_finding so the classifier can use raw.resource for
+    # deterministic Checkov-style classification. Cheap single-row lookup.
+    raw: dict | None = None
+    if issue.get("raw_finding_id") is not None:
+        raw_resp = (
+            sb.table("raw_findings")
+            .select("raw")
+            .eq("id", issue["raw_finding_id"])
+            .limit(1)
+            .execute()
+        )
+        if raw_resp.data:
+            raw = raw_resp.data[0].get("raw") or {}
+
+    family = classify_finding(issue, raw=raw)
     if family == "unknown":
         raise ValueError(
             f"Issue {issue.get('id')} did not classify into a known family. "
@@ -241,34 +281,66 @@ def plan_remediation(
         )
 
     asset = _load_asset(sb, issue)
-    prompt_row = _load_prompt(sb)
-    params = prompt_row.get("parameters") or {}
 
-    payload = {
-        "issue": _issue_payload(issue),
-        "asset": asset,
-        "pattern": _pattern_payload(pattern),
-    }
+    # --- Try the AGENTIC path first (Phase-2 default when Tavily key set) ---
+    # Agent researches from live authoritative sources (AWS/CIS/NVD/CISA docs).
+    # If it fails, hits budget cap, or produces invalid output → falls through
+    # to the hybrid pattern-based path below.
+    llm_output: LLMRemediationOutput | None = None
+    if settings.tavily_api_key:
+        from ..trace import emit_trace  # noqa: PLC0415 (defer import to avoid circular)
+        from .agent_v2 import run_agentic_planner  # noqa: PLC0415
+        try:
+            llm_output = run_agentic_planner(
+                issue=issue,
+                asset=asset,
+                family=family,
+                run_id=run_id,
+                sb_pub=sb,
+                emit_fn=emit_trace,
+            )
+        except Exception as e:  # noqa: BLE001
+            emit_trace(
+                run_id, "sub-agent-3", "ERROR",
+                f"Agentic planner raised, falling back to hybrid: "
+                f"{type(e).__name__}: {str(e)[:200]}",
+            )
 
-    base_temp = float(params.get("temperature", 0.3))
-    max_tokens = int(params.get("max_tokens", 2500))
-    primary_model = prompt_row["model"]
-    fallback_model = params.get("fallback_model", "gpt-4o")
+    # --- Fallback: HYBRID pattern-based (v1.4 prompt + pattern adaptation) ---
+    if llm_output is None:
+        from ..trace import emit_trace  # noqa: PLC0415
+        emit_trace(
+            run_id, "sub-agent-3", "MESSAGE",
+            "Using hybrid pattern-based planner (v1.4)",
+        )
+        prompt_row = _load_prompt(sb)
+        params = prompt_row.get("parameters") or {}
 
-    llm_output: LLMRemediationOutput = invoke_structured_with_retry(
-        run_id=run_id,
-        agent="sub-agent-3",
-        schema=LLMRemediationOutput,
-        messages=[
-            SystemMessage(content=prompt_row["prompt_text"]),
-            HumanMessage(content=str(payload)),
-        ],
-        attempts=[
-            (base_temp, primary_model, max_tokens),
-            (0.5, primary_model, max_tokens + 500),
-            (0.3, fallback_model, max_tokens + 1000),
-        ],
-    )
+        payload = {
+            "issue": _issue_payload(issue),
+            "asset": asset,
+            "pattern": _pattern_payload(pattern),
+        }
+
+        base_temp = float(params.get("temperature", 0.3))
+        max_tokens = int(params.get("max_tokens", 2500))
+        primary_model = prompt_row["model"]
+        fallback_model = params.get("fallback_model", "gpt-4o")
+
+        llm_output = invoke_structured_with_retry(
+            run_id=run_id,
+            agent="sub-agent-3",
+            schema=LLMRemediationOutput,
+            messages=[
+                SystemMessage(content=prompt_row["prompt_text"]),
+                HumanMessage(content=str(payload)),
+            ],
+            attempts=[
+                (base_temp, primary_model, max_tokens),
+                (0.5, primary_model, max_tokens + 500),
+                (0.3, fallback_model, max_tokens + 1000),
+            ],
+        )
 
     # Attach validation metadata + confidence to each pathway.
     validation_meta = _validation_metadata_for(pattern)

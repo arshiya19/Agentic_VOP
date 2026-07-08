@@ -30,7 +30,11 @@ from app.agents.remediation.planner import persist_package, plan_remediation
 from app.db import supabase_admin
 
 
-DEMO_ISSUE_IDS = [8585, 8586, 7481, 6394, 7832]
+# Canonical demo issue IDs as of 2026-07-05. Original set had 8585 + 8586 as
+# Checkov IDs, but those were orphan rows (no raw_findings). After re-ingesting
+# apps/api/demo_data/checkov-scan.json, real Checkov findings landed as
+# 9089 (S3 public READ) + 9087 (SG 0.0.0.0/0 SSH). Same stories, new PKs.
+DEMO_ISSUE_IDS = [9089, 9087, 7481, 6394, 7832]
 
 
 def _create_run(sb) -> str:
