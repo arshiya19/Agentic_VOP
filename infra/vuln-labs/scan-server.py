@@ -147,8 +147,9 @@ def run_semgrep():
              "--config", rules_file,
              SAST_PATH, "--json", "--no-git-ignore",
              "--timeout", "60",
-             "--max-memory", "512",
-             "-j", "1"],
+             "--max-memory", "256",
+             "-j", "1",
+             "--optimizations", "none"],
             capture_output=True, text=True, timeout=180
         )
         if result.stderr:
@@ -364,6 +365,26 @@ class ScanHandler(BaseHTTPRequestHandler):
             thread = threading.Thread(target=run_all_scans, daemon=True)
             thread.start()
             self._respond(202, {"status": "scan triggered", "message": "Scans running in background. Check /scan-status for completion."})
+        elif self.path == "/trigger-scan/semgrep":
+            thread = threading.Thread(target=run_semgrep, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "semgrep scan triggered"})
+        elif self.path == "/trigger-scan/trivy-os":
+            thread = threading.Thread(target=run_trivy_os, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-os scan triggered"})
+        elif self.path == "/trigger-scan/checkov":
+            thread = threading.Thread(target=run_checkov, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "checkov scan triggered"})
+        elif self.path == "/trigger-scan/trivy-fs":
+            thread = threading.Thread(target=run_trivy_fs, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-fs scan triggered"})
+        elif self.path == "/trigger-scan/trivy-image":
+            thread = threading.Thread(target=run_trivy_image, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-image scan triggered"})
         else:
             self._respond(404, {"error": "unknown endpoint"})
 
