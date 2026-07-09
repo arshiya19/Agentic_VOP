@@ -261,36 +261,103 @@ class VerificationReport:
 
 # =============================================================================
 # Command extraction from step text
+#
+# The LLM formats commands multiple different ways depending on how it read
+# its source pages. All of the following shapes must be recognised, because
+# the verifier feeds these into cross-source consensus + destructive-pattern
+# scanning — miss a shape and we score a package as "0 verifiable commands"
+# even though it's full of real commands.
+#
+# Shapes recognised:
+#   1. "Command:\n <block>\n Why: ..."           (our prompt's canonical shape)
+#   2. "Commands:\n <block>"                     (plural variant LLM often uses)
+#   3. ```bash\n<block>\n``` or ```<block>```    (markdown fenced code blocks)
+#   4. Indented shell prompts: `$ cmd` or `# cmd` at start of line
+#   5. `inline command`                          (single-backtick inline code)
 # =============================================================================
 _COMMAND_BLOCK_RE = re.compile(
-    r"Command:\s*\n(.*?)(?:\n\s*Why:|\n\s*$|\Z)",
+    r"Commands?:\s*\n(.*?)(?:\n\s*(?:Why|Rationale|Reason|Expected|Notes?):|\n\s*\n|\Z)",
     re.DOTALL | re.IGNORECASE,
+)
+_FENCED_CODE_RE = re.compile(
+    r"```(?:bash|sh|shell|zsh|console|terminal|hcl|terraform|yaml|yml|python|py)?\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+_SHELL_PROMPT_LINE_RE = re.compile(r"^\s*[#\$]\s+(.+)$", re.MULTILINE)
+_INLINE_BACKTICK_RE = re.compile(r"`([^`\n]{6,200})`")
+
+# Words that hint an inline backtick is code (`aws s3 cp ...`, `terraform ...`).
+# Filters out prose backticks like `Amazon S3` or `Access Denied`.
+_CMD_HEAD_TOKENS = (
+    "aws ", "az ", "gcloud ", "kubectl ", "helm ", "docker ",
+    "terraform ", "tf ", "ansible ", "chef ", "puppet ",
+    "curl ", "wget ", "openssl ", "ssh ", "scp ", "rsync ",
+    "iptables ", "ufw ", "firewall-cmd ", "systemctl ", "service ",
+    "yum ", "apt ", "apt-get ", "dnf ", "zypper ", "pacman ", "brew ",
+    "pip ", "pip3 ", "npm ", "yarn ", "pnpm ", "mvn ", "gradle ",
+    "python ", "python3 ", "node ", "ruby ", "go ", "java ",
+    "git ", "make ", "cmake ", "bash ", "sh ",
+    "select ", "insert ", "update ", "delete ", "create ", "alter ", "drop ",
+    "grant ", "revoke ",
 )
 
 
 def _extract_commands(step_text: str) -> list[str]:
-    """Pull out the command lines from a step text block.
+    """Pull out CLI/code command lines from a step text block.
 
-    Steps are shaped:
-        Action description
-        Command:
-            <the actual command lines>
-        Why: reason
-
-    Returns each non-empty line inside the Command: block, dedented.
+    Tries several shapes (see module docstring above the regexes). Returns a
+    deduped list of trimmed command lines. Order preserves first appearance.
     """
     if not step_text:
         return []
-    m = _COMMAND_BLOCK_RE.search(step_text)
-    if not m:
-        return []
-    block = m.group(1).strip()
-    # Split into lines, drop blank ones, dedent common leading whitespace
-    raw_lines = [ln for ln in block.splitlines() if ln.strip()]
-    if not raw_lines:
-        return []
-    common_indent = min(len(ln) - len(ln.lstrip()) for ln in raw_lines)
-    return [ln[common_indent:] for ln in raw_lines]
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(cmd: str) -> None:
+        cmd = cmd.strip().rstrip("\\").strip()
+        if not cmd or len(cmd) < 4:
+            return
+        # Drop pure code fences, headings, and prose lines
+        if cmd.startswith(("```", "#", "//", "/*", "*", "-", ">")):
+            # Allow `# comment` only if it's followed by a real command token
+            if not any(t in cmd.lower() for t in _CMD_HEAD_TOKENS):
+                return
+        key = cmd[:100].lower()
+        if key not in seen:
+            seen.add(key)
+            found.append(cmd)
+
+    # Shape 1+2 — "Command:" / "Commands:" block
+    for m in _COMMAND_BLOCK_RE.finditer(step_text):
+        block = m.group(1).strip()
+        raw_lines = [ln for ln in block.splitlines() if ln.strip()]
+        if raw_lines:
+            common_indent = min(len(ln) - len(ln.lstrip()) for ln in raw_lines)
+            for ln in raw_lines:
+                _add(ln[common_indent:])
+
+    # Shape 3 — fenced code blocks (```bash ... ```)
+    for m in _FENCED_CODE_RE.finditer(step_text):
+        block = m.group(1).strip()
+        raw_lines = [ln for ln in block.splitlines() if ln.strip()]
+        if raw_lines:
+            common_indent = min(len(ln) - len(ln.lstrip()) for ln in raw_lines)
+            for ln in raw_lines:
+                _add(ln[common_indent:])
+
+    # Shape 4 — shell prompt lines (`$ cmd` or `# cmd`)
+    for m in _SHELL_PROMPT_LINE_RE.finditer(step_text):
+        _add(m.group(1))
+
+    # Shape 5 — inline backticks that look like commands
+    for m in _INLINE_BACKTICK_RE.finditer(step_text):
+        inline = m.group(1)
+        low = inline.lower().lstrip()
+        if any(low.startswith(tok) for tok in _CMD_HEAD_TOKENS):
+            _add(inline)
+
+    return found
 
 
 def _short_command(cmd: str, max_len: int = 80) -> str:
@@ -561,3 +628,40 @@ def _host_of(url: str) -> str:
         return urlparse(url).netloc.lower()
     except Exception:  # noqa: BLE001
         return ""
+
+
+# =============================================================================
+# Lightweight re-scan — used by retry paths to check whether a re-invocation
+# reduced placeholder/destructive counts, without paying for another round of
+# cross-source consensus web calls. Pure regex, no I/O.
+# =============================================================================
+def scan_placeholder_flags(output: LLMRemediationOutput) -> list[dict]:
+    """Return the list of placeholder flags that would fire on this output.
+    Same regex set the full verifier uses — kept in sync via _UNFILLED_
+    PLACEHOLDER_PATTERNS constant. No web calls, safe to re-invoke.
+    """
+    flags: list[dict] = []
+    if not output or not output.pathways:
+        return flags
+    for p_idx, pathway in enumerate(output.pathways):
+        for step_num, step in enumerate(pathway.remediation_steps or [], start=1):
+            step_text = getattr(step, "step", "") or ""
+            commands = _extract_commands(step_text)
+            for target in [step_text] + commands:
+                for name, pattern, explanation in _UNFILLED_PLACEHOLDER_PATTERNS:
+                    m = pattern.search(target)
+                    if not m:
+                        continue
+                    match_text = m.group(0)
+                    # Skip curl's %{http_code} format specifier — legit
+                    if match_text == "{http_code}" and "%" in target[max(0, m.start() - 1):m.start() + len(match_text) + 1]:
+                        continue
+                    flags.append({
+                        "pathway_idx": p_idx,
+                        "step_num": step_num,
+                        "pattern": name,
+                        "match": match_text,
+                        "explanation": explanation,
+                    })
+                    break  # one per step is enough
+    return flags

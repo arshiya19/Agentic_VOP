@@ -34,8 +34,9 @@ from ...models import LLMRemediationOutput, RemediationPackage, RemediationPathw
 from ..llm import invoke_structured_with_retry
 from ..trace_demo import emit_trace_demo
 from .classifier import classify_finding
-from .confidence import compute_confidence
+from .confidence import compute_confidence, compute_confidence_agentic
 from .planner import (
+    _agent_validation_metadata,
     _derive_approval,
     _issue_payload,
     _pattern_payload,
@@ -250,17 +251,19 @@ def _plan_and_enrich(
     family: str,
     sb_pub,
 ) -> RemediationPackage:
-    """Try agentic path first (v2.0). Fall back to hybrid v1.4 with pattern
-    adaptation if agent returns None or errors. Either path produces the same
-    LLMRemediationOutput; the enrichment code below is identical.
+    """Try agentic path first (v2.0). On success, validation_metadata +
+    confidence derive from the agent's actual citations + verifier report
+    (pattern NOT used). On failure, fall back to hybrid v1.4 with pattern
+    adaptation.
     """
+    agent_result = None  # tuple (LLMRemediationOutput, VerificationReport) | None
     llm_output: LLMRemediationOutput | None = None
 
     # --- AGENTIC path (Phase-2 default) ---
     if settings.tavily_api_key:
         from .agent_v2 import run_agentic_planner  # noqa: PLC0415
         try:
-            llm_output = run_agentic_planner(
+            agent_result = run_agentic_planner(
                 issue=issue,
                 asset=asset,
                 family=family,
@@ -275,8 +278,25 @@ def _plan_and_enrich(
                 f"{type(e).__name__}: {str(e)[:200]}",
             )
 
-    # --- HYBRID fallback (pattern-based v1.4) ---
-    if llm_output is None:
+    enriched_pathways: list[RemediationPathway] = []
+
+    if agent_result is not None:
+        # --- AGENT SUCCESS PATH — no pattern used. Metadata + confidence from
+        #     what the agent actually cited + what the verifier observed. ---
+        llm_output, verification_report = agent_result
+        for pathway in llm_output.pathways:
+            pathway.validation_metadata = _agent_validation_metadata(pathway)
+            confidence = compute_confidence_agentic(
+                issue=issue,
+                asset=asset,
+                pathway=pathway,
+                verification_report=verification_report,
+            )
+            pathway.confidence_score = confidence["score"]
+            pathway.confidence_components = confidence["components"]
+            enriched_pathways.append(pathway)
+    else:
+        # --- HYBRID fallback (pattern-based v1.4) ---
         emit_trace_demo(
             run_id, "sub-agent-3", "MESSAGE",
             "Using hybrid pattern-based planner (v1.4)",
@@ -309,20 +329,19 @@ def _plan_and_enrich(
             emit_fn=emit_trace_demo,
         )
 
-    validation_meta = _validation_metadata_for(pattern)
-    enriched_pathways: list[RemediationPathway] = []
-    for pathway in llm_output.pathways:
-        confidence = compute_confidence(
-            issue=issue,
-            asset=asset,
-            pattern=pattern,
-            pathway=pathway,
-            affected_asset_count=1,
-        )
-        pathway.validation_metadata = validation_meta
-        pathway.confidence_score = confidence["score"]
-        pathway.confidence_components = confidence["components"]
-        enriched_pathways.append(pathway)
+        validation_meta = _validation_metadata_for(pattern)
+        for pathway in llm_output.pathways:
+            confidence = compute_confidence(
+                issue=issue,
+                asset=asset,
+                pattern=pattern,
+                pathway=pathway,
+                affected_asset_count=1,
+            )
+            pathway.validation_metadata = validation_meta
+            pathway.confidence_score = confidence["score"]
+            pathway.confidence_components = confidence["components"]
+            enriched_pathways.append(pathway)
 
     recommended_idx = max(
         range(len(enriched_pathways)),

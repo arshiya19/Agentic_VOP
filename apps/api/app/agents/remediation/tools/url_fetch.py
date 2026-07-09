@@ -48,6 +48,12 @@ _USER_AGENT = (
     "SisyfixAgentic/0.1 (+security-remediation-research; contact via HTTP headers)"
 )
 
+# Content-quality thresholds. Pages under these bars can't sustain a detailed
+# remediation package — the LLM will happily write shallow steps unless we
+# push back explicitly. See _quality_warning below.
+_QUALITY_EMPTY_THRESHOLD = 100    # essentially unusable — JS-rendered SPA / error page
+_QUALITY_THIN_THRESHOLD = 400     # extractable but sparse — should not be sole source
+
 
 def fetch_url(
     url: str,
@@ -145,13 +151,26 @@ def fetch_url(
         extracted = extracted[:max_chars_returned] + "\n\n[... truncated for LLM context budget ...]"
         truncated = True
 
+    # Assess extraction quality — pages under our thresholds get an explicit
+    # warning the agent tool wrapper will surface to the LLM so it knows to
+    # go find a better source instead of silently synthesizing on nothing.
+    quality_warning = _quality_warning(len(extracted), url)
+
     if emit_fn and run_id:
-        emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
+        base = (
             f"Fetched {len(extracted)} chars in {elapsed_ms}ms"
             + (" (truncated)" if truncated else "")
-            + f" — {title[:80]}" if title else "",
         )
+        if quality_warning:
+            emit_fn(
+                run_id, "sub-agent-3", "MESSAGE",
+                f"⚠ {quality_warning['level']} CONTENT — {base}"
+                f" — {title[:60]}" if title else f"⚠ {quality_warning['level']} — {base}",
+            )
+        elif title:
+            emit_fn(run_id, "sub-agent-3", "MESSAGE", f"{base} — {title[:80]}")
+        else:
+            emit_fn(run_id, "sub-agent-3", "MESSAGE", base)
 
     return {
         "url": url,
@@ -163,4 +182,44 @@ def fetch_url(
         "status_code": resp.status_code,
         "content_type": ctype,
         "elapsed_ms": elapsed_ms,
+        "quality_warning": quality_warning,   # None on healthy extractions
     }
+
+
+def _quality_warning(n_chars: int, url: str) -> dict | None:
+    """Classify extraction as EMPTY / THIN / OK and produce a directive the
+    tool wrapper can surface verbatim to the LLM.
+
+    The LLM's default behavior when a fetch returns little text is to just
+    keep going and synthesize with whatever it has. That's how we end up with
+    2-step remediation packages. This warning is the pushback signal.
+    """
+    if n_chars < _QUALITY_EMPTY_THRESHOLD:
+        return {
+            "level": "EMPTY",
+            "chars": n_chars,
+            "url": url,
+            "directive": (
+                f"URL returned only {n_chars} chars of readable content. "
+                f"This page is almost certainly a JavaScript-rendered SPA that "
+                f"our headless fetcher cannot read (common on modern vendor "
+                f"docs). This source is UNUSABLE and MUST NOT be cited. "
+                f"Call web_search NOW for an alternative authoritative source "
+                f"(prefer AWS/Azure/GCP official docs, CIS Benchmark PDFs, "
+                f"MITRE, NVD, or vendor CLI reference pages) and url_fetch that."
+            ),
+        }
+    if n_chars < _QUALITY_THIN_THRESHOLD:
+        return {
+            "level": "THIN",
+            "chars": n_chars,
+            "url": url,
+            "directive": (
+                f"URL returned only {n_chars} chars — insufficient to derive "
+                f"detailed enterprise-grade remediation from. This source is "
+                f"acceptable as a SECONDARY citation but NOT as your primary "
+                f"reference. Continue researching: call web_search for a more "
+                f"comprehensive authoritative doc and url_fetch that as well."
+            ),
+        }
+    return None
