@@ -59,9 +59,7 @@ def run_demo_remediation(run_id: str) -> dict:
         "Loading enriched issues from demo.issues for this run",
     )
 
-    issues = (
-        sb_demo.table("issues").select("*").eq("agent_run_id", run_id).execute().data or []
-    )
+    issues = sb_demo.table("issues").select("*").eq("agent_run_id", run_id).execute().data or []
 
     if not issues:
         emit_trace_demo(
@@ -80,12 +78,7 @@ def run_demo_remediation(run_id: str) -> dict:
     raw_ids = [i["raw_finding_id"] for i in issues if i.get("raw_finding_id") is not None]
     if raw_ids:
         raw_rows = (
-            sb_pub.table("raw_findings")
-            .select("id, raw")
-            .in_("id", raw_ids)
-            .execute()
-            .data
-            or []
+            sb_pub.table("raw_findings").select("id, raw").in_("id", raw_ids).execute().data or []
         )
         raw_by_id = {r["id"]: (r.get("raw") or {}) for r in raw_rows}
 
@@ -121,10 +114,7 @@ def run_demo_remediation(run_id: str) -> dict:
         or []
     )
     if not prompt_rows:
-        raise RuntimeError(
-            "No sub-agent-3 v1.4 prompt row in prompt_db. "
-            "Apply migration 0047."
-        )
+        raise RuntimeError("No sub-agent-3 v1.4 prompt row in prompt_db. Apply migration 0047.")
     prompt_row = prompt_rows[0]
 
     # Pre-load all demo.assets rows once and build a lookup index by identity.
@@ -262,6 +252,7 @@ def _plan_and_enrich(
     # --- AGENTIC path (Phase-2 default) ---
     if settings.tavily_api_key:
         from .agent_v2 import run_agentic_planner  # noqa: PLC0415
+
         try:
             agent_result = run_agentic_planner(
                 issue=issue,
@@ -273,7 +264,9 @@ def _plan_and_enrich(
             )
         except Exception as e:  # noqa: BLE001
             emit_trace_demo(
-                run_id, "sub-agent-3", "ERROR",
+                run_id,
+                "sub-agent-3",
+                "ERROR",
                 f"Agentic planner raised, falling back to hybrid: "
                 f"{type(e).__name__}: {str(e)[:200]}",
             )
@@ -298,7 +291,9 @@ def _plan_and_enrich(
     else:
         # --- HYBRID fallback (pattern-based v1.4) ---
         emit_trace_demo(
-            run_id, "sub-agent-3", "MESSAGE",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
             "Using hybrid pattern-based planner (v1.4)",
         )
         params = prompt_row.get("parameters") or {}
@@ -361,9 +356,7 @@ def _plan_and_enrich(
     )
 
 
-def _persist_to_demo(
-    sb_demo: Any, pkg: RemediationPackage, run_id: str
-) -> int:
+def _persist_to_demo(sb_demo: Any, pkg: RemediationPackage, run_id: str) -> int:
     """INSERT a RemediationPackage into demo.remediation_packages."""
     row = {
         "issue_id": pkg.issue_id,

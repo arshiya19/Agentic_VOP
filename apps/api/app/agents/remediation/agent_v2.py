@@ -58,11 +58,11 @@ AgentResult = tuple[LLMRemediationOutput, VerificationReport] | None
 # Kept in sync with the per-family depth minimums in verifier.py.
 # =============================================================================
 _MIN_FETCHES_BY_FAMILY = {
-    "public_exposure":       3,
-    "network_exposure":      3,
-    "injection":             3,
+    "public_exposure": 3,
+    "network_exposure": 3,
+    "injection": 3,
     "vulnerable_dependency": 4,
-    "os_vulnerability":      3,
+    "os_vulnerability": 3,
 }
 
 # How many total tool calls we reserve for the depth-retry + verifier pass.
@@ -208,7 +208,9 @@ def _try_parse_final_answer(
     if emit_fn and run_id:
         preview = text[:400].replace("\n", " ⏎ ").replace("  ", " ")
         emit_fn(
-            run_id, "sub-agent-3", "ERROR",
+            run_id,
+            "sub-agent-3",
+            "ERROR",
             f"[{context}] JSON parse failed after {len(candidates)} candidate(s). "
             f"Last error: {last_error}. LLM output preview (first 400 chars): {preview}",
         )
@@ -335,6 +337,7 @@ def _distinct_hosts_fetched(messages: list[Any]) -> set[str]:
     (so we can remind the LLM which sources it already has).
     """
     from urllib.parse import urlparse  # noqa: PLC0415
+
     hosts: set[str] = set()
     for m in messages:
         if isinstance(m, ToolMessage):
@@ -346,7 +349,7 @@ def _distinct_hosts_fetched(messages: list[Any]) -> set[str]:
                         h = urlparse(url).netloc.lower()
                         if h:
                             hosts.add(h)
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001, S110 — malformed URL, ignore
                         pass
     return hosts
 
@@ -398,9 +401,7 @@ def _maybe_expand_for_depth(
             if n < min_steps:
                 shortfalls.append((i, n))
         if shortfalls:
-            reasons.append(
-                f"pathway step-count shortfalls: {shortfalls} (need ≥{min_steps})"
-            )
+            reasons.append(f"pathway step-count shortfalls: {shortfalls} (need ≥{min_steps})")
 
     # Trigger B — no runnable commands (all steps are prose descriptions)
     total_commands = _count_extractable_commands(parsed)
@@ -416,12 +417,16 @@ def _maybe_expand_for_depth(
 
     fetched_hosts = _distinct_hosts_fetched(messages)
     emit_fn(
-        run_id, "sub-agent-3", "MESSAGE",
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
         f"↻ RETRY — {'; '.join(reasons)}. Re-invoking for expansion "
         f"(no tool calls — uses fetched sources: {sorted(fetched_hosts)[:5]}).",
     )
 
-    min_rollback = max(2, int((min_steps or len(parsed.pathways[0].remediation_steps or [1])) * 0.5))
+    min_rollback = max(
+        2, int((min_steps or len(parsed.pathways[0].remediation_steps or [1])) * 0.5)
+    )
     target_steps = min_steps or max(6, len(parsed.pathways[0].remediation_steps or [6]))
 
     expand_msg_parts: list[str] = [
@@ -455,8 +460,8 @@ def _maybe_expand_for_depth(
         "  Why: The AWS S3 User Guide recommends capturing the pre-change policy",
         "  before running put-public-access-block so rollback is a single apply.",
         "",
-        "Do NOT emit steps that are just descriptions (e.g. \"Review current",
-        "security group rules\" without a Command: block).",
+        'Do NOT emit steps that are just descriptions (e.g. "Review current',
+        'security group rules" without a Command: block).',
         "",
         f"Every source_url MUST be a URL you already fetched in this run "
         f"(hosts you have content for: {sorted(fetched_hosts) or '[none]'}). "
@@ -470,21 +475,29 @@ def _maybe_expand_for_depth(
     # uses raw JSON parsing for the same reason — mirror that shape here.
     try:
         response = llm.invoke(messages + [expand_msg])
-        text = response.content if isinstance(response.content, str) else json.dumps(response.content)
+        text = (
+            response.content if isinstance(response.content, str) else json.dumps(response.content)
+        )
         expanded = _try_parse_final_answer(
-            text, run_id=run_id, emit_fn=emit_fn, context="depth-retry",
+            text,
+            run_id=run_id,
+            emit_fn=emit_fn,
+            context="depth-retry",
         )
         if expanded is None:
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 "Retry LLM returned non-parseable content — keeping original draft",
             )
             return parsed
     except Exception as e:  # noqa: BLE001
         emit_fn(
-            run_id, "sub-agent-3", "ERROR",
-            f"Retry expansion failed: {type(e).__name__}: {str(e)[:150]} — "
-            "keeping original draft",
+            run_id,
+            "sub-agent-3",
+            "ERROR",
+            f"Retry expansion failed: {type(e).__name__}: {str(e)[:150]} — keeping original draft",
         )
         return parsed
 
@@ -496,7 +509,9 @@ def _maybe_expand_for_depth(
             if after > before:
                 improved = True
                 emit_fn(
-                    run_id, "sub-agent-3", "MESSAGE",
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
                     f"✓ RETRY pathway {i}: {before} → {after} steps",
                 )
     # Also accept if commands appeared where none existed before
@@ -504,15 +519,17 @@ def _maybe_expand_for_depth(
     if total_commands == 0 and commands_after > 0:
         improved = True
         emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
-            f"✓ RETRY — commands extracted: 0 → {commands_after} "
-            "(steps now have Command: blocks)",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"✓ RETRY — commands extracted: 0 → {commands_after} (steps now have Command: blocks)",
         )
     if not improved:
         emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
-            "Retry did not improve step count OR command extractability — "
-            "keeping original draft",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            "Retry did not improve step count OR command extractability — keeping original draft",
         )
         return parsed
     return expanded
@@ -553,66 +570,80 @@ def _maybe_expand_for_placeholders(
             continue
         seen.add(key)
         flag_lines.append(
-            f"  - Step {f.get('step_num')}: placeholder {f.get('match')!r} "
-            f"({f.get('pattern')})"
+            f"  - Step {f.get('step_num')}: placeholder {f.get('match')!r} ({f.get('pattern')})"
         )
 
     emit_fn(
-        run_id, "sub-agent-3", "MESSAGE",
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
         f"↻ RETRY — {len(flag_lines)} unfilled placeholder(s) detected. "
         f"Re-invoking to replace with discovery commands or drop the step "
         f"(no tool calls).",
     )
 
     fetched_hosts = _distinct_hosts_fetched(messages)
-    expand_msg = HumanMessage(content="\n".join([
-        "Your draft has UNFILLED PLACEHOLDERS in remediation commands. Every",
-        "command in the output must be directly runnable by production ops.",
-        "Placeholders like `<name>`, `{name}`, `YOUR_*`, `/path/to/...`, and",
-        "`example.com` make steps unrunnable. Verifier flagged:",
-        "",
-        *flag_lines,
-        "",
-        "For EACH placeholder above, choose ONE fix — no other options:",
-        "",
-        "  (A) Add a NEW step IMMEDIATELY BEFORE the flagged step that runs",
-        "      a discovery command to resolve the value at runtime, then",
-        "      reference $(that_command) or the resolved variable in the",
-        "      flagged step. Example pattern (adapt to the actual resource):",
-        "",
-        "          aws <service> describe-<resource> \\",
-        "            --filters 'Name=<attr>,Values=<from-finding>' \\",
-        "            --query '<Resources[0].Id>' --output text",
-        "",
-        "  (B) REMOVE the flagged step from remediation_steps if the value",
-        "      truly cannot be derived and the step is optional. Prefer (A)",
-        "      whenever a discovery command exists in the vendor CLI.",
-        "",
-        "Do NOT invent hardcoded IDs, ARNs, or account numbers. Do NOT",
-        "leave the placeholder in place. Do NOT rename the placeholder to a",
-        "different placeholder shape.",
-        "",
-        "Re-emit the FULL JSON (same finding/root_cause/impact + all other",
-        "pathway fields) with placeholders replaced or steps removed. Every",
-        f"source_url MUST be from the fetched hosts: {sorted(fetched_hosts) or '[none]'}.",
-        "Emit JSON only.",
-    ]))
+    expand_msg = HumanMessage(
+        content="\n".join(
+            [
+                "Your draft has UNFILLED PLACEHOLDERS in remediation commands. Every",
+                "command in the output must be directly runnable by production ops.",
+                "Placeholders like `<name>`, `{name}`, `YOUR_*`, `/path/to/...`, and",
+                "`example.com` make steps unrunnable. Verifier flagged:",
+                "",
+                *flag_lines,
+                "",
+                "For EACH placeholder above, choose ONE fix — no other options:",
+                "",
+                "  (A) Add a NEW step IMMEDIATELY BEFORE the flagged step that runs",
+                "      a discovery command to resolve the value at runtime, then",
+                "      reference $(that_command) or the resolved variable in the",
+                "      flagged step. Example pattern (adapt to the actual resource):",
+                "",
+                "          aws <service> describe-<resource> \\",
+                "            --filters 'Name=<attr>,Values=<from-finding>' \\",
+                "            --query '<Resources[0].Id>' --output text",
+                "",
+                "  (B) REMOVE the flagged step from remediation_steps if the value",
+                "      truly cannot be derived and the step is optional. Prefer (A)",
+                "      whenever a discovery command exists in the vendor CLI.",
+                "",
+                "Do NOT invent hardcoded IDs, ARNs, or account numbers. Do NOT",
+                "leave the placeholder in place. Do NOT rename the placeholder to a",
+                "different placeholder shape.",
+                "",
+                "Re-emit the FULL JSON (same finding/root_cause/impact + all other",
+                "pathway fields) with placeholders replaced or steps removed. Every",
+                f"source_url MUST be from the fetched hosts: {sorted(fetched_hosts) or '[none]'}.",
+                "Emit JSON only.",
+            ]
+        )
+    )
 
     try:
         response = llm.invoke(messages + [expand_msg])
-        text = response.content if isinstance(response.content, str) else json.dumps(response.content)
+        text = (
+            response.content if isinstance(response.content, str) else json.dumps(response.content)
+        )
         expanded = _try_parse_final_answer(
-            text, run_id=run_id, emit_fn=emit_fn, context="placeholder-retry",
+            text,
+            run_id=run_id,
+            emit_fn=emit_fn,
+            context="placeholder-retry",
         )
         if expanded is None:
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 "Placeholder retry: non-parseable content — keeping original draft",
             )
             return parsed, report
     except Exception as e:  # noqa: BLE001
         emit_fn(
-            run_id, "sub-agent-3", "ERROR",
+            run_id,
+            "sub-agent-3",
+            "ERROR",
             f"Placeholder retry failed: {type(e).__name__}: {str(e)[:150]} — "
             "keeping original draft",
         )
@@ -625,7 +656,9 @@ def _maybe_expand_for_placeholders(
     after = len(new_flags)
     if after < before:
         emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
             f"✓ PLACEHOLDER RETRY: {before} → {after} unfilled placeholder(s)",
         )
         # Update the report so downstream confidence reflects the improvement.
@@ -635,7 +668,9 @@ def _maybe_expand_for_placeholders(
         return expanded, report
 
     emit_fn(
-        run_id, "sub-agent-3", "MESSAGE",
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
         f"Placeholder retry did not reduce placeholder count ({before} → {after}) — "
         "keeping original draft",
     )
@@ -683,7 +718,9 @@ def run_agentic_planner(
         prompt_row = _load_prompt_v2(sb_pub)
     except Exception as e:  # noqa: BLE001
         emit_fn(
-            run_id, "sub-agent-3", "ERROR",
+            run_id,
+            "sub-agent-3",
+            "ERROR",
             f"Failed to load agent prompt v2: {type(e).__name__}: {str(e)[:200]}",
         )
         return None
@@ -698,7 +735,9 @@ def run_agentic_planner(
     tools = _make_tools(budget, run_id, emit_fn)
 
     emit_fn(
-        run_id, "sub-agent-3", "MESSAGE",
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
         f"🤖 Agentic remediation starting — family={family}, budget={budget.max_calls} calls / "
         f"${budget.max_cost_usd:.2f} — model={model} @ temp={temperature}",
     )
@@ -736,7 +775,9 @@ def run_agentic_planner(
             response: AIMessage = llm_with_tools.invoke(messages)  # type: ignore[assignment]
         except Exception as e:  # noqa: BLE001
             emit_fn(
-                run_id, "sub-agent-3", "ERROR",
+                run_id,
+                "sub-agent-3",
+                "ERROR",
                 f"LLM call failed at iteration {iteration + 1}: {type(e).__name__}: {str(e)[:200]}",
             )
             return None
@@ -753,23 +794,29 @@ def run_agentic_planner(
             if not floor_ok and can_afford_more and iteration < max_iterations - 2:
                 # PUSH BACK — research floor not met. Force more fetching.
                 emit_fn(
-                    run_id, "sub-agent-3", "MESSAGE",
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
                     f"▶ FETCH FLOOR ({done}/{required}) — {family} requires more "
                     f"authoritative research before synthesis. Pushing back.",
                 )
-                messages.append(HumanMessage(content=(
-                    f"You've only called url_fetch {done} time(s). Family "
-                    f"'{family}' requires content from AT LEAST {required} distinct "
-                    f"authoritative sources before you may synthesize a package "
-                    f"a production ops team can trust.\n\n"
-                    f"Continue researching NOW: call web_search for an angle you "
-                    f"haven't explored (a different vendor's docs, CIS Benchmark, "
-                    f"MITRE ATT&CK/CWE, or the OS/language-ecosystem security "
-                    f"advisory) and url_fetch a Tier-1/2 result. Do not emit JSON "
-                    f"until you have ≥ {required} url_fetch calls of substantive "
-                    f"(non-EMPTY, non-THIN) content. Marketplace / product / "
-                    f"pricing / console pages do NOT count."
-                )))
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            f"You've only called url_fetch {done} time(s). Family "
+                            f"'{family}' requires content from AT LEAST {required} distinct "
+                            f"authoritative sources before you may synthesize a package "
+                            f"a production ops team can trust.\n\n"
+                            f"Continue researching NOW: call web_search for an angle you "
+                            f"haven't explored (a different vendor's docs, CIS Benchmark, "
+                            f"MITRE ATT&CK/CWE, or the OS/language-ecosystem security "
+                            f"advisory) and url_fetch a Tier-1/2 result. Do not emit JSON "
+                            f"until you have ≥ {required} url_fetch calls of substantive "
+                            f"(non-EMPTY, non-THIN) content. Marketplace / product / "
+                            f"pricing / console pages do NOT count."
+                        )
+                    )
+                )
                 continue  # LLM will now do more research
 
             # Floor met OR budget nearly out — accept the finish attempt
@@ -782,23 +829,40 @@ def run_agentic_planner(
             )
             if parsed is not None:
                 emit_fn(
-                    run_id, "sub-agent-3", "MESSAGE",
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
                     f"✓ Agent produced draft package — {budget.summary()}",
                 )
                 # Depth retry: expand pathways that fell short of family minimum
                 parsed = _maybe_expand_for_depth(
-                    parsed, family, llm, messages, run_id, emit_fn, budget,
+                    parsed,
+                    family,
+                    llm,
+                    messages,
+                    run_id,
+                    emit_fn,
+                    budget,
                 )
                 # Enterprise safety: cross-source consensus + destructive scan
-                report = verify_output(parsed, budget=budget, run_id=run_id, emit_fn=emit_fn, family=family)
+                report = verify_output(
+                    parsed, budget=budget, run_id=run_id, emit_fn=emit_fn, family=family
+                )
                 # Generic placeholder retry — LLM decides discovery cmd vs drop
                 parsed, report = _maybe_expand_for_placeholders(
-                    parsed, report, llm, messages, run_id, emit_fn,
+                    parsed,
+                    report,
+                    llm,
+                    messages,
+                    run_id,
+                    emit_fn,
                 )
                 return (parsed, report)
             # Fall through to synthesis backup below
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 "Agent produced final answer but not parseable JSON — attempting synthesis pass",
             )
             return _synthesize_backup(llm, messages, run_id, emit_fn, budget, family)
@@ -812,10 +876,12 @@ def run_agentic_planner(
 
             selected_tool = next((t for t in tools if t.name == tool_name), None)
             if selected_tool is None:
-                messages.append(ToolMessage(
-                    content=f"Error: unknown tool '{tool_name}'",
-                    tool_call_id=tool_call_id,
-                ))
+                messages.append(
+                    ToolMessage(
+                        content=f"Error: unknown tool '{tool_name}'",
+                        tool_call_id=tool_call_id,
+                    )
+                )
                 continue
 
             try:
@@ -824,23 +890,29 @@ def run_agentic_planner(
             except RuntimeError as e:
                 # Budget cap or tool-level failure — tell the LLM so it can adapt.
                 err_msg = str(e)
-                messages.append(ToolMessage(
-                    content=f"Tool error: {err_msg}",
-                    tool_call_id=tool_call_id,
-                ))
+                messages.append(
+                    ToolMessage(
+                        content=f"Tool error: {err_msg}",
+                        tool_call_id=tool_call_id,
+                    )
+                )
                 if "cap" in err_msg.lower() or "denied" in err_msg.lower():
                     budget_exhausted = True
 
         if budget_exhausted:
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 f"Budget exhausted mid-loop ({budget.summary()}) — forcing synthesis",
             )
             return _synthesize_backup(llm, messages, run_id, emit_fn, budget, _family_for_verify)
 
     # Loop exhausted without a final answer — force synthesis
     emit_fn(
-        run_id, "sub-agent-3", "MESSAGE",
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
         f"Max iterations ({max_iterations}) reached — forcing synthesis. {budget.summary()}",
     )
     return _synthesize_backup(llm, messages, run_id, emit_fn, budget, _family_for_verify)
@@ -865,41 +937,67 @@ def _synthesize_backup(
     # invoke + JSON parse instead of with_structured_output, because
     # LLMRemediationOutput has dict[str, Any] fields OpenAI strict rejects.
     try:
-        synth_messages = messages + [HumanMessage(content=(
-            "Now produce the final RemediationPackage as a single JSON object "
-            "matching the schema in the system prompt. Every source_url MUST be "
-            "one of the URLs you called url_fetch on during this run. No prose, "
-            "just the JSON."
-        ))]
+        synth_messages = messages + [
+            HumanMessage(
+                content=(
+                    "Now produce the final RemediationPackage as a single JSON object "
+                    "matching the schema in the system prompt. Every source_url MUST be "
+                    "one of the URLs you called url_fetch on during this run. No prose, "
+                    "just the JSON."
+                )
+            )
+        ]
         response = llm.invoke(synth_messages)
-        text = response.content if isinstance(response.content, str) else json.dumps(response.content)
+        text = (
+            response.content if isinstance(response.content, str) else json.dumps(response.content)
+        )
         result = _try_parse_final_answer(
-            text, run_id=run_id, emit_fn=emit_fn, context="synthesis-backup",
+            text,
+            run_id=run_id,
+            emit_fn=emit_fn,
+            context="synthesis-backup",
         )
         if result is None:
             emit_fn(
-                run_id, "sub-agent-3", "ERROR",
+                run_id,
+                "sub-agent-3",
+                "ERROR",
                 "Synthesis pass returned non-parseable content — no package produced",
             )
             return None
         emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
             f"✓ Synthesis pass succeeded — {budget.summary()}",
         )
         # Depth retry: expand if the backup synthesis under-produced.
         result = _maybe_expand_for_depth(
-            result, family, llm, messages, run_id, emit_fn, budget,
+            result,
+            family,
+            llm,
+            messages,
+            run_id,
+            emit_fn,
+            budget,
         )
         # Same enterprise safety pass whether we came from the loop or the backup.
         report = verify_output(result, budget=budget, run_id=run_id, emit_fn=emit_fn, family=family)
         # Generic placeholder retry — LLM decides discovery cmd vs drop
         result, report = _maybe_expand_for_placeholders(
-            result, report, llm, messages, run_id, emit_fn,
+            result,
+            report,
+            llm,
+            messages,
+            run_id,
+            emit_fn,
         )
         return (result, report)
     except Exception as e:  # noqa: BLE001
         emit_fn(
-            run_id, "sub-agent-3", "ERROR",
+            run_id,
+            "sub-agent-3",
+            "ERROR",
             f"Synthesis pass failed: {type(e).__name__}: {str(e)[:200]}",
         )
         return None

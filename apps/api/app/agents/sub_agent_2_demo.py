@@ -31,7 +31,6 @@ from ..config import settings
 from ..db import supabase_admin, supabase_admin_demo
 from .http_utils import request_with_retry
 from .sub_agent_2 import (
-    _asset_for_llm,
     _build_asset_index,
     _compute_score,
     _fetch_nvd_data,
@@ -79,9 +78,7 @@ def run_demo_enrich(run_id: str) -> dict:
     )
 
     # ---- 1. Load issues for this run + assets for scoring context ----
-    issues = (
-        sb_demo.table("issues").select("*").eq("agent_run_id", run_id).execute().data or []
-    )
+    issues = sb_demo.table("issues").select("*").eq("agent_run_id", run_id).execute().data or []
     emit_trace_demo(
         run_id,
         "sub-agent-2",
@@ -224,9 +221,7 @@ def run_demo_enrich(run_id: str) -> dict:
 
     # ---- 6. Per-issue enrichment (parallel workers) ----
     workers = max(1, int(settings.llm_parallel_workers or 10))
-    emit_trace_demo(
-        run_id, "sub-agent-2", "MESSAGE", f"Enriching {len(issues)} issue(s)…"
-    )
+    emit_trace_demo(run_id, "sub-agent-2", "MESSAGE", f"Enriching {len(issues)} issue(s)…")
 
     enriched = 0
     failed = 0

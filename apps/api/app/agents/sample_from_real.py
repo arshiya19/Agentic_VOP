@@ -24,8 +24,6 @@ Design notes:
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..db import supabase_admin, supabase_admin_demo
 from .remediation.classifier import classify_finding
 from .trace_demo import emit_trace_demo
@@ -42,10 +40,18 @@ FAMILIES = [
 # Rank severity/priority strings so we can pick the "highest-risk" issue per
 # family deterministically even when derived_risk is NULL. Fallback ordering.
 _SEVERITY_RANK = {
-    "critical": 4, "Critical": 4, "CRITICAL": 4,
-    "high": 3, "High": 3, "HIGH": 3,
-    "medium": 2, "Medium": 2, "MEDIUM": 2,
-    "low": 1, "Low": 1, "LOW": 1,
+    "critical": 4,
+    "Critical": 4,
+    "CRITICAL": 4,
+    "high": 3,
+    "High": 3,
+    "HIGH": 3,
+    "medium": 2,
+    "Medium": 2,
+    "MEDIUM": 2,
+    "low": 1,
+    "Low": 1,
+    "LOW": 1,
 }
 
 
@@ -98,12 +104,7 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
     raw_ids = [i["raw_finding_id"] for i in ec2_issues if i.get("raw_finding_id") is not None]
     if raw_ids:
         raw_rows = (
-            sb_pub.table("raw_findings")
-            .select("id, raw")
-            .in_("id", raw_ids)
-            .execute()
-            .data
-            or []
+            sb_pub.table("raw_findings").select("id, raw").in_("id", raw_ids).execute().data or []
         )
         raw_by_id = {r["id"]: (r.get("raw") or {}) for r in raw_rows}
 

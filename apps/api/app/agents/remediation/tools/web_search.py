@@ -43,37 +43,59 @@ from .budget import AgentBudget
 # =============================================================================
 _TIER_1_DOMAINS = {
     # Cloud provider primary security docs
-    "docs.aws.amazon.com", "aws.amazon.com", "docs.microsoft.com",
-    "learn.microsoft.com", "cloud.google.com", "docs.oracle.com",
+    "docs.aws.amazon.com",
+    "aws.amazon.com",
+    "docs.microsoft.com",
+    "learn.microsoft.com",
+    "cloud.google.com",
+    "docs.oracle.com",
     # Standards bodies + governments
-    "cisecurity.org", "cis-cat.readthedocs.io",
-    "nvd.nist.gov", "nist.gov",
-    "cisa.gov", "www.cisa.gov",
+    "cisecurity.org",
+    "cis-cat.readthedocs.io",
+    "nvd.nist.gov",
+    "nist.gov",
+    "cisa.gov",
+    "www.cisa.gov",
     "csrc.nist.gov",
     # MITRE
-    "cwe.mitre.org", "capec.mitre.org", "attack.mitre.org",
+    "cwe.mitre.org",
+    "capec.mitre.org",
+    "attack.mitre.org",
 }
 _TIER_2_DOMAINS = {
     # OWASP + community security orgs
-    "owasp.org", "cheatsheetseries.owasp.org",
+    "owasp.org",
+    "cheatsheetseries.owasp.org",
     # Vendor security advisories
-    "kubernetes.io", "docs.kubernetes.io",
-    "hashicorp.com", "developer.hashicorp.com",
+    "kubernetes.io",
+    "docs.kubernetes.io",
+    "hashicorp.com",
+    "developer.hashicorp.com",
     "terraform.io",
     # CVE databases
-    "cve.mitre.org", "vulners.com",
+    "cve.mitre.org",
+    "vulners.com",
     # Official security research
-    "cert.org", "us-cert.gov",
+    "cert.org",
+    "us-cert.gov",
     "portswigger.net",  # Burp / PortSwigger research
 }
 _TIER_3_DOMAINS = {
     # Reputable security vendors' research pages
-    "snyk.io", "checkov.io", "trivy.dev", "aquasec.com",
-    "wiz.io", "paloaltonetworks.com", "unit42.paloaltonetworks.com",
-    "crowdstrike.com", "rapid7.com",
-    "sonarsource.com", "semgrep.dev",
+    "snyk.io",
+    "checkov.io",
+    "trivy.dev",
+    "aquasec.com",
+    "wiz.io",
+    "paloaltonetworks.com",
+    "unit42.paloaltonetworks.com",
+    "crowdstrike.com",
+    "rapid7.com",
+    "sonarsource.com",
+    "semgrep.dev",
     # GitHub advisory database
-    "github.com", "docs.github.com",
+    "github.com",
+    "docs.github.com",
 }
 
 
@@ -129,9 +151,10 @@ def web_search(
 
     if emit_fn and run_id:
         emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
-            f"🔍 Searching web: {query[:120]}"
-            f" (call {budget.call_count + 1}/{budget.max_calls})",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"🔍 Searching web: {query[:120]} (call {budget.call_count + 1}/{budget.max_calls})",
         )
 
     start = time.time()
@@ -148,7 +171,9 @@ def web_search(
     except Exception as e:  # noqa: BLE001
         if emit_fn and run_id:
             emit_fn(
-                run_id, "sub-agent-3", "ERROR",
+                run_id,
+                "sub-agent-3",
+                "ERROR",
                 f"Search failed: {type(e).__name__}: {str(e)[:200]}",
             )
         raise
@@ -161,20 +186,24 @@ def web_search(
     for r in raw.get("results", []) or []:
         url = r.get("url", "")
         tier = _score_domain(url)
-        results.append({
-            "url": url,
-            "title": r.get("title", ""),
-            "snippet": r.get("content", "")[:600],  # keep the LLM context tight
-            "authority_tier": tier,
-            "published_date": r.get("published_date"),
-            "score": r.get("score"),  # Tavily's relevance score
-        })
+        results.append(
+            {
+                "url": url,
+                "title": r.get("title", ""),
+                "snippet": r.get("content", "")[:600],  # keep the LLM context tight
+                "authority_tier": tier,
+                "published_date": r.get("published_date"),
+                "score": r.get("score"),  # Tavily's relevance score
+            }
+        )
     results.sort(key=lambda r: (r["authority_tier"], -1 * (r.get("score") or 0)))
 
     if emit_fn and run_id:
         top_domains = sorted({r["url"].split("/")[2] for r in results[:3] if "/" in r["url"]})
         emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
             f"Search returned {len(results)} result(s) in {elapsed_ms}ms · "
             f"top: {', '.join(top_domains)[:150]}",
         )

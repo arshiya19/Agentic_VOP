@@ -113,13 +113,13 @@ export default function Agents() {
               if (!tRes.ok) continue
               const tData = await tRes.json()
               allTraces.push(...(tData.traces || []))
-            } catch (_e) { /* skip this run's traces */ }
+            } catch { /* skip this run's traces */ }
           }
           if (!mounted) return
           // Sort DESC (newest first) to match real-mode display.
           allTraces.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
           setTraceEvents(allTraces.map(mapTraceRow))
-        } catch (_err) { /* transient network error, retry next tick */ }
+        } catch { /* transient network error, retry next tick */ }
       }
       poll()
       const interval = setInterval(poll, DEMO_POLL_MS)

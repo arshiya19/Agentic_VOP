@@ -132,37 +132,66 @@ def _load_pattern(sb, family: str) -> dict | None:
 # confidence.py; keep in sync when adding new authoritative vendors.
 _AGENT_AUTHORITATIVE_HOSTS = {
     # --- Cloud provider primary docs (Tier 1) ---
-    "docs.aws.amazon.com", "aws.amazon.com",
-    "docs.microsoft.com", "learn.microsoft.com",
-    "cloud.google.com", "docs.oracle.com",
+    "docs.aws.amazon.com",
+    "aws.amazon.com",
+    "docs.microsoft.com",
+    "learn.microsoft.com",
+    "cloud.google.com",
+    "docs.oracle.com",
     # --- Standards bodies + governments (Tier 1) ---
-    "cisecurity.org", "nvd.nist.gov", "csrc.nist.gov",
-    "cisa.gov", "www.cisa.gov",
-    "cwe.mitre.org", "capec.mitre.org", "attack.mitre.org",
+    "cisecurity.org",
+    "nvd.nist.gov",
+    "csrc.nist.gov",
+    "cisa.gov",
+    "www.cisa.gov",
+    "cwe.mitre.org",
+    "capec.mitre.org",
+    "attack.mitre.org",
     "cve.mitre.org",
     # --- Core project + community docs (Tier 2) ---
-    "owasp.org", "cheatsheetseries.owasp.org",
-    "kubernetes.io", "docs.kubernetes.io",
+    "owasp.org",
+    "cheatsheetseries.owasp.org",
+    "kubernetes.io",
+    "docs.kubernetes.io",
     "docs.docker.com",
-    "developer.hashicorp.com", "hashicorp.com", "registry.terraform.io",
-    "cert.org", "us-cert.gov",
+    "developer.hashicorp.com",
+    "hashicorp.com",
+    "registry.terraform.io",
+    "cert.org",
+    "us-cert.gov",
     # --- Scanner vendor docs — canonical source for the findings we ingest ---
-    "docs.prismacloud.io", "docs.paloaltonetworks.com",       # Checkov / Prisma Cloud
-    "avd.aquasec.com", "docs.aquasec.com", "aquasec.com",     # Trivy (Aqua Vulnerability DB)
-    "snyk.io", "security.snyk.io", "docs.snyk.io",            # Snyk
-    "docs.wiz.io",                                            # Wiz
-    "docs.tenable.com",                                       # Tenable / Nessus
-    "www.qualys.com", "qualys.com",                           # Qualys
-    "docs.github.com", "github.com",                          # GitHub advisories / security tab
+    "docs.prismacloud.io",
+    "docs.paloaltonetworks.com",  # Checkov / Prisma Cloud
+    "avd.aquasec.com",
+    "docs.aquasec.com",
+    "aquasec.com",  # Trivy (Aqua Vulnerability DB)
+    "snyk.io",
+    "security.snyk.io",
+    "docs.snyk.io",  # Snyk
+    "docs.wiz.io",  # Wiz
+    "docs.tenable.com",  # Tenable / Nessus
+    "www.qualys.com",
+    "qualys.com",  # Qualys
+    "docs.github.com",
+    "github.com",  # GitHub advisories / security tab
     # --- OS-vendor security trackers (canonical for os_vulnerability family) ---
-    "access.redhat.com", "ubuntu.com", "security-tracker.debian.org",
-    "usn.ubuntu.com", "www.suse.com",
+    "access.redhat.com",
+    "ubuntu.com",
+    "security-tracker.debian.org",
+    "usn.ubuntu.com",
+    "www.suse.com",
     # --- Language ecosystem advisory databases (canonical for vulnerable_dependency) ---
-    "advisories.dependabot.com", "osv.dev",
-    "python.org", "docs.python.org", "pypi.org",
-    "nodejs.org", "npmjs.com",
-    "maven.apache.org", "central.sonatype.com",
-    "rubygems.org", "packagist.org",
+    "advisories.dependabot.com",
+    "osv.dev",
+    "python.org",
+    "docs.python.org",
+    "pypi.org",
+    "nodejs.org",
+    "npmjs.com",
+    "maven.apache.org",
+    "central.sonatype.com",
+    "rubygems.org",
+    "packagist.org",
 }
 
 
@@ -200,7 +229,7 @@ def _agent_validation_metadata(pathway: RemediationPathway) -> ValidationMetadat
             h = urlparse(u).netloc.lower()
             if h:
                 hosts.add(h)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 — malformed URL, ignore
             pass
     authoritative_hits = hosts & _AGENT_AUTHORITATIVE_HOSTS
 
@@ -383,6 +412,7 @@ def plan_remediation(
     if settings.tavily_api_key:
         from ..trace import emit_trace  # noqa: PLC0415 (defer import — circular)
         from .agent_v2 import run_agentic_planner  # noqa: PLC0415
+
         try:
             agent_result = run_agentic_planner(
                 issue=issue,
@@ -394,7 +424,9 @@ def plan_remediation(
             )
         except Exception as e:  # noqa: BLE001
             emit_trace(
-                run_id, "sub-agent-3", "ERROR",
+                run_id,
+                "sub-agent-3",
+                "ERROR",
                 f"Agentic planner raised, falling back to hybrid: "
                 f"{type(e).__name__}: {str(e)[:200]}",
             )
@@ -417,8 +449,11 @@ def plan_remediation(
     else:
         # --- HYBRID FALLBACK — pattern-based (v1.4 prompt + pattern adaptation) ---
         from ..trace import emit_trace  # noqa: PLC0415
+
         emit_trace(
-            run_id, "sub-agent-3", "MESSAGE",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
             "Using hybrid pattern-based planner (v1.4)",
         )
         pattern = _load_pattern(sb, family)

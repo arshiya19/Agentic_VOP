@@ -55,12 +55,7 @@ def run_demo_fetch(run_id: str) -> tuple[int, dict]:
     )
 
     persisted_raws: list[dict] = (
-        sb_demo.table("raw_findings")
-        .select("id, source, raw")
-        .order("id")
-        .execute()
-        .data
-        or []
+        sb_demo.table("raw_findings").select("id, source, raw").order("id").execute().data or []
     )
 
     if not persisted_raws:

@@ -190,43 +190,73 @@ def compute_confidence(
 # WHEN ADDING A DOMAIN, ADD IT TO BOTH SETS.
 _AUTHORITATIVE_HOSTS = {
     # --- Cloud provider primary docs (Tier 1) ---
-    "docs.aws.amazon.com", "aws.amazon.com",
-    "docs.microsoft.com", "learn.microsoft.com",
-    "cloud.google.com", "docs.oracle.com",
+    "docs.aws.amazon.com",
+    "aws.amazon.com",
+    "docs.microsoft.com",
+    "learn.microsoft.com",
+    "cloud.google.com",
+    "docs.oracle.com",
     # --- Standards bodies + governments (Tier 1) ---
-    "cisecurity.org", "nvd.nist.gov", "csrc.nist.gov",
-    "cisa.gov", "www.cisa.gov",
-    "cwe.mitre.org", "capec.mitre.org", "attack.mitre.org",
+    "cisecurity.org",
+    "nvd.nist.gov",
+    "csrc.nist.gov",
+    "cisa.gov",
+    "www.cisa.gov",
+    "cwe.mitre.org",
+    "capec.mitre.org",
+    "attack.mitre.org",
     "cve.mitre.org",
     # --- Core project + community docs (Tier 2) ---
-    "owasp.org", "cheatsheetseries.owasp.org",
-    "kubernetes.io", "docs.kubernetes.io",
+    "owasp.org",
+    "cheatsheetseries.owasp.org",
+    "kubernetes.io",
+    "docs.kubernetes.io",
     "docs.docker.com",
-    "developer.hashicorp.com", "hashicorp.com", "registry.terraform.io",
-    "cert.org", "us-cert.gov",
+    "developer.hashicorp.com",
+    "hashicorp.com",
+    "registry.terraform.io",
+    "cert.org",
+    "us-cert.gov",
     # --- Scanner vendor docs — canonical source for the findings we ingest ---
-    "docs.prismacloud.io", "docs.paloaltonetworks.com",       # Checkov / Prisma Cloud
-    "avd.aquasec.com", "docs.aquasec.com", "aquasec.com",     # Trivy (Aqua Vulnerability DB)
-    "snyk.io", "security.snyk.io", "docs.snyk.io",            # Snyk
-    "docs.wiz.io",                                            # Wiz
-    "docs.tenable.com",                                       # Tenable / Nessus
-    "www.qualys.com", "qualys.com",                           # Qualys
-    "docs.github.com", "github.com",                          # GitHub advisories / security tab
+    "docs.prismacloud.io",
+    "docs.paloaltonetworks.com",  # Checkov / Prisma Cloud
+    "avd.aquasec.com",
+    "docs.aquasec.com",
+    "aquasec.com",  # Trivy (Aqua Vulnerability DB)
+    "snyk.io",
+    "security.snyk.io",
+    "docs.snyk.io",  # Snyk
+    "docs.wiz.io",  # Wiz
+    "docs.tenable.com",  # Tenable / Nessus
+    "www.qualys.com",
+    "qualys.com",  # Qualys
+    "docs.github.com",
+    "github.com",  # GitHub advisories / security tab
     # --- OS-vendor security trackers (canonical for os_vulnerability family) ---
-    "access.redhat.com", "ubuntu.com", "security-tracker.debian.org",
-    "usn.ubuntu.com", "www.suse.com",
+    "access.redhat.com",
+    "ubuntu.com",
+    "security-tracker.debian.org",
+    "usn.ubuntu.com",
+    "www.suse.com",
     # --- Language ecosystem advisory databases (canonical for vulnerable_dependency) ---
-    "advisories.dependabot.com", "osv.dev",
-    "python.org", "docs.python.org", "pypi.org",
-    "nodejs.org", "npmjs.com",
-    "maven.apache.org", "central.sonatype.com",
-    "rubygems.org", "packagist.org",
+    "advisories.dependabot.com",
+    "osv.dev",
+    "python.org",
+    "docs.python.org",
+    "pypi.org",
+    "nodejs.org",
+    "npmjs.com",
+    "maven.apache.org",
+    "central.sonatype.com",
+    "rubygems.org",
+    "packagist.org",
 }
 
 
 def _extract_hosts_from_pathway(pathway: RemediationPathway) -> list[str]:
     """All distinct hostnames the agent cited across steps + rollback + tests."""
     from urllib.parse import urlparse
+
     urls: set[str] = set()
 
     def _add(source_url):
@@ -236,7 +266,7 @@ def _extract_hosts_from_pathway(pathway: RemediationPathway) -> list[str]:
             host = urlparse(source_url).netloc.lower()
             if host:
                 urls.add(host)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 — malformed URL, ignore
             pass
 
     for step in pathway.remediation_steps or []:
@@ -271,6 +301,7 @@ def compute_confidence_agentic(
     # Include verifier's cross-verification URLs — they're independent sources
     # the verifier's targeted search surfaced, and count as authority signal.
     from urllib.parse import urlparse
+
     pathway_hosts = set(_extract_hosts_from_pathway(pathway))
     verifier_hosts: set[str] = set()
     if verification_report and verification_report.verification_urls:
@@ -279,7 +310,7 @@ def compute_confidence_agentic(
                 h = urlparse(u).netloc.lower()
                 if h:
                     verifier_hosts.add(h)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110 — malformed URL, ignore
                 pass
     all_hosts = pathway_hosts | verifier_hosts
     tier12_count = sum(1 for h in all_hosts if h in _AUTHORITATIVE_HOSTS)
@@ -328,7 +359,8 @@ def compute_confidence_agentic(
         depth_penalty = min(15, len(r.depth_flags) * 5)
     da_score = max(0, 15 - depth_penalty)
     da_reason = (
-        f"{len(r.depth_flags)} depth shortfall(s)" if r and r.depth_flags
+        f"{len(r.depth_flags)} depth shortfall(s)"
+        if r and r.depth_flags
         else "Meets per-family minimum depths"
     )
 
@@ -350,7 +382,8 @@ def compute_confidence_agentic(
             eu_notes.append("public-facing")
     eu_score = max(0, eu_score)
     eu_reason = (
-        "Low-risk env" if not eu_notes
+        "Low-risk env"
+        if not eu_notes
         else f"Higher-risk env ({', '.join(eu_notes)}) — penalizes confidence"
     )
 
@@ -360,11 +393,11 @@ def compute_confidence_agentic(
     return {
         "score": total,
         "components": {
-            "source_authority":       {"score": sa_score, "max_score": 30, "reason": sa_reason},
-            "consensus":              {"score": cs_score, "max_score": 25, "reason": cs_reason},
+            "source_authority": {"score": sa_score, "max_score": 30, "reason": sa_reason},
+            "consensus": {"score": cs_score, "max_score": 25, "reason": cs_reason},
             "verification_cleanliness": {"score": vc_score, "max_score": 20, "reason": vc_reason},
-            "depth_adequacy":         {"score": da_score, "max_score": 15, "reason": da_reason},
-            "environmental":          {"score": eu_score, "max_score": 10, "reason": eu_reason},
+            "depth_adequacy": {"score": da_score, "max_score": 15, "reason": da_reason},
+            "environmental": {"score": eu_score, "max_score": 10, "reason": eu_reason},
         },
         "approval_required": _derive_approval(total, issue.get("priority")),
     }

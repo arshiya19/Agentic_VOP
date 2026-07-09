@@ -19,8 +19,8 @@ from ....config import settings
 # for budget math. Free tiers return 0 real cost; the counter still fires so we
 # exercise cap logic during dev.
 _COST_PER_TOOL_USD = {
-    "web_search": 0.05,   # Tavily advanced tier estimate
-    "url_fetch": 0.001,    # Effectively free (bandwidth only), rounded up
+    "web_search": 0.05,  # Tavily advanced tier estimate
+    "url_fetch": 0.001,  # Effectively free (bandwidth only), rounded up
 }
 
 

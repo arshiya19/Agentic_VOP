@@ -44,15 +44,13 @@ _MAX_HTML_BYTES = 200 * 1024
 
 # Identifies us honestly + gives site operators a way to reach us if we're
 # being noisy. Bots that identify themselves get through robots.txt more often.
-_USER_AGENT = (
-    "SisyfixAgentic/0.1 (+security-remediation-research; contact via HTTP headers)"
-)
+_USER_AGENT = "SisyfixAgentic/0.1 (+security-remediation-research; contact via HTTP headers)"
 
 # Content-quality thresholds. Pages under these bars can't sustain a detailed
 # remediation package — the LLM will happily write shallow steps unless we
 # push back explicitly. See _quality_warning below.
-_QUALITY_EMPTY_THRESHOLD = 100    # essentially unusable — JS-rendered SPA / error page
-_QUALITY_THIN_THRESHOLD = 400     # extractable but sparse — should not be sole source
+_QUALITY_EMPTY_THRESHOLD = 100  # essentially unusable — JS-rendered SPA / error page
+_QUALITY_THIN_THRESHOLD = 400  # extractable but sparse — should not be sole source
 
 
 def fetch_url(
@@ -85,9 +83,10 @@ def fetch_url(
 
     if emit_fn and run_id:
         emit_fn(
-            run_id, "sub-agent-3", "MESSAGE",
-            f"📄 Fetching URL: {url[:150]}"
-            f" (call {budget.call_count + 1}/{budget.max_calls})",
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"📄 Fetching URL: {url[:150]} (call {budget.call_count + 1}/{budget.max_calls})",
         )
 
     start = time.time()
@@ -101,7 +100,9 @@ def fetch_url(
     except httpx.HTTPError as e:
         if emit_fn and run_id:
             emit_fn(
-                run_id, "sub-agent-3", "ERROR",
+                run_id,
+                "sub-agent-3",
+                "ERROR",
                 f"Fetch failed for {url[:100]}: {type(e).__name__}: {str(e)[:150]}",
             )
         # Still record the call — a failed fetch costs bandwidth + our attention
@@ -114,7 +115,9 @@ def fetch_url(
     if resp.status_code >= 400:
         if emit_fn and run_id:
             emit_fn(
-                run_id, "sub-agent-3", "ERROR",
+                run_id,
+                "sub-agent-3",
+                "ERROR",
                 f"HTTP {resp.status_code} from {url[:100]}",
             )
         raise RuntimeError(f"HTTP {resp.status_code} from {url}")
@@ -128,13 +131,16 @@ def fetch_url(
     raw = resp.content[:_MAX_HTML_BYTES]
 
     # Extract clean text/markdown. output='markdown' preserves code blocks.
-    extracted = trafilatura.extract(
-        raw,
-        output_format="markdown",
-        include_comments=False,
-        include_tables=True,
-        favor_precision=True,
-    ) or ""
+    extracted = (
+        trafilatura.extract(
+            raw,
+            output_format="markdown",
+            include_comments=False,
+            include_tables=True,
+            favor_precision=True,
+        )
+        or ""
+    )
 
     # Title extraction — trafilatura's metadata pass
     title = ""
@@ -142,13 +148,15 @@ def fetch_url(
         meta = trafilatura.extract_metadata(raw)
         if meta and getattr(meta, "title", None):
             title = meta.title
-    except Exception:  # noqa: BLE001 — metadata is best-effort
+    except Exception:  # noqa: BLE001, S110 — metadata is best-effort
         pass
 
     # Truncate to what Sub-Agent 3 can actually consume in context
     truncated = False
     if len(extracted) > max_chars_returned:
-        extracted = extracted[:max_chars_returned] + "\n\n[... truncated for LLM context budget ...]"
+        extracted = (
+            extracted[:max_chars_returned] + "\n\n[... truncated for LLM context budget ...]"
+        )
         truncated = True
 
     # Assess extraction quality — pages under our thresholds get an explicit
@@ -157,15 +165,17 @@ def fetch_url(
     quality_warning = _quality_warning(len(extracted), url)
 
     if emit_fn and run_id:
-        base = (
-            f"Fetched {len(extracted)} chars in {elapsed_ms}ms"
-            + (" (truncated)" if truncated else "")
+        base = f"Fetched {len(extracted)} chars in {elapsed_ms}ms" + (
+            " (truncated)" if truncated else ""
         )
         if quality_warning:
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
-                f"⚠ {quality_warning['level']} CONTENT — {base}"
-                f" — {title[:60]}" if title else f"⚠ {quality_warning['level']} — {base}",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                f"⚠ {quality_warning['level']} CONTENT — {base} — {title[:60]}"
+                if title
+                else f"⚠ {quality_warning['level']} — {base}",
             )
         elif title:
             emit_fn(run_id, "sub-agent-3", "MESSAGE", f"{base} — {title[:80]}")
@@ -182,7 +192,7 @@ def fetch_url(
         "status_code": resp.status_code,
         "content_type": ctype,
         "elapsed_ms": elapsed_ms,
-        "quality_warning": quality_warning,   # None on healthy extractions
+        "quality_warning": quality_warning,  # None on healthy extractions
     }
 
 

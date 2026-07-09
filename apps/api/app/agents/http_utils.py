@@ -102,6 +102,7 @@ def _log_retry(
     if run_id and agent:
         if emit_fn is None:
             from .trace import emit_trace  # noqa: PLC0415
+
             emit_fn = emit_trace
 
         error_type = type(error).__name__

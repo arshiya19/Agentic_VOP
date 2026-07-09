@@ -75,18 +75,36 @@ _UNFILLED_PLACEHOLDER_PATTERNS: list[tuple[str, re.Pattern, str]] = [
 # reveals it's a product / marketplace / pricing / console page, not docs.
 # =============================================================================
 _LOW_AUTHORITY_PATH_PATTERNS: list[tuple[str, re.Pattern, str]] = [
-    ("marketplace", re.compile(r"/marketplace/", re.IGNORECASE),
-     "Marketplace listing (product page, not remediation guidance)."),
-    ("product-page", re.compile(r"/products?/(?![^/]+/docs?/)", re.IGNORECASE),
-     "Product/service landing page, not documentation."),
-    ("pricing", re.compile(r"/pricing/?", re.IGNORECASE),
-     "Pricing page, not remediation guidance."),
-    ("console", re.compile(r"console\.(aws|cloud\.google|azure)", re.IGNORECASE),
-     "AWS/GCP/Azure console URL — user-facing UI, not documentation."),
-    ("faq", re.compile(r"/faq/?|/support/answer/", re.IGNORECASE),
-     "FAQ page — usually generic, not remediation-specific."),
-    ("blog-index", re.compile(r"/blog/?$|/blog/tag/|/blog/category/", re.IGNORECASE),
-     "Blog index / tag / category page — not a specific article."),
+    (
+        "marketplace",
+        re.compile(r"/marketplace/", re.IGNORECASE),
+        "Marketplace listing (product page, not remediation guidance).",
+    ),
+    (
+        "product-page",
+        re.compile(r"/products?/(?![^/]+/docs?/)", re.IGNORECASE),
+        "Product/service landing page, not documentation.",
+    ),
+    (
+        "pricing",
+        re.compile(r"/pricing/?", re.IGNORECASE),
+        "Pricing page, not remediation guidance.",
+    ),
+    (
+        "console",
+        re.compile(r"console\.(aws|cloud\.google|azure)", re.IGNORECASE),
+        "AWS/GCP/Azure console URL — user-facing UI, not documentation.",
+    ),
+    (
+        "faq",
+        re.compile(r"/faq/?|/support/answer/", re.IGNORECASE),
+        "FAQ page — usually generic, not remediation-specific.",
+    ),
+    (
+        "blog-index",
+        re.compile(r"/blog/?$|/blog/tag/|/blog/category/", re.IGNORECASE),
+        "Blog index / tag / category page — not a specific article.",
+    ),
 ]
 
 
@@ -94,11 +112,11 @@ _LOW_AUTHORITY_PATH_PATTERNS: list[tuple[str, re.Pattern, str]] = [
 # Per-family minimum step depth — the LLM often under-produces; flag if so
 # =============================================================================
 _MIN_STEPS_BY_FAMILY = {
-    "public_exposure":       6,
-    "network_exposure":      6,
-    "injection":             6,
+    "public_exposure": 6,
+    "network_exposure": 6,
+    "injection": 6,
     "vulnerable_dependency": 8,
-    "os_vulnerability":      6,
+    "os_vulnerability": 6,
 }
 _MIN_VALIDATION_TESTS = 3
 _MIN_TEST_SCRIPTS = 2
@@ -195,8 +213,8 @@ class VerificationReport:
 
     total_steps: int = 0
     total_commands_examined: int = 0
-    cross_verified: int = 0          # command found in a second source
-    single_source: int = 0            # command only in original citation
+    cross_verified: int = 0  # command found in a second source
+    single_source: int = 0  # command only in original citation
     destructive_flags: list[dict] = field(default_factory=list)
     placeholder_flags: list[dict] = field(default_factory=list)
     low_authority_flags: list[dict] = field(default_factory=list)
@@ -289,16 +307,62 @@ _INLINE_BACKTICK_RE = re.compile(r"`([^`\n]{6,200})`")
 # Words that hint an inline backtick is code (`aws s3 cp ...`, `terraform ...`).
 # Filters out prose backticks like `Amazon S3` or `Access Denied`.
 _CMD_HEAD_TOKENS = (
-    "aws ", "az ", "gcloud ", "kubectl ", "helm ", "docker ",
-    "terraform ", "tf ", "ansible ", "chef ", "puppet ",
-    "curl ", "wget ", "openssl ", "ssh ", "scp ", "rsync ",
-    "iptables ", "ufw ", "firewall-cmd ", "systemctl ", "service ",
-    "yum ", "apt ", "apt-get ", "dnf ", "zypper ", "pacman ", "brew ",
-    "pip ", "pip3 ", "npm ", "yarn ", "pnpm ", "mvn ", "gradle ",
-    "python ", "python3 ", "node ", "ruby ", "go ", "java ",
-    "git ", "make ", "cmake ", "bash ", "sh ",
-    "select ", "insert ", "update ", "delete ", "create ", "alter ", "drop ",
-    "grant ", "revoke ",
+    "aws ",
+    "az ",
+    "gcloud ",
+    "kubectl ",
+    "helm ",
+    "docker ",
+    "terraform ",
+    "tf ",
+    "ansible ",
+    "chef ",
+    "puppet ",
+    "curl ",
+    "wget ",
+    "openssl ",
+    "ssh ",
+    "scp ",
+    "rsync ",
+    "iptables ",
+    "ufw ",
+    "firewall-cmd ",
+    "systemctl ",
+    "service ",
+    "yum ",
+    "apt ",
+    "apt-get ",
+    "dnf ",
+    "zypper ",
+    "pacman ",
+    "brew ",
+    "pip ",
+    "pip3 ",
+    "npm ",
+    "yarn ",
+    "pnpm ",
+    "mvn ",
+    "gradle ",
+    "python ",
+    "python3 ",
+    "node ",
+    "ruby ",
+    "go ",
+    "java ",
+    "git ",
+    "make ",
+    "cmake ",
+    "bash ",
+    "sh ",
+    "select ",
+    "insert ",
+    "update ",
+    "delete ",
+    "create ",
+    "alter ",
+    "drop ",
+    "grant ",
+    "revoke ",
 )
 
 
@@ -399,7 +463,9 @@ def verify_output(
         return report
 
     emit_fn(
-        run_id, "sub-agent-3", "MESSAGE",
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
         f"🔎 Verification pass starting — will cross-check up to "
         f"{max_commands_to_verify} commands against 2+ sources",
     )
@@ -419,17 +485,20 @@ def verify_output(
             # --- Low-authority URL check (path-based, cheap) ---
             for name, pattern, explanation in _LOW_AUTHORITY_PATH_PATTERNS:
                 if pattern.search(original_url):
-                    report.low_authority_flags.append({
-                        "pathway_idx": p_idx,
-                        "step_num": step_num,
-                        "pattern": name,
-                        "url": original_url,
-                        "explanation": explanation,
-                    })
+                    report.low_authority_flags.append(
+                        {
+                            "pathway_idx": p_idx,
+                            "step_num": step_num,
+                            "pattern": name,
+                            "url": original_url,
+                            "explanation": explanation,
+                        }
+                    )
                     emit_fn(
-                        run_id, "sub-agent-3", "MESSAGE",
-                        f"⚠ Step {step_num} cites low-authority URL "
-                        f"({name}): {original_url[:100]}",
+                        run_id,
+                        "sub-agent-3",
+                        "MESSAGE",
+                        f"⚠ Step {step_num} cites low-authority URL ({name}): {original_url[:100]}",
                     )
                     break  # one flag per step is enough
 
@@ -443,17 +512,25 @@ def verify_output(
                     if m:
                         # Skip curl's %{http_code} format specifier — legit
                         match_text = m.group(0)
-                        if match_text == "{http_code}" and "%" in target[max(0, m.start()-1):m.start()+len(match_text)+1]:
+                        if (
+                            match_text == "{http_code}"
+                            and "%"
+                            in target[max(0, m.start() - 1) : m.start() + len(match_text) + 1]
+                        ):
                             continue
-                        report.placeholder_flags.append({
-                            "pathway_idx": p_idx,
-                            "step_num": step_num,
-                            "pattern": name,
-                            "match": match_text,
-                            "explanation": explanation,
-                        })
+                        report.placeholder_flags.append(
+                            {
+                                "pathway_idx": p_idx,
+                                "step_num": step_num,
+                                "pattern": name,
+                                "match": match_text,
+                                "explanation": explanation,
+                            }
+                        )
                         emit_fn(
-                            run_id, "sub-agent-3", "MESSAGE",
+                            run_id,
+                            "sub-agent-3",
+                            "MESSAGE",
                             f"🔴 Step {step_num}: unfilled placeholder "
                             f"'{match_text}' — command unrunnable as-is",
                         )
@@ -466,16 +543,20 @@ def verify_output(
             for cmd in commands:
                 for name, pattern, severity, explanation in _DESTRUCTIVE_PATTERNS:
                     if pattern.search(cmd):
-                        report.destructive_flags.append({
-                            "pathway_idx": p_idx,
-                            "step_num": step_num,
-                            "pattern": name,
-                            "severity": severity,
-                            "explanation": explanation,
-                            "command_snippet": _short_command(cmd),
-                        })
+                        report.destructive_flags.append(
+                            {
+                                "pathway_idx": p_idx,
+                                "step_num": step_num,
+                                "pattern": name,
+                                "severity": severity,
+                                "explanation": explanation,
+                                "command_snippet": _short_command(cmd),
+                            }
+                        )
                         emit_fn(
-                            run_id, "sub-agent-3", "MESSAGE",
+                            run_id,
+                            "sub-agent-3",
+                            "MESSAGE",
                             f"⚠ [{severity.upper()}] Step {step_num}: destructive "
                             f"pattern '{name}' detected — {explanation}",
                         )
@@ -488,12 +569,14 @@ def verify_output(
 
     # ---- 2. Cross-source verify up to N unique commands ----
     to_verify = candidates[:max_commands_to_verify]
-    for p_idx, step_num, original_url, cmd in to_verify:
+    for _p_idx, step_num, original_url, cmd in to_verify:
         allowed, _ = budget.can_call()
         if not allowed:
             report.skipped_due_to_budget = True
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 "Verification: budget exhausted — remaining commands unverified",
             )
             break
@@ -512,7 +595,9 @@ def verify_output(
             )
         except Exception as e:  # noqa: BLE001
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 f"Verification search failed for step {step_num}: "
                 f"{type(e).__name__}: {str(e)[:150]}",
             )
@@ -527,17 +612,17 @@ def verify_output(
             if _host_of(r["url"]) and _host_of(r["url"]) != original_host
         }
         supporting_urls = [
-            r["url"] for r in search["results"]
-            if _host_of(r["url"]) in supporting_hosts
+            r["url"] for r in search["results"] if _host_of(r["url"]) in supporting_hosts
         ]
 
         if supporting_hosts:
             report.cross_verified += 1
             report.verification_urls.extend(supporting_urls[:2])
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
-                f"✓ Step {step_num} command verified across "
-                f"{1 + len(supporting_hosts)} sources",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                f"✓ Step {step_num} command verified across {1 + len(supporting_hosts)} sources",
             )
         else:
             report.single_source += 1
@@ -547,7 +632,9 @@ def verify_output(
                 "recommend independent verification before production apply."
             )
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 f"⚠ Step {step_num} command NOT independently verified "
                 f"({original_host or 'origin'} only)",
             )
@@ -562,43 +649,51 @@ def verify_output(
             rb_step_count = len(pathway.rollback_plan.steps or []) if pathway.rollback_plan else 0
 
             if step_count < min_steps:
-                report.depth_flags.append({
-                    "pathway_idx": p_idx,
-                    "message": (
-                        f"Only {step_count} remediation steps for family '{family}' "
-                        f"(expected ≥ {min_steps}). Package likely missing steps "
-                        "(backup? staging apply? monitoring window?)."
-                    ),
-                })
+                report.depth_flags.append(
+                    {
+                        "pathway_idx": p_idx,
+                        "message": (
+                            f"Only {step_count} remediation steps for family '{family}' "
+                            f"(expected ≥ {min_steps}). Package likely missing steps "
+                            "(backup? staging apply? monitoring window?)."
+                        ),
+                    }
+                )
             if test_count < _MIN_VALIDATION_TESTS:
-                report.depth_flags.append({
-                    "pathway_idx": p_idx,
-                    "message": (
-                        f"Only {test_count} validation test(s) (expected ≥ "
-                        f"{_MIN_VALIDATION_TESTS}). Consider tests for: "
-                        "positive assertion, negative assertion, and monitoring."
-                    ),
-                })
+                report.depth_flags.append(
+                    {
+                        "pathway_idx": p_idx,
+                        "message": (
+                            f"Only {test_count} validation test(s) (expected ≥ "
+                            f"{_MIN_VALIDATION_TESTS}). Consider tests for: "
+                            "positive assertion, negative assertion, and monitoring."
+                        ),
+                    }
+                )
             if script_count < _MIN_TEST_SCRIPTS:
-                report.depth_flags.append({
-                    "pathway_idx": p_idx,
-                    "message": (
-                        f"Only {script_count} test script(s) (expected ≥ "
-                        f"{_MIN_TEST_SCRIPTS}). Consider adding a rollback script + "
-                        "a smoke test script."
-                    ),
-                })
+                report.depth_flags.append(
+                    {
+                        "pathway_idx": p_idx,
+                        "message": (
+                            f"Only {script_count} test script(s) (expected ≥ "
+                            f"{_MIN_TEST_SCRIPTS}). Consider adding a rollback script + "
+                            "a smoke test script."
+                        ),
+                    }
+                )
             if pathway.rollback_plan and pathway.rollback_plan.supported:
                 min_rb = max(2, int(step_count * _MIN_ROLLBACK_STEPS_RATIO))
                 if rb_step_count < min_rb:
-                    report.depth_flags.append({
-                        "pathway_idx": p_idx,
-                        "message": (
-                            f"Rollback has only {rb_step_count} step(s) for a "
-                            f"{step_count}-step remediation (expected ≥ {min_rb}). "
-                            "Rollback should mirror remediation depth."
-                        ),
-                    })
+                    report.depth_flags.append(
+                        {
+                            "pathway_idx": p_idx,
+                            "message": (
+                                f"Rollback has only {rb_step_count} step(s) for a "
+                                f"{step_count}-step remediation (expected ≥ {min_rb}). "
+                                "Rollback should mirror remediation depth."
+                            ),
+                        }
+                    )
 
     # ---- 4. Stitch report notes into each pathway's considerations ----
     aggregate_notes = report.to_considerations()
@@ -611,7 +706,9 @@ def verify_output(
             pathway.considerations = existing
 
     emit_fn(
-        run_id, "sub-agent-3", "MESSAGE",
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
         f"Verification complete — cross_verified={report.cross_verified}, "
         f"single_source={report.single_source}, "
         f"destructive_flags={len(report.destructive_flags)}, "
@@ -654,14 +751,19 @@ def scan_placeholder_flags(output: LLMRemediationOutput) -> list[dict]:
                         continue
                     match_text = m.group(0)
                     # Skip curl's %{http_code} format specifier — legit
-                    if match_text == "{http_code}" and "%" in target[max(0, m.start() - 1):m.start() + len(match_text) + 1]:
+                    if (
+                        match_text == "{http_code}"
+                        and "%" in target[max(0, m.start() - 1) : m.start() + len(match_text) + 1]
+                    ):
                         continue
-                    flags.append({
-                        "pathway_idx": p_idx,
-                        "step_num": step_num,
-                        "pattern": name,
-                        "match": match_text,
-                        "explanation": explanation,
-                    })
+                    flags.append(
+                        {
+                            "pathway_idx": p_idx,
+                            "step_num": step_num,
+                            "pattern": name,
+                            "match": match_text,
+                            "explanation": explanation,
+                        }
+                    )
                     break  # one per step is enough
     return flags

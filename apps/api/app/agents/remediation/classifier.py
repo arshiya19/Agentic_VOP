@@ -45,60 +45,60 @@ Family = str  # one of the 5 above + 'unknown'
 # =============================================================================
 _CHECKOV_RESOURCE_FAMILY: dict[str, Family] = {
     # ---- public_exposure ----
-    "aws_s3_bucket":            "public_exposure",
-    "aws_s3_object":            "public_exposure",
-    "aws_rds_":                 "public_exposure",
-    "aws_db_instance":          "public_exposure",
-    "aws_db_cluster":           "public_exposure",
-    "aws_dynamodb_":            "public_exposure",
-    "aws_iam_":                 "public_exposure",
-    "aws_cloudtrail":           "public_exposure",
-    "aws_config_":              "public_exposure",
-    "aws_kms_":                 "public_exposure",
-    "aws_secretsmanager_":      "public_exposure",
-    "aws_efs_":                 "public_exposure",
-    "aws_elasticsearch_":       "public_exposure",
-    "aws_opensearch_":          "public_exposure",
-    "aws_redshift_":            "public_exposure",
-    "aws_kinesis_":             "public_exposure",
-    "aws_sns_":                 "public_exposure",
-    "aws_sqs_":                 "public_exposure",
-    "aws_glacier_":             "public_exposure",
-    "aws_backup_":              "public_exposure",
+    "aws_s3_bucket": "public_exposure",
+    "aws_s3_object": "public_exposure",
+    "aws_rds_": "public_exposure",
+    "aws_db_instance": "public_exposure",
+    "aws_db_cluster": "public_exposure",
+    "aws_dynamodb_": "public_exposure",
+    "aws_iam_": "public_exposure",
+    "aws_cloudtrail": "public_exposure",
+    "aws_config_": "public_exposure",
+    "aws_kms_": "public_exposure",
+    "aws_secretsmanager_": "public_exposure",
+    "aws_efs_": "public_exposure",
+    "aws_elasticsearch_": "public_exposure",
+    "aws_opensearch_": "public_exposure",
+    "aws_redshift_": "public_exposure",
+    "aws_kinesis_": "public_exposure",
+    "aws_sns_": "public_exposure",
+    "aws_sqs_": "public_exposure",
+    "aws_glacier_": "public_exposure",
+    "aws_backup_": "public_exposure",
     # ---- network_exposure ----
-    "aws_security_group":       "network_exposure",
+    "aws_security_group": "network_exposure",
     "aws_default_security_group": "network_exposure",
-    "aws_lb":                   "network_exposure",
-    "aws_alb":                  "network_exposure",
-    "aws_elb":                  "network_exposure",
-    "aws_lb_listener":          "network_exposure",
-    "aws_route53_":             "network_exposure",
-    "aws_vpc":                  "network_exposure",
-    "aws_network_acl":          "network_exposure",
-    "aws_network_interface":    "network_exposure",
-    "aws_subnet":               "network_exposure",
-    "aws_route_table":          "network_exposure",
-    "aws_route":                "network_exposure",
-    "aws_internet_gateway":     "network_exposure",
-    "aws_nat_gateway":          "network_exposure",
-    "aws_vpn_":                 "network_exposure",
-    "aws_cloudfront_":          "network_exposure",
-    "aws_apigatewayv2_stage":   "network_exposure",
+    "aws_lb": "network_exposure",
+    "aws_alb": "network_exposure",
+    "aws_elb": "network_exposure",
+    "aws_lb_listener": "network_exposure",
+    "aws_route53_": "network_exposure",
+    "aws_vpc": "network_exposure",
+    "aws_network_acl": "network_exposure",
+    "aws_network_interface": "network_exposure",
+    "aws_subnet": "network_exposure",
+    "aws_route_table": "network_exposure",
+    "aws_route": "network_exposure",
+    "aws_internet_gateway": "network_exposure",
+    "aws_nat_gateway": "network_exposure",
+    "aws_vpn_": "network_exposure",
+    "aws_cloudfront_": "network_exposure",
+    "aws_apigatewayv2_stage": "network_exposure",
     # ---- injection (code execution surfaces) ----
-    "aws_lambda_":              "injection",
-    "aws_api_gateway_":         "injection",
-    "aws_apigatewayv2_api":     "injection",
-    "aws_ecs_":                 "injection",
-    "aws_eks_":                 "injection",
-    "aws_ecr_":                 "injection",
-    "aws_codebuild_":           "injection",
+    "aws_lambda_": "injection",
+    "aws_api_gateway_": "injection",
+    "aws_apigatewayv2_api": "injection",
+    "aws_ecs_": "injection",
+    "aws_eks_": "injection",
+    "aws_ecr_": "injection",
+    "aws_codebuild_": "injection",
     # ---- os_vulnerability (compute hardening) ----
-    "aws_instance":             "os_vulnerability",
-    "aws_ebs_":                 "os_vulnerability",
-    "aws_ami":                  "os_vulnerability",
-    "aws_launch_":              "os_vulnerability",
-    "aws_autoscaling_":         "os_vulnerability",
-    "aws_ssm_":                 "os_vulnerability",
+    "aws_instance": "os_vulnerability",
+    "aws_ebs_": "os_vulnerability",
+    "aws_ami": "os_vulnerability",
+    "aws_launch_": "os_vulnerability",
+    "aws_autoscaling_": "os_vulnerability",
+    "aws_ssm_": "os_vulnerability",
 }
 
 
@@ -141,8 +141,15 @@ def _canonical_source(source: str) -> str:
 _OS_PURL_PREFIXES = ("pkg:apk", "pkg:deb", "pkg:rpm")
 # Purl ecosystems that indicate application-level packages.
 _APP_PURL_PREFIXES = (
-    "pkg:npm", "pkg:pypi", "pkg:maven", "pkg:gem", "pkg:cargo",
-    "pkg:nuget", "pkg:golang", "pkg:go", "pkg:composer",
+    "pkg:npm",
+    "pkg:pypi",
+    "pkg:maven",
+    "pkg:gem",
+    "pkg:cargo",
+    "pkg:nuget",
+    "pkg:golang",
+    "pkg:go",
+    "pkg:composer",
 )
 
 
@@ -172,7 +179,7 @@ _INJECTION_CWES = {
     "CWE-79",  # XSS
     "CWE-74",  # Generic Injection
     "CWE-98",  # PHP Remote File Inclusion
-    "CWE-611", # XML External Entity
+    "CWE-611",  # XML External Entity
 }
 _ACCESS_CONTROL_CWES = {
     "CWE-284",  # Improper Access Control
@@ -192,8 +199,8 @@ _ACCESS_CONTROL_CWES = {
     "CWE-326",  # Inadequate Encryption Strength
 }
 _NETWORK_EXPOSURE_CWES = {
-    "CWE-1188", # Insecure Default Init of Resource
-    "CWE-16",   # Configuration
+    "CWE-1188",  # Insecure Default Init of Resource
+    "CWE-16",  # Configuration
     "CWE-923",  # Improper Restriction of Communication Channel
     "CWE-940",  # Improper Verification of Source of Message
 }
@@ -217,35 +224,35 @@ def _classify_by_cwe(cwe: str) -> Family:
 # =============================================================================
 _SOURCE_HINT: dict[str, Family] = {
     # SCA scanners typically emit package findings — hint = vulnerable_dependency
-    "snyk-appsec":        "vulnerable_dependency",
-    "snyk":               "vulnerable_dependency",
-    "dependabot":         "vulnerable_dependency",
-    "osv":                "vulnerable_dependency",
-    "trivy-fs":           "vulnerable_dependency",
-    "trivy-image":        "vulnerable_dependency",
-    "trivy-cloud":        "vulnerable_dependency",
-    "trivy-config":       "vulnerable_dependency",
+    "snyk-appsec": "vulnerable_dependency",
+    "snyk": "vulnerable_dependency",
+    "dependabot": "vulnerable_dependency",
+    "osv": "vulnerable_dependency",
+    "trivy-fs": "vulnerable_dependency",
+    "trivy-image": "vulnerable_dependency",
+    "trivy-cloud": "vulnerable_dependency",
+    "trivy-config": "vulnerable_dependency",
     # Host/VM scanners — hint = os_vulnerability
     "tenable-nessus-vuln": "os_vulnerability",
-    "tenable":             "os_vulnerability",
-    "qualys-vmdr-vuln":    "os_vulnerability",
-    "qualys":              "os_vulnerability",
-    "rapid7":              "os_vulnerability",
-    "grype":               "os_vulnerability",
-    "trivy-os":            "os_vulnerability",
+    "tenable": "os_vulnerability",
+    "qualys-vmdr-vuln": "os_vulnerability",
+    "qualys": "os_vulnerability",
+    "rapid7": "os_vulnerability",
+    "grype": "os_vulnerability",
+    "trivy-os": "os_vulnerability",
     # SAST/DAST — hint = injection
-    "sonarqube-appsec":    "injection",
-    "sonarqube":           "injection",
-    "semgrep-appsec":      "injection",
-    "semgrep":             "injection",
-    "burp-suite":          "injection",
-    "burp":                "injection",
-    "zap":                 "injection",
-    "owasp-zap":           "injection",
+    "sonarqube-appsec": "injection",
+    "sonarqube": "injection",
+    "semgrep-appsec": "injection",
+    "semgrep": "injection",
+    "burp-suite": "injection",
+    "burp": "injection",
+    "zap": "injection",
+    "owasp-zap": "injection",
     # IaC / CSPM — hint = public_exposure (most misconfigs are access-control)
-    "checkov":             "public_exposure",
-    "wiz":                 "public_exposure",
-    "prisma-cloud":        "public_exposure",
+    "checkov": "public_exposure",
+    "wiz": "public_exposure",
+    "prisma-cloud": "public_exposure",
 }
 
 
@@ -336,9 +343,15 @@ def classify_finding(issue: dict, raw: dict | None = None) -> Family:
     if any(
         kw in title
         for kw in (
-            "sql injection", "command injection", "code injection",
-            "ldap injection", "xml injection", "template injection",
-            "xss", "cross-site scripting", "cross site scripting",
+            "sql injection",
+            "command injection",
+            "code injection",
+            "ldap injection",
+            "xml injection",
+            "template injection",
+            "xss",
+            "cross-site scripting",
+            "cross site scripting",
         )
     ):
         return "injection"
@@ -348,11 +361,7 @@ def classify_finding(issue: dict, raw: dict | None = None) -> Family:
     ):
         return "public_exposure"
 
-    if (
-        "0.0.0.0/0" in title
-        or "security group" in title
-        or "open port" in title
-    ):
+    if "0.0.0.0/0" in title or "security group" in title or "open port" in title:
         return "network_exposure"
 
     # =========================================================================
