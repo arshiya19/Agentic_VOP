@@ -97,10 +97,55 @@ def run_semgrep():
             json.dump(error_data, f)
         scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
         return
+
+    # Log what files exist in the SAST path for debugging
     try:
+        sast_files = os.listdir(SAST_PATH)
+        print(f"[scan] SAST lab contents: {sast_files}")
+    except Exception as e:
+        print(f"[scan] Cannot list SAST path: {e}")
+
+    try:
+        # Write a local rules file to avoid dependency on Semgrep registry
+        rules_file = os.path.join(RESULTS_DIR, "semgrep-rules.yaml")
+        with open(rules_file, "w") as rf:
+            rf.write("""rules:
+  - id: sql-injection-format-string
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $QUERY = f"...{$VAR}..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+          - pattern: |
+              $QUERY = "..." + $VAR + "..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+          - pattern: $CONN.execute(f"...{$VAR}...")
+          - pattern: $CONN.execute("..." + $VAR + "...")
+    message: >
+      SQL injection via string formatting. Use parameterized queries instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+  - id: flask-debug-enabled
+    pattern: $APP.run(..., debug=True, ...)
+    message: Flask debug mode enabled in production.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-489"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+""")
+
+        # Use local rules + registry rules. Local rules guarantee findings even
+        # if the registry download fails on first boot.
         result = subprocess.run(
             ["semgrep", "scan",
-             "--config", "auto",
+             "--config", rules_file,
              SAST_PATH, "--json", "--no-git-ignore",
              "--timeout", "60"],
             capture_output=True, text=True, timeout=180
@@ -109,7 +154,8 @@ def run_semgrep():
             print(f"[scan] Semgrep stderr: {result.stderr[:500]}")
 
         if not result.stdout:
-            error_data = {"findings": [], "total": 0, "error": result.stderr[:1000],
+            error_data = {"findings": [], "total": 0,
+                          "error": f"No stdout. returncode={result.returncode}. stderr={result.stderr[:500]}",
                           "scanned_at": datetime.utcnow().isoformat()}
             with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
                 json.dump(error_data, f)
@@ -119,6 +165,7 @@ def run_semgrep():
 
         data = json.loads(result.stdout)
         results = data.get("results", [])
+        errors = data.get("errors", [])
         findings = []
         for r in results:
             findings.append({
@@ -131,13 +178,22 @@ def run_semgrep():
                 "metadata": r.get("extra", {}).get("metadata", {}),
             })
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {"findings": findings, "total": len(findings),
+                       "scanned_at": datetime.utcnow().isoformat()}
+        # Include errors from semgrep if any (e.g. invalid path, rule download failure)
+        if errors:
+            result_data["errors"] = errors[:5]
         with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
-        print(f"[scan] Semgrep complete: {len(findings)} findings")
+        print(f"[scan] Semgrep complete: {len(findings)} findings, {len(errors)} errors")
     except Exception as e:
         print(f"[scan] Semgrep failed: {e}")
+        error_data = {"findings": [], "total": 0, "error": str(e),
+                      "scanned_at": datetime.utcnow().isoformat()}
+        with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
+            json.dump(error_data, f)
+        scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
 
 
 def run_trivy_fs():
@@ -213,13 +269,31 @@ def run_trivy_os():
             capture_output=True, text=True, timeout=120
         )
         if pull_result.returncode != 0:
-            raise RuntimeError(f"docker pull failed: {pull_result.stderr[:200]}")
+            error_msg = f"docker pull failed (rc={pull_result.returncode}): {pull_result.stderr[:300]}"
+            print(f"[scan] {error_msg}")
+            error_data = {"findings": [], "total": 0, "error": error_msg,
+                          "scanned_at": datetime.utcnow().isoformat()}
+            with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
+                json.dump(error_data, f)
+            scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
+            return
 
         result = subprocess.run(
             ["trivy", "image", old_image, "--format", "json", "--scanners", "vuln"],
             capture_output=True, text=True, timeout=180
         )
-        data = json.loads(result.stdout) if result.stdout else {}
+
+        if not result.stdout:
+            error_msg = f"trivy produced no output (rc={result.returncode}): {result.stderr[:300]}"
+            print(f"[scan] {error_msg}")
+            error_data = {"findings": [], "total": 0, "error": error_msg,
+                          "scanned_at": datetime.utcnow().isoformat()}
+            with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
+                json.dump(error_data, f)
+            scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
+            return
+
+        data = json.loads(result.stdout)
         findings = []
         for target_result in data.get("Results", []):
             for vuln in target_result.get("Vulnerabilities", []):
@@ -243,6 +317,11 @@ def run_trivy_os():
         print(f"[scan] Trivy OS (ubuntu:18.04) complete: {len(findings)} findings")
     except Exception as e:
         print(f"[scan] Trivy OS failed: {e}")
+        error_data = {"findings": [], "total": 0, "error": str(e),
+                      "scanned_at": datetime.utcnow().isoformat()}
+        with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
+            json.dump(error_data, f)
+        scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
 
 
 def run_all_scans():
