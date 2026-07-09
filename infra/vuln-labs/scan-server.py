@@ -141,13 +141,14 @@ def run_semgrep():
       owasp: ["A05:2021 - Security Misconfiguration"]
 """)
 
-        # Use local rules + registry rules. Local rules guarantee findings even
-        # if the registry download fails on first boot.
+        # Use local rules + memory limits for small EC2 instances
         result = subprocess.run(
             ["semgrep", "scan",
              "--config", rules_file,
              SAST_PATH, "--json", "--no-git-ignore",
-             "--timeout", "60"],
+             "--timeout", "60",
+             "--max-memory", "512",
+             "-j", "1"],
             capture_output=True, text=True, timeout=180
         )
         if result.stderr:
