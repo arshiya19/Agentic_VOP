@@ -296,7 +296,7 @@ pip3 install checkov --break-system-packages 2>/dev/null || pip3 install checkov
 # 6. Install and Start Scan Server (scan-source role only)
 # Download from GitHub to keep user-data under the 16KB limit.
 # =============================================================================
-curl -fsSL "https://raw.githubusercontent.com/arshiya19/Agentic_VOP/siri/infra/vuln-labs/scan-server.py" \
+curl -fsSL "https://raw.githubusercontent.com/arshiya19/Agentic_VOP/main/infra/vuln-labs/scan-server.py" \
   -o /opt/vuln-labs/scan-server.py
 
 # Replace port placeholder if needed
