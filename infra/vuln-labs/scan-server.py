@@ -12,6 +12,7 @@ Endpoints:
   GET  /scan/semgrep      — returns cached Semgrep SAST results
   GET  /scan/trivy-fs     — returns cached Trivy FS SCA results
   GET  /scan/trivy-image  — returns cached Trivy image results
+  GET  /scan/trivy-os     — returns cached Trivy OS results
   POST /trigger-scan      — re-runs all scanners and updates cache
   GET  /scan-status       — shows when each scan was last run
 """
@@ -19,15 +20,16 @@ Endpoints:
 import json
 import os
 import subprocess
+import time
 import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-CSPM_PATH = "/opt/vuln-labs/cspm-lab/"
-SAST_PATH = "/opt/vuln-labs/sast-lab/"
-SCA_PATH = "/opt/vuln-labs/sca-lab/"
-INFRA_IMAGE = "vuln-lab-image:latest"
-RESULTS_DIR = "/opt/vuln-labs/results/"
+CSPM_PATH = os.environ.get("VULN_LABS_CSPM_PATH", "/opt/vuln-labs/cspm-lab/")
+SAST_PATH = os.environ.get("VULN_LABS_SAST_PATH", "/opt/vuln-labs/sast-lab/")
+SCA_PATH = os.environ.get("VULN_LABS_SCA_PATH", "/opt/vuln-labs/sca-lab/")
+INFRA_IMAGE = os.environ.get("VULN_LABS_INFRA_IMAGE", "vuln-lab-image:latest")
+RESULTS_DIR = os.environ.get("VULN_LABS_RESULTS_DIR", "/opt/vuln-labs/results/")
 
 # Track when each scan was last run
 scan_timestamps = {}
@@ -39,7 +41,12 @@ def ensure_results_dir():
 
 
 def run_checkov():
-    """Run Checkov and cache results."""
+    """Run Checkov and cache only the 3 key findings (1 per resource type)."""
+    TARGET_CHECKS = {
+        "CKV_AWS_24",   # Security Group: SSH open to 0.0.0.0/0
+        "CKV_AWS_145",  # S3 Bucket: No KMS encryption
+        "CKV_AWS_63",   # IAM: Policy allows * actions
+    }
     try:
         result = subprocess.run(
             ["checkov", "-d", CSPM_PATH, "--output", "json", "--quiet", "--compact"],
@@ -80,14 +87,86 @@ def run_checkov():
 
 
 def run_semgrep():
-    """Run Semgrep and cache results."""
+    """Run Semgrep against the SAST lab and cache results."""
+    if not os.path.isdir(SAST_PATH):
+        print(f"[scan] Semgrep SKIPPED — SAST lab path does not exist: {SAST_PATH}")
+        error_data = {"findings": [], "total": 0, "error": f"SAST path missing: {SAST_PATH}",
+                      "scanned_at": datetime.utcnow().isoformat()}
+        with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
+            json.dump(error_data, f)
+        scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
+        return
+
+    # Log what files exist in the SAST path for debugging
     try:
+        sast_files = os.listdir(SAST_PATH)
+        print(f"[scan] SAST lab contents: {sast_files}")
+    except Exception as e:
+        print(f"[scan] Cannot list SAST path: {e}")
+
+    try:
+        # Write a local rules file to avoid dependency on Semgrep registry
+        rules_file = os.path.join(RESULTS_DIR, "semgrep-rules.yaml")
+        with open(rules_file, "w") as rf:
+            rf.write("""rules:
+  - id: sql-injection-format-string
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $QUERY = f"...{$VAR}..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+          - pattern: |
+              $QUERY = "..." + $VAR + "..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+          - pattern: $CONN.execute(f"...{$VAR}...")
+          - pattern: $CONN.execute("..." + $VAR + "...")
+    message: >
+      SQL injection via string formatting. Use parameterized queries instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+  - id: flask-debug-enabled
+    pattern: $APP.run(..., debug=True, ...)
+    message: Flask debug mode enabled in production.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-489"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+""")
+
+        # Use local rules + memory limits for small EC2 instances
         result = subprocess.run(
-            ["semgrep", "scan", "--config", "auto", SAST_PATH, "--json"],
-            capture_output=True, text=True, timeout=120
+            ["semgrep", "scan",
+             "--config", rules_file,
+             SAST_PATH, "--json", "--no-git-ignore",
+             "--timeout", "60",
+             "--max-memory", "256",
+             "-j", "1",
+             "--optimizations", "none"],
+            capture_output=True, text=True, timeout=180
         )
-        data = json.loads(result.stdout) if result.stdout else {}
+        if result.stderr:
+            print(f"[scan] Semgrep stderr: {result.stderr[:500]}")
+
+        if not result.stdout:
+            error_data = {"findings": [], "total": 0,
+                          "error": f"No stdout. returncode={result.returncode}. stderr={result.stderr[:500]}",
+                          "scanned_at": datetime.utcnow().isoformat()}
+            with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
+                json.dump(error_data, f)
+            scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
+            print(f"[scan] Semgrep produced no output. stderr: {result.stderr[:200]}")
+            return
+
+        data = json.loads(result.stdout)
         results = data.get("results", [])
+        errors = data.get("errors", [])
         findings = []
         for r in results:
             findings.append({
@@ -100,13 +179,22 @@ def run_semgrep():
                 "metadata": r.get("extra", {}).get("metadata", {}),
             })
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {"findings": findings, "total": len(findings),
+                       "scanned_at": datetime.utcnow().isoformat()}
+        # Include errors from semgrep if any (e.g. invalid path, rule download failure)
+        if errors:
+            result_data["errors"] = errors[:5]
         with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
-        print(f"[scan] Semgrep complete: {len(findings)} findings")
+        print(f"[scan] Semgrep complete: {len(findings)} findings, {len(errors)} errors")
     except Exception as e:
         print(f"[scan] Semgrep failed: {e}")
+        error_data = {"findings": [], "total": 0, "error": str(e),
+                      "scanned_at": datetime.utcnow().isoformat()}
+        with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
+            json.dump(error_data, f)
+        scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
 
 
 def run_trivy_fs():
@@ -174,17 +262,39 @@ def run_trivy_image():
 
 
 def run_trivy_os():
-    """Pull an old Linux image (Ubuntu 16.04) and scan it for OS-level CVEs."""
-    old_image = "ubuntu:16.04"
+    """Pull Ubuntu 18.04 (EOL) and scan it for OS-level CVEs."""
+    old_image = "ubuntu:18.04"
     try:
-        # Pull the old image if not already present
-        subprocess.run(["docker", "pull", old_image], capture_output=True, timeout=120)
+        pull_result = subprocess.run(
+            ["docker", "pull", old_image],
+            capture_output=True, text=True, timeout=120
+        )
+        if pull_result.returncode != 0:
+            error_msg = f"docker pull failed (rc={pull_result.returncode}): {pull_result.stderr[:300]}"
+            print(f"[scan] {error_msg}")
+            error_data = {"findings": [], "total": 0, "error": error_msg,
+                          "scanned_at": datetime.utcnow().isoformat()}
+            with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
+                json.dump(error_data, f)
+            scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
+            return
 
         result = subprocess.run(
             ["trivy", "image", old_image, "--format", "json", "--scanners", "vuln"],
             capture_output=True, text=True, timeout=180
         )
-        data = json.loads(result.stdout) if result.stdout else {}
+
+        if not result.stdout:
+            error_msg = f"trivy produced no output (rc={result.returncode}): {result.stderr[:300]}"
+            print(f"[scan] {error_msg}")
+            error_data = {"findings": [], "total": 0, "error": error_msg,
+                          "scanned_at": datetime.utcnow().isoformat()}
+            with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
+                json.dump(error_data, f)
+            scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
+            return
+
+        data = json.loads(result.stdout)
         findings = []
         for target_result in data.get("Results", []):
             for vuln in target_result.get("Vulnerabilities", []):
@@ -198,16 +308,21 @@ def run_trivy_os():
                     "description": vuln.get("Description"),
                     "target": target_result.get("Target"),
                     "type": target_result.get("Type"),
-                    "os": "ubuntu 16.04 (end-of-life)",
+                    "os": "ubuntu 18.04 (end-of-life)",
                 })
 
         result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
         with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
-        print(f"[scan] Trivy OS (ubuntu:16.04) complete: {len(findings)} findings")
+        print(f"[scan] Trivy OS (ubuntu:18.04) complete: {len(findings)} findings")
     except Exception as e:
         print(f"[scan] Trivy OS failed: {e}")
+        error_data = {"findings": [], "total": 0, "error": str(e),
+                      "scanned_at": datetime.utcnow().isoformat()}
+        with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
+            json.dump(error_data, f)
+        scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
 
 
 def run_all_scans():
@@ -246,10 +361,29 @@ class ScanHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/trigger-scan":
-            # Run scans in background thread so request doesn't block
             thread = threading.Thread(target=run_all_scans, daemon=True)
             thread.start()
             self._respond(202, {"status": "scan triggered", "message": "Scans running in background. Check /scan-status for completion."})
+        elif self.path == "/trigger-scan/semgrep":
+            thread = threading.Thread(target=run_semgrep, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "semgrep scan triggered"})
+        elif self.path == "/trigger-scan/trivy-os":
+            thread = threading.Thread(target=run_trivy_os, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-os scan triggered"})
+        elif self.path == "/trigger-scan/checkov":
+            thread = threading.Thread(target=run_checkov, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "checkov scan triggered"})
+        elif self.path == "/trigger-scan/trivy-fs":
+            thread = threading.Thread(target=run_trivy_fs, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-fs scan triggered"})
+        elif self.path == "/trigger-scan/trivy-image":
+            thread = threading.Thread(target=run_trivy_image, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-image scan triggered"})
         else:
             self._respond(404, {"error": "unknown endpoint"})
 
@@ -275,6 +409,21 @@ class ScanHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ensure_results_dir()
+
+    # Wait for lab setup to complete before scanning.
+    # The user-data script writes this marker file as its very last step.
+    SETUP_MARKER = "/opt/vuln-labs/SETUP_COMPLETE"
+    MAX_WAIT = 300  # 5 minutes max
+    waited = 0
+    while not os.path.exists(SETUP_MARKER) and waited < MAX_WAIT:
+        print(f"[startup] Waiting for lab setup to complete ({waited}s)...")
+        time.sleep(10)
+        waited += 10
+
+    if not os.path.exists(SETUP_MARKER):
+        print(f"[startup] WARNING: {SETUP_MARKER} not found after {MAX_WAIT}s. Running scans anyway.")
+    else:
+        print(f"[startup] Lab setup complete. Starting scans.")
 
     # Run all scans once at startup
     print("Running initial scans at startup...")

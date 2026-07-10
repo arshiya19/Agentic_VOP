@@ -317,3 +317,4 @@ jobs:
           echo ""
           echo "NOTE: If this is env1-scan-source, update VOP connection_registry"
           echo "with the new scan server URL: http://$NEW_IP:8090"
+

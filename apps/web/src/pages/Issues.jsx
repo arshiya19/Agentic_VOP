@@ -123,7 +123,8 @@ export default function Issues() {
                     type="text"
                     placeholder="Search by CVE, description, or asset..."
                     value={searchTerm}
-                    onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+                    onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1);
+                    }}
                   />
                 </div>
 
