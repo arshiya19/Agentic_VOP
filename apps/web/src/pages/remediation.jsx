@@ -75,45 +75,90 @@ export default function Remediation() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [toast, setToast] = useState(null)
+  // Contextual switch: 'real' or 'demo'. Set by Integrations page buttons,
+  // overridable via the pill at the top of the page.
+  const [pipelineMode, setPipelineMode] = useState(
+    () => localStorage.getItem('pipelineMode') || 'real'
+  )
+
+  // Listen for pipelineMode changes from other components / other tabs.
+  useEffect(() => {
+    const handler = () => {
+      setPipelineMode(localStorage.getItem('pipelineMode') || 'real')
+    }
+    window.addEventListener('pipelineModeChanged', handler)
+    window.addEventListener('storage', handler)
+    return () => {
+      window.removeEventListener('pipelineModeChanged', handler)
+      window.removeEventListener('storage', handler)
+    }
+  }, [])
+
+  const isDemo = pipelineMode === 'demo'
+  const apiBase = isDemo
+    ? `${API_URL}/admin/remediation-packages/demo`
+    : `${API_URL}/admin/remediation-packages`
+
+  const setModeManual = (mode) => {
+    localStorage.setItem('pipelineMode', mode)
+    window.dispatchEvent(new Event('pipelineModeChanged'))
+  }
 
   const showToast = useCallback((kind, msg) => {
     setToast({ kind, msg })
     setTimeout(() => setToast(null), 3500)
   }, [])
 
-  const refreshList = useCallback(async () => {
-    setLoading(true)
+  // silent=true skips the loading flash for background polls
+  const refreshList = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true)
     setError(null)
     try {
       const url = statusFilter === 'all'
-        ? `${API_URL}/admin/remediation-packages`
-        : `${API_URL}/admin/remediation-packages?status=${statusFilter}`
+        ? apiBase
+        : `${apiBase}?status=${statusFilter}`
       const res = await fetch(url)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setPackages(data.packages || [])
     } catch (e) {
       setError(e.message || 'Failed to load packages')
-      setPackages([])
+      if (!silent) setPackages([])
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
-  }, [statusFilter])
+  }, [statusFilter, apiBase])
 
   useEffect(() => { refreshList() }, [refreshList])
+
+  // Clear selection when switching modes so demo/real packages don't bleed.
+  useEffect(() => {
+    setSelectedId(null)
+    setDetail(null)
+  }, [pipelineMode])
+
+  // Poll silently while in demo mode so the list grows as the pipeline
+  // generates packages — no loading-flash on each poll. Stop polling once
+  // we've reached 5 packages (a full run's worth) to avoid infinite fetching.
+  useEffect(() => {
+    if (!isDemo) return
+    if (packages.length >= 5) return
+    const interval = setInterval(() => { refreshList({ silent: true }) }, 3000)
+    return () => clearInterval(interval)
+  }, [isDemo, refreshList, packages.length])
 
   // When a row is selected, load full detail (includes the pathways jsonb).
   useEffect(() => {
     if (selectedId == null) { setDetail(null); return }
     let cancelled = false
     setDetailLoading(true)
-    fetch(`${API_URL}/admin/remediation-packages/${selectedId}`)
+    fetch(`${apiBase}/${selectedId}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => { if (!cancelled) setDetail(d) })
       .catch(e => { if (!cancelled) { setDetail(null); showToast('error', e.message) } })
       .finally(() => { if (!cancelled) setDetailLoading(false) })
     return () => { cancelled = true }
-  }, [selectedId, showToast])
+  }, [selectedId, showToast, apiBase])
 
   const handleGenerate = useCallback(async () => {
     if (generating) return
@@ -218,7 +263,38 @@ export default function Remediation() {
               <h1>Remediation</h1>
               <p className="remediation-subtitle">
                 Generated remediation packages — validated against authoritative sources, scored for confidence, gated by human approval.
+                {isDemo && ' — DEMO PIPELINE (5 pre-seeded issues)'}
               </p>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginRight: 12 }}>
+              <button
+                type="button"
+                onClick={() => setModeManual('real')}
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: 999,
+                  border: '1px solid ' + (!isDemo ? '#22c55e' : '#334155'),
+                  background: !isDemo ? 'rgba(34,197,94,0.15)' : 'transparent',
+                  color: !isDemo ? '#22c55e' : '#94a3b8',
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Real Pipeline
+              </button>
+              <button
+                type="button"
+                onClick={() => setModeManual('demo')}
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: 999,
+                  border: '1px solid ' + (isDemo ? '#3b82f6' : '#334155'),
+                  background: isDemo ? 'rgba(59,130,246,0.15)' : 'transparent',
+                  color: isDemo ? '#3b82f6' : '#94a3b8',
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Demo Pipeline
+              </button>
             </div>
             {SHOW_REMEDIATE_BUTTON && (
               <button
@@ -310,9 +386,10 @@ export default function Remediation() {
                 </thead>
                 <tbody>
                   {packages.map(p => {
-                    // The list endpoint returns the package summary without the
-                    // pathways column — so confidence + validation come from the
-                    // detail when expanded. Show placeholders in the row.
+                    // Cells receive the row and the current apiBase — in demo
+                    // mode the row already carries `pathways` inline, so no
+                    // N+1 fetch. In real mode they fall back to fetching from
+                    // apiBase/{id} (the summary-only list doesn't include pathways).
                     return (
                       <tr key={p.id} className={selectedId === p.id ? 'selected' : ''}
                           onClick={() => setSelectedId(p.id)}>
@@ -320,10 +397,10 @@ export default function Remediation() {
                         <td className="rmp-finding-cell">{p.finding || '—'}</td>
                         <td><span className="rmp-family-chip">{FAMILY_LABEL[p.family] || p.family}</span></td>
                         <td>
-                          <ConfidenceCell pkgId={p.id} />
+                          <ConfidenceCell pkg={p} apiBase={apiBase} />
                         </td>
                         <td>
-                          <ValidationCell pkgId={p.id} />
+                          <ValidationCell pkg={p} apiBase={apiBase} />
                         </td>
                         <td>{APPROVAL_LABEL[p.approval_required] || p.approval_required}</td>
                         <td><StatusPill status={p.status} /></td>
@@ -370,26 +447,38 @@ export default function Remediation() {
 
 const detailCache = new Map()
 
-function useDetailField(pkgId) {
-  const [d, setD] = useState(() => detailCache.get(pkgId))
+// If the row already carries `pathways` (demo endpoint includes it inline),
+// skip the detail fetch. Otherwise fall back to fetching from apiBase — real
+// mode uses the summary-only list endpoint and needs an N+1.
+function useDetailField(pkg, apiBase) {
+  const pkgId = pkg?.id
+  const cacheKey = `${apiBase}|${pkgId}`
+  const hasInlinePathways = Array.isArray(pkg?.pathways) && pkg.pathways.length > 0
+
+  const [d, setD] = useState(() => {
+    if (hasInlinePathways) return pkg
+    return detailCache.get(cacheKey)
+  })
+
   useEffect(() => {
-    if (d || detailCache.has(pkgId)) return
+    if (hasInlinePathways) { setD(pkg); return }
+    if (d || detailCache.has(cacheKey)) return
     let cancelled = false
-    fetch(`${API_URL}/admin/remediation-packages/${pkgId}`)
+    fetch(`${apiBase}/${pkgId}`)
       .then(r => r.ok ? r.json() : null)
       .then(j => {
         if (cancelled || !j) return
-        detailCache.set(pkgId, j)
+        detailCache.set(cacheKey, j)
         setD(j)
       })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [pkgId, d])
+  }, [pkgId, cacheKey, d, hasInlinePathways, pkg, apiBase])
   return d
 }
 
-function ConfidenceCell({ pkgId }) {
-  const d = useDetailField(pkgId)
+function ConfidenceCell({ pkg, apiBase }) {
+  const d = useDetailField(pkg, apiBase)
   const pw = recommendedPathway(d)
   if (!pw?.confidence_score) return <span className="rmp-muted">—</span>
   const tone = confidenceTone(pw.confidence_score)
@@ -401,8 +490,8 @@ function ConfidenceCell({ pkgId }) {
   )
 }
 
-function ValidationCell({ pkgId }) {
-  const d = useDetailField(pkgId)
+function ValidationCell({ pkg, apiBase }) {
+  const d = useDetailField(pkg, apiBase)
   const pw = recommendedPathway(d)
   const vm = pw?.validation_metadata
   if (!vm) return <span className="rmp-muted">—</span>

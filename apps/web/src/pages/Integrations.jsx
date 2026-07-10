@@ -232,6 +232,11 @@ export default function Integrations() {
     setIsTriggering(true)
     setLastResult(null)
 
+    // Contextual switch: Agents + Remediation pages read this on mount and
+    // when they receive the custom event below (fires within the same tab).
+    localStorage.setItem('pipelineMode', 'real')
+    window.dispatchEvent(new Event('pipelineModeChanged'))
+
     const eventId = `EVT-UI-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     try {
       const res = await fetch(`${API_URL}/agents/trigger`, {
@@ -258,6 +263,60 @@ export default function Integrations() {
       return
     } catch (err) {
       setLastResult({ ok: false, message: `Failed to trigger: ${err.message}` })
+    }
+    setIsTriggering(false)
+  }
+
+  // Full end-to-end demo: chains a REAL fetch (into public.*) followed by
+  // demo sampling + remediation (into demo.*). Uses the same scanner
+  // selection as the Fetch findings button.
+  //
+  // Sequence:
+  //  1. Wipe demo state for a clean slate.
+  //  2. Set contextual mode so Agents + Remediation pages auto-switch to demo.
+  //  3. POST /agents/trigger_demo with { event_id, action, targets.scanners }.
+  //     Backend chains real Master → run_demo_master.
+  const handleTriggerDemo = async () => {
+    if (selectedScanners.size === 0 || isTriggering) return
+    setIsTriggering(true)
+    setLastResult(null)
+
+    // Chained flow: real fetch runs FIRST (traces go to public schema, viewable
+    // in Real Pipeline mode), then demo sample + remediate runs SECOND (traces
+    // go to demo schema, viewable in Demo Pipeline mode). Start in Real mode
+    // so the user immediately sees the real fetch. They can toggle to Demo
+    // mode once real fetch completes to see the remediation phase.
+    localStorage.setItem('pipelineMode', 'real')
+    window.dispatchEvent(new Event('pipelineModeChanged'))
+
+    const eventId = `EVT-DEMO-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    try {
+      // Cumulative demo: each run accumulates packages in demo schema.
+      // No auto-reset — old runs stay so audience sees packages grow across
+      // multiple -ec2 scanners. Manual wipe via `POST /agents/demo/reset`
+      // or a direct SQL DELETE when a truly fresh state is wanted.
+      const res = await fetch(`${API_URL}/agents/trigger_demo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_id: eventId,
+          action: 'FULL',
+          targets: { scanners: Array.from(selectedScanners) },
+        }),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+      }
+      const data = await res.json()
+      setLastResult({
+        ok: true,
+        message: `End-to-end demo triggered (${data.event_id}) — real fetch → sample → remediate. Watch the Agents page.`,
+      })
+      setTimeout(() => setIsTriggering(false), 5000)
+      return
+    } catch (err) {
+      setLastResult({ ok: false, message: `Failed to trigger demo: ${err.message}` })
     }
     setIsTriggering(false)
   }
@@ -369,6 +428,17 @@ export default function Integrations() {
                 {isTriggering
                   ? 'Triggering…'
                   : `Fetch findings${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
+              </button>
+              <button
+                type="button"
+                className="scanner-runner-btn scanner-runner-btn-demo"
+                onClick={handleTriggerDemo}
+                disabled={selectedScanners.size === 0 || isTriggering}
+                title="End-to-end: real fetch (public.*) → sample 5 per family → remediate (demo.*)"
+              >
+                {isTriggering
+                  ? 'Triggering…'
+                  : `Run Demo Pipeline${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
               </button>
               {lastResult && (
                 <div

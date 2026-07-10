@@ -380,6 +380,7 @@ def _llm_decide(
     mitre: dict | None = None,
     asset: dict | None = None,
     scoring: dict | None = None,
+    emit_fn=None,
 ) -> LLMEnrichmentDecision:
     """Call the LLM to produce the prose narrative for an already-scored issue.
 
@@ -441,6 +442,7 @@ def _llm_decide(
             (0.6, primary_model, max_tokens),
             (0.3, fallback_model, max_tokens),
         ],
+        emit_fn=emit_fn,
     )
 
 
@@ -604,6 +606,7 @@ def _fetch_nvd_data(
     *,
     collect_raw: list[dict] | None = None,
     collect_missed: list[str] | None = None,
+    emit_fn=None,
 ) -> dict[str, dict]:
     """For each CVE, fetch NVD data: CWE id + CVSS v3 vector breakdown.
 
@@ -637,9 +640,10 @@ def _fetch_nvd_data(
     # honest option — there's nothing for NVD to return.
     cve_ids = [c for c in cve_ids if c and c.upper().startswith("CVE-")]
 
+    emit = emit_fn or emit_trace
     if run_id:
         sample = [repr(c) for c in cve_ids[:5]]
-        emit_trace(
+        emit(
             run_id,
             "sub-agent-2",
             "MESSAGE",
@@ -659,7 +663,7 @@ def _fetch_nvd_data(
                 if collect_missed is not None:
                     collect_missed.extend(remaining)
                 if run_id:
-                    emit_trace(
+                    emit(
                         run_id,
                         "sub-agent-2",
                         "MESSAGE",
@@ -680,6 +684,7 @@ def _fetch_nvd_data(
                     backoff_factor=2.0,
                     run_id=run_id,
                     agent="sub-agent-2",
+                    emit_fn=emit_fn,
                 )
                 vulns = resp.json().get("vulnerabilities", []) or []
                 if not vulns:

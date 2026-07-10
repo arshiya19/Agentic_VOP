@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .agents.connectors.file_upload import SCANNER_BUCKET, sniff_format
 from .agents.master import run_master
+from .agents.master_demo import run_demo_master
 from .agents.remediation.planner import persist_package, plan_remediation
 from .agents.sub_agent_1 import (
     extract_all_vectors_from_raw,
@@ -32,7 +33,7 @@ from .crypto import (
     redact_sensitive_fields,
     validate_endpoint_security,
 )
-from .db import supabase_admin
+from .db import supabase_admin, supabase_admin_demo
 from .mitre_refresh import refresh_mitre_attack, refresh_mitre_capec, refresh_mitre_cwe
 from .models import RunCreated, TriggerEvent
 from .models_registry import AVAILABLE_MODELS, RECOMMENDED_MODELS, is_valid_model
@@ -133,6 +134,178 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
         event_id=row["event_id"],
         status=row["status"],
     )
+
+
+@app.post("/agents/trigger_demo", response_model=RunCreated, status_code=201)
+def trigger_demo_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> RunCreated:
+    """Kick off the full end-to-end demo pipeline chained on selected scanners.
+
+    Flow:
+      1. Create REAL agent_run in public.agent_runs for the selected scanners.
+      2. Create DEMO agent_run in demo.agent_runs, tagged with the real run_id.
+      3. Background task runs sequentially:
+           a. run_master(real_run_id)      — ingestion + normalization + enrichment
+           b. run_demo_master(demo_run_id) — samples 1 issue per family from the
+              real fetch's -ec2 output, generates 5 remediation packages
+      4. Real state → public.*; demo state → demo.*.
+
+    Returns the DEMO run_id — that's what the frontend polls for demo progress.
+    Real progress is streamed to the public.agent_trace_events realtime channel
+    for the Agents page's Real Pipeline mode.
+    """
+    import uuid
+
+    sb_pub = supabase_admin()
+    sb_demo = supabase_admin_demo()
+
+    # ---- 1. Create the REAL agent_run (same shape as /agents/trigger) ----
+    real_insert = (
+        sb_pub.table("agent_runs")
+        .insert(
+            {
+                "event_id": payload.event_id,
+                "triggered_by": payload.persona,
+                "action": payload.action,
+                "targets": payload.targets.model_dump(),
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not real_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create real run")
+    real_run_id = real_insert.data[0]["run_id"]
+
+    # ---- 2. Create the DEMO agent_run, linked to the real run ----
+    demo_event_id = f"demo-{uuid.uuid4().hex[:8]}"
+    demo_insert = (
+        sb_demo.table("agent_runs")
+        .insert(
+            {
+                "event_id": demo_event_id,
+                "triggered_by": "demo",
+                "action": "FULL",
+                "targets": {
+                    "demo": True,
+                    "scanners": payload.targets.scanners,
+                    "real_run_id": real_run_id,
+                },
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not demo_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create demo run")
+    demo_row = demo_insert.data[0]
+
+    # ---- 3. Chain in one background task ----
+    def _run_real_then_demo():
+        run_master(real_run_id)  # blocks until real pipeline completes
+        run_demo_master(demo_row["run_id"], real_run_id=real_run_id)
+
+    background_tasks.add_task(_run_real_then_demo)
+
+    return RunCreated(
+        run_id=demo_row["run_id"],
+        event_id=demo_row["event_id"],
+        status=demo_row["status"],
+    )
+
+
+@app.post("/agents/demo/reset")
+def reset_demo_state() -> dict:
+    """Wipe demo output tables. Keeps demo.raw_findings (the 5-row seed fixture).
+
+    Called by the frontend before a fresh demo run so every "Run Demo Pipeline"
+    click starts from clean state. Ordering: packages → issues → agent_runs
+    (agent_trace_events cascades via FK ON DELETE CASCADE).
+    """
+    sb = supabase_admin_demo()
+    pkg_deleted = sb.table("remediation_packages").delete().neq("id", 0).execute()
+    issue_deleted = sb.table("issues").delete().neq("id", 0).execute()
+    run_deleted = (
+        sb.table("agent_runs")
+        .delete()
+        .neq("run_id", "00000000-0000-0000-0000-000000000000")
+        .execute()
+    )
+    return {
+        "packages_deleted": len(pkg_deleted.data or []),
+        "issues_deleted": len(issue_deleted.data or []),
+        "runs_deleted": len(run_deleted.data or []),
+        "raws_preserved": True,
+    }
+
+
+@app.get("/agents/demo/runs")
+def list_demo_runs(limit: int = 20) -> dict:
+    """List demo pipeline runs — newest first."""
+    sb = supabase_admin_demo()
+    resp = (
+        sb.table("agent_runs")
+        .select("run_id, event_id, action, status, started_at, completed_at, summary")
+        .order("started_at", desc=True)
+        .limit(max(1, min(100, limit)))
+        .execute()
+    )
+    return {"runs": resp.data or []}
+
+
+@app.get("/agents/demo/runs/{run_id}/traces")
+def get_demo_run_traces(run_id: str) -> dict:
+    """Trace events for a demo run — ASC by created_at so the UI can replay
+    them in order (or subscribe to Realtime once we wire that up)."""
+    sb = supabase_admin_demo()
+    resp = (
+        sb.table("agent_trace_events")
+        .select("id, run_id, agent, event_type, message, payload, created_at")
+        .eq("run_id", run_id)
+        .order("created_at", desc=False)
+        .limit(2000)
+        .execute()
+    )
+    return {"traces": resp.data or []}
+
+
+@app.get("/admin/remediation-packages/demo")
+def list_demo_remediation_packages(
+    status: str | None = None,
+    issue_id: int | None = None,
+    limit: int = 50,
+) -> dict:
+    """List demo remediation packages — same shape as /admin/remediation-packages
+    plus `pathways` so the list view can render confidence + validation columns
+    without an extra N+1 detail fetch per row. Payload is small (5-50 packages)."""
+    sb = supabase_admin_demo()
+    q = (
+        sb.table("remediation_packages")
+        .select(
+            "id,issue_id,family,finding,status,approval_required,"
+            "recommended_pathway_index,agent_run_id,approved_by,approved_at,"
+            "rejected_reason,created_at,updated_at,pathways"
+        )
+        .order("created_at", desc=True)
+        .limit(max(1, min(200, limit)))
+    )
+    if status:
+        q = q.eq("status", status)
+    if issue_id is not None:
+        q = q.eq("issue_id", issue_id)
+    resp = q.execute()
+    return {"packages": resp.data or []}
+
+
+@app.get("/admin/remediation-packages/demo/{pkg_id}")
+def get_demo_remediation_package(pkg_id: int) -> dict:
+    """Full demo package detail — mirrors the shape of the non-demo endpoint
+    so the Remediation drawer can render either without knowing which schema
+    the data came from."""
+    sb = supabase_admin_demo()
+    resp = sb.table("remediation_packages").select("*").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
+    return resp.data[0]
 
 
 class CancelRunResponse(BaseModel):

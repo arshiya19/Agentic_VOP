@@ -18,6 +18,9 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from urllib.parse import urlparse
+
+from ...config import settings
 from ...db import supabase_admin
 from ...models import (
     LLMRemediationOutput,
@@ -27,7 +30,7 @@ from ...models import (
 )
 from ..llm import invoke_structured_with_retry
 from .classifier import classify_finding
-from .confidence import compute_confidence
+from .confidence import compute_confidence, compute_confidence_agentic
 
 
 # Per Phase-1 doc §7.1, sources are tiered. Tier 1-3 = "validated";
@@ -124,6 +127,130 @@ def _load_pattern(sb, family: str) -> dict | None:
     return rows[0] if rows else None
 
 
+# Domains considered authoritative for the agentic validation_metadata
+# status/confidence heuristic. Mirrors the tier-1/2 set in web_search.py +
+# confidence.py; keep in sync when adding new authoritative vendors.
+_AGENT_AUTHORITATIVE_HOSTS = {
+    # --- Cloud provider primary docs (Tier 1) ---
+    "docs.aws.amazon.com",
+    "aws.amazon.com",
+    "docs.microsoft.com",
+    "learn.microsoft.com",
+    "cloud.google.com",
+    "docs.oracle.com",
+    # --- Standards bodies + governments (Tier 1) ---
+    "cisecurity.org",
+    "nvd.nist.gov",
+    "csrc.nist.gov",
+    "cisa.gov",
+    "www.cisa.gov",
+    "cwe.mitre.org",
+    "capec.mitre.org",
+    "attack.mitre.org",
+    "cve.mitre.org",
+    # --- Core project + community docs (Tier 2) ---
+    "owasp.org",
+    "cheatsheetseries.owasp.org",
+    "kubernetes.io",
+    "docs.kubernetes.io",
+    "docs.docker.com",
+    "developer.hashicorp.com",
+    "hashicorp.com",
+    "registry.terraform.io",
+    "cert.org",
+    "us-cert.gov",
+    # --- Scanner vendor docs — canonical source for the findings we ingest ---
+    "docs.prismacloud.io",
+    "docs.paloaltonetworks.com",  # Checkov / Prisma Cloud
+    "avd.aquasec.com",
+    "docs.aquasec.com",
+    "aquasec.com",  # Trivy (Aqua Vulnerability DB)
+    "snyk.io",
+    "security.snyk.io",
+    "docs.snyk.io",  # Snyk
+    "docs.wiz.io",  # Wiz
+    "docs.tenable.com",  # Tenable / Nessus
+    "www.qualys.com",
+    "qualys.com",  # Qualys
+    "docs.github.com",
+    "github.com",  # GitHub advisories / security tab
+    # --- OS-vendor security trackers (canonical for os_vulnerability family) ---
+    "access.redhat.com",
+    "ubuntu.com",
+    "security-tracker.debian.org",
+    "usn.ubuntu.com",
+    "www.suse.com",
+    # --- Language ecosystem advisory databases (canonical for vulnerable_dependency) ---
+    "advisories.dependabot.com",
+    "osv.dev",
+    "python.org",
+    "docs.python.org",
+    "pypi.org",
+    "nodejs.org",
+    "npmjs.com",
+    "maven.apache.org",
+    "central.sonatype.com",
+    "rubygems.org",
+    "packagist.org",
+}
+
+
+def _agent_validation_metadata(pathway: RemediationPathway) -> ValidationMetadata:
+    """Build ValidationMetadata from URLs the agent actually cited across the
+    pathway. Called on the agentic-success path — pattern's static
+    primary_sources are NOT used here.
+
+    Status + confidence heuristic:
+      validated / high    — 2+ distinct sources AND at least 1 is authoritative
+      partial / medium    — 1+ source cited but only Tier-3/4
+      unvalidated / low   — nothing cited (shouldn't happen post-verifier)
+    """
+    seen_urls: set[str] = set()
+    display_sources: list[str] = []
+
+    def _collect(step):
+        if step is None:
+            return
+        url = getattr(step, "source_url", "") or ""
+        name = getattr(step, "source", "") or ""
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            display_sources.append(f"{name} — {url}" if name else url)
+
+    for step in pathway.remediation_steps or []:
+        _collect(step)
+    if pathway.rollback_plan and pathway.rollback_plan.steps:
+        for step in pathway.rollback_plan.steps:
+            _collect(step)
+
+    hosts = set()
+    for u in seen_urls:
+        try:
+            h = urlparse(u).netloc.lower()
+            if h:
+                hosts.add(h)
+        except Exception:  # noqa: BLE001, S110 — malformed URL, ignore
+            pass
+    authoritative_hits = hosts & _AGENT_AUTHORITATIVE_HOSTS
+
+    if len(seen_urls) >= 2 and authoritative_hits:
+        status = "validated"
+        confidence = "high"
+    elif seen_urls:
+        status = "partial"
+        confidence = "medium"
+    else:
+        status = "unvalidated"
+        confidence = "low"
+
+    return ValidationMetadata(
+        status=status,
+        sources=display_sources[:20],
+        timestamp=datetime.now(UTC).isoformat(),
+        confidence=confidence,
+    )
+
+
 def _load_asset(sb, issue: dict) -> dict:
     """Resolve the asset row for an issue via the issue_with_asset view.
     Returns trimmed asset dict (only fields useful for remediation prose) or {} if unattributed.
@@ -157,24 +284,46 @@ def _load_asset(sb, issue: dict) -> dict:
 
 
 def _load_prompt(sb) -> dict:
-    """Load the active sub-agent-3 prompt row."""
+    """Load the sub-agent-3 v1.4 (HYBRID pattern-based) prompt row.
+
+    Explicitly selects v1.4 because both v1.4 (hybrid) and v2.0 (agentic)
+    are active in prompt_db after migration 0048 — this function is called
+    by the hybrid fallback path and needs the pattern-adaptation prompt.
+    The agentic path uses a separate loader in agent_v2._load_prompt_v2.
+    """
     resp = (
         sb.table("prompt_db")
         .select("agent,version,model,prompt_text,parameters")
         .eq("agent", "sub-agent-3")
-        .eq("is_active", True)
-        .order("version", desc=True)
+        .eq("version", "v1.4")
         .limit(1)
         .execute()
     )
     rows = resp.data or []
     if not rows:
-        raise RuntimeError("No active prompt row for agent='sub-agent-3' in prompt_db")
+        raise RuntimeError(
+            "No sub-agent-3 v1.4 prompt row in prompt_db. "
+            "Apply migration 0047_sub_agent_3_prompt_v1_4.sql."
+        )
     return rows[0]
 
 
 def _issue_payload(issue: dict) -> dict:
-    """Trim the issue row to the fields Sub-Agent 3 actually uses."""
+    """Trim the issue row to the fields Sub-Agent 3 actually uses.
+
+    Includes two upstream-derived hints:
+      solution              — scanner-provided remediation text (Sub-Agent 1
+                              extracts this from raw scanner output when
+                              present: Snyk `remediation`, Trivy `FixedVersion`,
+                              Tenable/Qualys `solution`, etc.).
+      remediation_suggestion — Sub-Agent 2's LLM-generated summary derived
+                              from the whole enriched context.
+
+    Sub-Agent 3's prompt (v1.4+) treats these as ADDITIONAL CONTEXT — the
+    curated pattern from remediation_patterns remains authoritative for
+    rollback / test scripts / sources. Hints inform placeholder filling and
+    can align/override when they don't conflict with the pattern.
+    """
     return {
         "id": issue.get("id"),
         "source": issue.get("source"),
@@ -190,6 +339,9 @@ def _issue_payload(issue: dict) -> dict:
         "runtime_ipv4": issue.get("runtime_ipv4"),
         "runtime_os_family": issue.get("runtime_os_family"),
         "runtime_purl": issue.get("runtime_purl"),
+        # Upstream hints (v1.4)
+        "solution": issue.get("solution"),
+        "remediation_suggestion": issue.get("remediation_suggestion"),
     }
 
 
@@ -227,64 +379,133 @@ def plan_remediation(
     sb = sb or supabase_admin()
     run_id = run_id or str(uuid.uuid4())
 
-    family = classify_finding(issue)
+    # Fetch raw_finding so the classifier can use raw.resource for
+    # deterministic Checkov-style classification. Cheap single-row lookup.
+    raw: dict | None = None
+    if issue.get("raw_finding_id") is not None:
+        raw_resp = (
+            sb.table("raw_findings")
+            .select("raw")
+            .eq("id", issue["raw_finding_id"])
+            .limit(1)
+            .execute()
+        )
+        if raw_resp.data:
+            raw = raw_resp.data[0].get("raw") or {}
+
+    family = classify_finding(issue, raw=raw)
     if family == "unknown":
         raise ValueError(
             f"Issue {issue.get('id')} did not classify into a known family. "
             f"source={issue.get('source')} cwe={issue.get('cwe_id')} purl={issue.get('runtime_purl')}"
         )
 
-    pattern = _load_pattern(sb, family)
-    if pattern is None:
-        raise RuntimeError(
-            f"No row in remediation_patterns for family='{family}'. Apply migration 0036."
-        )
-
     asset = _load_asset(sb, issue)
-    prompt_row = _load_prompt(sb)
-    params = prompt_row.get("parameters") or {}
 
-    payload = {
-        "issue": _issue_payload(issue),
-        "asset": asset,
-        "pattern": _pattern_payload(pattern),
-    }
+    # --- Try the AGENTIC path first (Phase-2 default when Tavily key set) ---
+    # Agent researches from live authoritative sources (AWS/CIS/NVD/CISA docs).
+    # NO pattern loaded on this path — validation_metadata + confidence derive
+    # from what the agent actually cited + what the verifier observed.
+    # If the agent fails / hits budget cap / produces invalid output, we fall
+    # through to the hybrid pattern-based path.
+    agent_result = None  # tuple (LLMRemediationOutput, VerificationReport) | None
+    if settings.tavily_api_key:
+        from ..trace import emit_trace  # noqa: PLC0415 (defer import — circular)
+        from .agent_v2 import run_agentic_planner  # noqa: PLC0415
 
-    base_temp = float(params.get("temperature", 0.3))
-    max_tokens = int(params.get("max_tokens", 2500))
-    primary_model = prompt_row["model"]
-    fallback_model = params.get("fallback_model", "gpt-4o")
+        try:
+            agent_result = run_agentic_planner(
+                issue=issue,
+                asset=asset,
+                family=family,
+                run_id=run_id,
+                sb_pub=sb,
+                emit_fn=emit_trace,
+            )
+        except Exception as e:  # noqa: BLE001
+            emit_trace(
+                run_id,
+                "sub-agent-3",
+                "ERROR",
+                f"Agentic planner raised, falling back to hybrid: "
+                f"{type(e).__name__}: {str(e)[:200]}",
+            )
 
-    llm_output: LLMRemediationOutput = invoke_structured_with_retry(
-        run_id=run_id,
-        agent="sub-agent-3",
-        schema=LLMRemediationOutput,
-        messages=[
-            SystemMessage(content=prompt_row["prompt_text"]),
-            HumanMessage(content=str(payload)),
-        ],
-        attempts=[
-            (base_temp, primary_model, max_tokens),
-            (0.5, primary_model, max_tokens + 500),
-            (0.3, fallback_model, max_tokens + 1000),
-        ],
-    )
+    if agent_result is not None:
+        # --- AGENT SUCCESS PATH — no pattern used. All authority from live research. ---
+        llm_output, verification_report = agent_result
+        enriched_pathways: list[RemediationPathway] = []
+        for pathway in llm_output.pathways:
+            pathway.validation_metadata = _agent_validation_metadata(pathway)
+            confidence = compute_confidence_agentic(
+                issue=issue,
+                asset=asset,
+                pathway=pathway,
+                verification_report=verification_report,
+            )
+            pathway.confidence_score = confidence["score"]
+            pathway.confidence_components = confidence["components"]
+            enriched_pathways.append(pathway)
+    else:
+        # --- HYBRID FALLBACK — pattern-based (v1.4 prompt + pattern adaptation) ---
+        from ..trace import emit_trace  # noqa: PLC0415
 
-    # Attach validation metadata + confidence to each pathway.
-    validation_meta = _validation_metadata_for(pattern)
-    enriched_pathways: list[RemediationPathway] = []
-    for pathway in llm_output.pathways:
-        confidence = compute_confidence(
-            issue=issue,
-            asset=asset,
-            pattern=pattern,
-            pathway=pathway,
-            affected_asset_count=1,  # Phase-1 single-issue packages
+        emit_trace(
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            "Using hybrid pattern-based planner (v1.4)",
         )
-        pathway.validation_metadata = validation_meta
-        pathway.confidence_score = confidence["score"]
-        pathway.confidence_components = confidence["components"]
-        enriched_pathways.append(pathway)
+        pattern = _load_pattern(sb, family)
+        if pattern is None:
+            raise RuntimeError(
+                f"No row in remediation_patterns for family='{family}' AND agent path unavailable. "
+                "Apply migration 0036 OR set TAVILY_API_KEY."
+            )
+        prompt_row = _load_prompt(sb)
+        params = prompt_row.get("parameters") or {}
+
+        payload = {
+            "issue": _issue_payload(issue),
+            "asset": asset,
+            "pattern": _pattern_payload(pattern),
+        }
+
+        base_temp = float(params.get("temperature", 0.3))
+        max_tokens = int(params.get("max_tokens", 2500))
+        primary_model = prompt_row["model"]
+        fallback_model = params.get("fallback_model", "gpt-4o")
+
+        llm_output = invoke_structured_with_retry(
+            run_id=run_id,
+            agent="sub-agent-3",
+            schema=LLMRemediationOutput,
+            messages=[
+                SystemMessage(content=prompt_row["prompt_text"]),
+                HumanMessage(content=str(payload)),
+            ],
+            attempts=[
+                (base_temp, primary_model, max_tokens),
+                (0.5, primary_model, max_tokens + 500),
+                (0.3, fallback_model, max_tokens + 1000),
+            ],
+        )
+
+        # Attach pattern-derived validation metadata + confidence
+        validation_meta = _validation_metadata_for(pattern)
+        enriched_pathways = []
+        for pathway in llm_output.pathways:
+            confidence = compute_confidence(
+                issue=issue,
+                asset=asset,
+                pattern=pattern,
+                pathway=pathway,
+                affected_asset_count=1,
+            )
+            pathway.validation_metadata = validation_meta
+            pathway.confidence_score = confidence["score"]
+            pathway.confidence_components = confidence["components"]
+            enriched_pathways.append(pathway)
 
     # Pick the recommended pathway: highest confidence wins ties go to first.
     recommended_idx = max(

@@ -66,17 +66,16 @@ def run_checkov():
             results = check_group.get("results", {})
             failed = results.get("failed_checks", [])
             for f in failed:
-                if f.get("check_id") in TARGET_CHECKS:
-                    findings.append({
-                        "check_id": f.get("check_id"),
-                        "check_name": f.get("name") or f.get("check_id"),
-                        "severity": f.get("severity") or "MEDIUM",
-                        "resource": f.get("resource"),
-                        "file_path": f.get("file_path"),
-                        "file_line_range": f.get("file_line_range"),
-                        "guideline": f.get("guideline"),
-                        "check_type": check_group.get("check_type", "terraform"),
-                    })
+                findings.append({
+                    "check_id": f.get("check_id"),
+                    "check_name": f.get("name") or f.get("check_id"),
+                    "severity": f.get("severity") or "MEDIUM",
+                    "resource": f.get("resource"),
+                    "file_path": f.get("file_path"),
+                    "file_line_range": f.get("file_line_range"),
+                    "guideline": f.get("guideline"),
+                    "check_type": check_group.get("check_type", "terraform"),
+                })
 
         result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
         with open(os.path.join(RESULTS_DIR, "checkov.json"), "w") as f:
