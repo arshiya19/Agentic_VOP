@@ -57,11 +57,11 @@ resource "aws_s3_bucket" "vulnerable_bucket" {
 
 resource "aws_security_group" "vulnerable_sg" {
   name        = "cspm-lab-ENVNAME-open-sg"
-  description = "INTENTIONALLY OPEN — Checkov scan target"
+  description = "INTENTIONALLY OPEN - Checkov scan target"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "SSH open to world — intentional misconfiguration"
+    description = "SSH open to world - intentional misconfiguration"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
