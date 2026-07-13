@@ -19,6 +19,14 @@ systemctl start docker
 usermod -aG docker ubuntu
 
 # =============================================================================
+# 0. Install Terraform (needed to apply CSPM lab resources)
+# =============================================================================
+curl -fsSL https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip -o /tmp/terraform.zip
+unzip -o /tmp/terraform.zip -d /usr/local/bin/
+rm -f /tmp/terraform.zip
+terraform version
+
+# =============================================================================
 # 1. SAST Lab — Flask app with SQL injection (for Semgrep)
 # =============================================================================
 mkdir -p /opt/vuln-labs/sast-lab
@@ -195,16 +203,18 @@ cd /opt/vuln-labs/infra-lab
 docker build -t vuln-lab-image:latest . 2>/dev/null || true
 
 # =============================================================================
-# 4. CSPM Lab — Vulnerable Terraform samples (for Checkov)
-#    These files are scan targets only — never applied as real infrastructure.
+# 4. CSPM Lab — Vulnerable Terraform (applied as real AWS resources)
+#    Creates intentionally misconfigured S3 bucket + Security Group.
+#    SA4 will later fix these by editing the .tf and re-applying.
 # =============================================================================
 mkdir -p /opt/vuln-labs/cspm-lab
-cat > /opt/vuln-labs/cspm-lab/cspm-lab.tf << 'TFEOF'
+cat > /opt/vuln-labs/cspm-lab/main.tf << 'TFEOF'
 # =============================================================================
-# CSPM Lab — Intentionally Misconfigured Terraform (Scan Target Only)
+# CSPM Lab — Intentionally Misconfigured AWS Resources
 # =============================================================================
-# This file is NEVER applied. It exists solely as a Checkov scan target
-# to produce CSPM findings for the VOP platform.
+# These resources are REAL and INTENTIONALLY VULNERABLE.
+# Checkov scans this file and reports findings.
+# SA4 (automated fixer) will remediate by editing this file and re-applying.
 #
 # Intentional findings:
 #   1. S3 bucket — no encryption, no versioning, no public access block
@@ -219,10 +229,18 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  backend "s3" {
+    # Configured via: terraform init -backend-config=backend.hcl
+  }
 }
 
 provider "aws" {
-  region = "us-east-1"
+  region = "${aws_region}"
+}
+
+data "aws_vpc" "default" {
+  default = true
 }
 
 # -----------------------------------------------------------------------------
@@ -231,11 +249,11 @@ provider "aws" {
 # -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "vulnerable_bucket" {
-  bucket        = "cspm-lab-intentionally-public-bucket"
+  bucket        = "cspm-lab-${name_prefix}-bucket"
   force_destroy = true
 
   tags = {
-    Name    = "cspm-lab-vulnerable-bucket"
+    Name    = "cspm-lab-${name_prefix}-bucket"
     Purpose = "checkov-scan-target"
   }
 }
@@ -251,8 +269,9 @@ resource "aws_s3_bucket" "vulnerable_bucket" {
 # -----------------------------------------------------------------------------
 
 resource "aws_security_group" "vulnerable_sg" {
-  name        = "cspm-lab-open-sg"
+  name        = "cspm-lab-${name_prefix}-open-sg"
   description = "INTENTIONALLY OPEN — Checkov scan target"
+  vpc_id      = data.aws_vpc.default.id
 
   ingress {
     description = "SSH open to world — intentional misconfiguration"
@@ -270,15 +289,29 @@ resource "aws_security_group" "vulnerable_sg" {
   }
 
   tags = {
-    Name    = "cspm-lab-open-sg"
+    Name    = "cspm-lab-${name_prefix}-open-sg"
     Purpose = "checkov-scan-target"
   }
 }
 TFEOF
 
+# Create backend config for CSPM lab Terraform state
+cat > /opt/vuln-labs/cspm-lab/backend.hcl << 'BKEOF'
+bucket         = "${terraform_state_bucket}"
+key            = "vuln-labs/cspm-lab/${name_prefix}/terraform.tfstate"
+region         = "${aws_region}"
+encrypt        = true
+dynamodb_table = "${terraform_lock_table}"
+BKEOF
+
+# Initialize and apply the CSPM lab Terraform to create real resources
+cd /opt/vuln-labs/cspm-lab
+terraform init -backend-config=backend.hcl -input=false
+terraform apply -auto-approve -input=false
+
 %{ if install_scanners ~}
 # =============================================================================
-# 5. Install Scanners (scan-source role only)
+# 5. Install Scanners
 # =============================================================================
 
 # Install Trivy

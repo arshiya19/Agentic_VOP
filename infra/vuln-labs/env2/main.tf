@@ -61,12 +61,14 @@ variable "instance_type" {
 module "lab" {
   source = "../modules/lab-instance"
 
-  role                = "remediation"
-  name_prefix         = "vop-vuln-lab-env2"
-  aws_region          = var.aws_region
-  instance_type       = var.instance_type
-  install_scanners    = true  # Installed for ad-hoc validation after fixes
-  install_scan_server = false # No scan server — this is the remediation target
+  role                   = "remediation"
+  name_prefix            = "vop-vuln-lab-env2"
+  aws_region             = var.aws_region
+  instance_type          = var.instance_type
+  install_scanners       = true  # Installed for ad-hoc validation after fixes
+  install_scan_server    = false # No scan server — this is the remediation target
+  terraform_state_bucket = "sisyfix-terraform-state-486655355038"
+  terraform_lock_table   = "sisyfix-terraform-locks"
 }
 
 # -----------------------------------------------------------------------------

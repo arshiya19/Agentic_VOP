@@ -26,3 +26,13 @@ output "ssh_private_key_path" {
   description = "Path to the generated SSH private key"
   value       = local_file.private_key.filename
 }
+
+output "instance_profile_arn" {
+  description = "ARN of the IAM instance profile attached to the EC2"
+  value       = aws_iam_instance_profile.lab.arn
+}
+
+output "iam_role_arn" {
+  description = "ARN of the IAM role for the lab instance"
+  value       = aws_iam_role.lab.arn
+}

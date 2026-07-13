@@ -52,3 +52,13 @@ variable "vpc_id" {
   type        = string
   default     = ""
 }
+
+variable "terraform_state_bucket" {
+  description = "S3 bucket name for Terraform state (used by CSPM lab on the instance)"
+  type        = string
+}
+
+variable "terraform_lock_table" {
+  description = "DynamoDB table name for Terraform state locking"
+  type        = string
+}
