@@ -270,11 +270,11 @@ resource "aws_s3_bucket" "vulnerable_bucket" {
 
 resource "aws_security_group" "vulnerable_sg" {
   name        = "cspm-lab-${name_prefix}-open-sg"
-  description = "INTENTIONALLY OPEN — Checkov scan target"
+  description = "INTENTIONALLY OPEN - Checkov scan target"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "SSH open to world — intentional misconfiguration"
+    description = "SSH open to world - intentional misconfiguration"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -307,7 +307,7 @@ BKEOF
 # Initialize and apply the CSPM lab Terraform to create real resources
 cd /opt/vuln-labs/cspm-lab
 terraform init -backend-config=backend.hcl -input=false
-terraform apply -auto-approve -input=false
+terraform apply -auto-approve -input=false || echo "WARNING: CSPM lab terraform apply failed. Resources may not exist."
 
 %{ if install_scanners ~}
 # =============================================================================
