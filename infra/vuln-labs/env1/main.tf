@@ -60,13 +60,15 @@ variable "instance_type" {
 module "lab" {
   source = "../modules/lab-instance"
 
-  role                = "scan-source"
-  name_prefix         = "vop-vuln-lab-env1"
-  aws_region          = var.aws_region
-  instance_type       = var.instance_type
-  install_scanners    = true
-  install_scan_server = true
-  scan_server_port    = 8090
+  role                   = "scan-source"
+  name_prefix            = "vop-vuln-lab-env1"
+  aws_region             = var.aws_region
+  instance_type          = var.instance_type
+  install_scanners       = true
+  install_scan_server    = true
+  scan_server_port       = 8090
+  terraform_state_bucket = "sisyfix-terraform-state-486655355038"
+  terraform_lock_table   = "sisyfix-terraform-locks"
 }
 
 # -----------------------------------------------------------------------------
