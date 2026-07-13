@@ -227,10 +227,11 @@ resource "aws_iam_role_policy" "cspm_sg" {
           "ec2:RevokeSecurityGroupEgress",
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSecurityGroupRules",
-          "ec2:CreateTags",
-          "ec2:DeleteTags",
           "ec2:DescribeVpcs",
-          "ec2:DescribeNetworkInterfaces"
+          "ec2:DescribeVpcAttribute",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:CreateTags",
+          "ec2:DeleteTags"
         ]
         Resource = "*"
       }
