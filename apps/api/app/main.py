@@ -1943,9 +1943,7 @@ def reject_remediation_package(pkg_id: int, body: RejectPackageRequest) -> dict:
 
 
 @app.post("/admin/remediation-packages/{pkg_id}/fix", status_code=202)
-def fix_remediation_package(
-    pkg_id: int, background_tasks: BackgroundTasks
-) -> dict:
+def fix_remediation_package(pkg_id: int, background_tasks: BackgroundTasks) -> dict:
     """Dispatch Sub-Agent 4 (the Fixer) against this package.
 
     Runs in the background — returns 202 immediately with the new fix_run id.
@@ -1961,17 +1959,9 @@ def fix_remediation_package(
     explicit human click before touching env2.
     """
     sb = supabase_admin()
-    resp = (
-        sb.table("remediation_packages")
-        .select("status")
-        .eq("id", pkg_id)
-        .limit(1)
-        .execute()
-    )
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
     if not resp.data:
-        raise HTTPException(
-            status_code=404, detail=f"remediation_package {pkg_id} not found"
-        )
+        raise HTTPException(status_code=404, detail=f"remediation_package {pkg_id} not found")
     current = resp.data[0]["status"]
     if current != "ready_for_execution":
         raise HTTPException(
@@ -1983,6 +1973,7 @@ def fix_remediation_package(
         )
 
     from .config import settings  # noqa: PLC0415
+
     if not settings.fixer_env2_instance_id:
         raise HTTPException(
             status_code=503,
@@ -1993,6 +1984,8 @@ def fix_remediation_package(
         )
 
     # Fresh agent_run_id for this fix — traces stream under this id.
+    import uuid  # noqa: PLC0415
+
     fix_run_uuid = str(uuid.uuid4())
     sb.table("agent_runs").insert(
         {
@@ -2007,6 +2000,7 @@ def fix_remediation_package(
     def _dispatch() -> None:
         from .agents.fixer import run_fixer  # noqa: PLC0415
         from .agents.trace import emit_trace  # noqa: PLC0415
+
         try:
             run_fixer(
                 pkg_id,

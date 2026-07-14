@@ -127,11 +127,7 @@ class RemediationStep(BaseModel):
         # Try to reconstruct step from whatever the LLM split it into
         action = data.pop("action", None) or data.pop("Action", None)
         command = data.pop("command", None) or data.pop("Command", None)
-        why = (
-            data.pop("why", None)
-            or data.pop("Why", None)
-            or data.pop("rationale", None)
-        )
+        why = data.pop("why", None) or data.pop("Why", None) or data.pop("rationale", None)
         if not (action or command or why):
             return data  # Nothing to reconstruct from
 
@@ -140,9 +136,7 @@ class RemediationStep(BaseModel):
             parts.append(str(action).rstrip())
         if command:
             cmd_lines = str(command).splitlines() or [str(command)]
-            indented = "\n".join(
-                "    " + ln if ln.strip() else ln for ln in cmd_lines
-            )
+            indented = "\n".join("    " + ln if ln.strip() else ln for ln in cmd_lines)
             parts.append(f"Command:\n{indented}")
         if why:
             parts.append(f"Why: {str(why).rstrip()}")
@@ -195,6 +189,7 @@ class ValidationTest(BaseModel):
             from .agents.remediation.verifier import (  # noqa: PLC0415
                 _extract_commands,
             )
+
             commands = _extract_commands(step_str)
             command = "\n".join(commands) if commands else ""
         except Exception:  # noqa: BLE001

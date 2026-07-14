@@ -117,16 +117,16 @@ _BLOCKED_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
 # =============================================================================
 _ALLOWED_WORKING_DIRECTORIES: tuple[str, ...] = (
     "/opt/vuln-labs/",
-    "/tmp/fixer-scratch/",   # for scratch files the strategy writes locally
+    "/tmp/fixer-scratch/",  # noqa: S108 — intentional scratch dir for fixer strategies
 )
 
 
 # Patterns that reveal the command is trying to escape the working directory
 # via path traversal. Any of these fires → reject regardless of blocklist.
 _PATH_TRAVERSAL_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\.\./\.\./"),     # up two dirs
-    re.compile(r"\.\.\\/\.\.\\/"), # windows-style just in case
-    re.compile(r"~/\.\.[^/]"),      # ~/../
+    re.compile(r"\.\./\.\./"),  # up two dirs
+    re.compile(r"\.\.\\/\.\.\\/"),  # windows-style just in case
+    re.compile(r"~/\.\.[^/]"),  # ~/../
 ]
 
 

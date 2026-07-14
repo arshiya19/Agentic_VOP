@@ -375,17 +375,35 @@ def _issue_payload(issue: dict, raw: dict | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 _IAC_SOURCE_PREFIXES = (
-    "checkov", "prisma", "tfsec", "kics", "terrascan",
-    "conftest", "cfn-nag",
+    "checkov",
+    "prisma",
+    "tfsec",
+    "kics",
+    "terrascan",
+    "conftest",
+    "cfn-nag",
 )
 _SCA_SOURCE_PREFIXES = (
-    "trivy-fs", "trivy-image", "snyk", "grype", "dependabot", "osv",
+    "trivy-fs",
+    "trivy-image",
+    "snyk",
+    "grype",
+    "dependabot",
+    "osv",
 )
 _OS_SOURCE_PREFIXES = (
-    "trivy-os", "tenable", "qualys", "nessus", "wazuh",
+    "trivy-os",
+    "tenable",
+    "qualys",
+    "nessus",
+    "wazuh",
 )
 _SAST_SOURCE_PREFIXES = (
-    "semgrep", "bandit", "sonarqube", "codeql", "snyk-code",
+    "semgrep",
+    "bandit",
+    "sonarqube",
+    "codeql",
+    "snyk-code",
 )
 
 
@@ -400,14 +418,14 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
 
     # file_path — try scanner-specific keys in priority order
     file_path = (
-        raw.get("file_path")               # Checkov, Prisma
+        raw.get("file_path")  # Checkov, Prisma
         or raw.get("FilePath")
-        or raw.get("filename")             # Bandit
-        or raw.get("path")                 # Semgrep
-        or (raw.get("location") or {}).get("filename")    # tfsec
+        or raw.get("filename")  # Bandit
+        or raw.get("path")  # Semgrep
+        or (raw.get("location") or {}).get("filename")  # tfsec
         or (raw.get("location") or {}).get("path")
-        or raw.get("Target")               # Trivy container/fs target
-        or identity.get("file")            # canonical fallback
+        or raw.get("Target")  # Trivy container/fs target
+        or identity.get("file")  # canonical fallback
     )
 
     # working_directory — parent of file_path
@@ -419,11 +437,11 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
 
     # resource_name — Terraform address / package name / image ref
     resource_name = (
-        raw.get("resource")                # Checkov: "aws_s3_bucket.foo"
+        raw.get("resource")  # Checkov: "aws_s3_bucket.foo"
         or raw.get("Resource")
-        or raw.get("PkgName")              # Trivy dep
-        or raw.get("Repository")           # Trivy image
-        or (raw.get("package") or {}).get("name")   # Snyk
+        or raw.get("PkgName")  # Trivy dep
+        or raw.get("Repository")  # Trivy image
+        or (raw.get("package") or {}).get("name")  # Snyk
         or identity.get("resource")
     )
 
@@ -444,10 +462,16 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
     # points at an IaC artifact, upgrade the hint.
     if file_path and scanner_type == "sca":
         iac_extensions = (
-            ".tf", ".tf.json", ".hcl",
-            ".yaml", ".yml", ".json",
-            ".dockerfile", "Dockerfile",
-            ".jsonnet", ".libsonnet",
+            ".tf",
+            ".tf.json",
+            ".hcl",
+            ".yaml",
+            ".yml",
+            ".json",
+            ".dockerfile",
+            "Dockerfile",
+            ".jsonnet",
+            ".libsonnet",
         )
         if any(file_path.endswith(ext) for ext in iac_extensions):
             scanner_type = "iac"

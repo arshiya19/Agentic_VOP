@@ -279,10 +279,11 @@ def _summarize_node(state: DemoMasterState) -> dict:
     ).eq("run_id", run_id).execute()
 
     fix_summary = (
-        "fix stage skipped" if fix.get("skipped")
+        "fix stage skipped"
+        if fix.get("skipped")
         else f"{fix.get('succeeded', 0)} fixed"
-             f" · {fix.get('rolled_back', 0)} rolled back"
-             f" · {fix.get('failed', 0)} failed"
+        f" · {fix.get('rolled_back', 0)} rolled back"
+        f" · {fix.get('failed', 0)} failed"
     )
 
     emit_trace_demo(

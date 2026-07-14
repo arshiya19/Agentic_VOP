@@ -154,13 +154,12 @@ def run_fixer(
 
     # 3. Extract IaC context (same helper SA3 used — single source of truth)
     from ..remediation.planner import _extract_iac_context  # noqa: PLC0415
+
     raw = _load_raw_finding(sb, issue_row.get("raw_finding_id"))
     iac_ctx = _extract_iac_context(issue_row, raw)
 
     # 4. Decide strategy
-    strategy_key = _select_strategy_key(
-        family=family, scanner_type=iac_ctx.get("scanner_type")
-    )
+    strategy_key = _select_strategy_key(family=family, scanner_type=iac_ctx.get("scanner_type"))
     strategy_cls = _STRATEGY_BY_KEY.get(strategy_key)
     if strategy_cls is None:
         raise RuntimeError(
@@ -221,9 +220,7 @@ def run_fixer(
 
     # 8. Execute lifecycle
     started_at = utcnow()
-    outcome = _run_lifecycle(
-        sb, fix_run_id, strategy, ctx, emit_fn=emit_fn
-    )
+    outcome = _run_lifecycle(sb, fix_run_id, strategy, ctx, emit_fn=emit_fn)
 
     # 9. Persist final state
     finalize_fix_run(sb, fix_run_id, ctx=ctx, outcome=outcome, started_at=started_at)
@@ -417,13 +414,7 @@ def _extract_plan_output(step_results: list) -> str | None:
 
 
 def _load_package(sb: Any, package_id: int) -> dict | None:
-    resp = (
-        sb.table("remediation_packages")
-        .select("*")
-        .eq("id", package_id)
-        .limit(1)
-        .execute()
-    )
+    resp = sb.table("remediation_packages").select("*").eq("id", package_id).limit(1).execute()
     rows = resp.data or []
     return rows[0] if rows else None
 
@@ -437,12 +428,6 @@ def _load_issue(sb: Any, issue_id: int) -> dict | None:
 def _load_raw_finding(sb: Any, raw_finding_id: int | None) -> dict | None:
     if raw_finding_id is None:
         return None
-    resp = (
-        sb.table("raw_findings")
-        .select("raw")
-        .eq("id", raw_finding_id)
-        .limit(1)
-        .execute()
-    )
+    resp = sb.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
     rows = resp.data or []
     return (rows[0] or {}).get("raw") if rows else None

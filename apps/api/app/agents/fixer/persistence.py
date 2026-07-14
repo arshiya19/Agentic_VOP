@@ -88,18 +88,16 @@ def set_status(
 def set_backup_reference(sb: Any, fix_run_id: int, backup_reference: str) -> None:
     """Persist the backup path so rollback (later or from a different process)
     knows where to restore from."""
-    sb.table("fix_runs").update(
-        {"backup_reference": backup_reference}
-    ).eq("id", fix_run_id).execute()
+    sb.table("fix_runs").update({"backup_reference": backup_reference}).eq(
+        "id", fix_run_id
+    ).execute()
 
 
-def set_terraform_plan_output(
-    sb: Any, fix_run_id: int, plan_output: str
-) -> None:
+def set_terraform_plan_output(sb: Any, fix_run_id: int, plan_output: str) -> None:
     """Persist the raw `terraform plan` stdout for audit."""
-    sb.table("fix_runs").update(
-        {"terraform_plan_output": plan_output[:100_000]}
-    ).eq("id", fix_run_id).execute()
+    sb.table("fix_runs").update({"terraform_plan_output": plan_output[:100_000]}).eq(
+        "id", fix_run_id
+    ).execute()
 
 
 # =============================================================================
@@ -125,9 +123,7 @@ def finalize_fix_run(
     patch: dict[str, Any] = {
         "status": outcome.status,
         "step_results": [r.model_dump(mode="json") for r in outcome.step_results],
-        "validation_results": [
-            r.model_dump(mode="json") for r in outcome.validation_results
-        ],
+        "validation_results": [r.model_dump(mode="json") for r in outcome.validation_results],
         "rollback_results": [r.model_dump(mode="json") for r in outcome.rollback_results],
         "rollback_triggered": len(outcome.rollback_results) > 0,
         "finished_at": finished_at.isoformat(),
@@ -158,9 +154,7 @@ def finalize_fix_run(
 # =============================================================================
 def get_fix_run(sb: Any, fix_run_id: int) -> dict | None:
     """Fetch a fix_run row by id (for API endpoints + UI)."""
-    resp = (
-        sb.table("fix_runs").select("*").eq("id", fix_run_id).limit(1).execute()
-    )
+    resp = sb.table("fix_runs").select("*").eq("id", fix_run_id).limit(1).execute()
     rows = resp.data or []
     return rows[0] if rows else None
 

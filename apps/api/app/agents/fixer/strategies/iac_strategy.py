@@ -119,11 +119,13 @@ class IaCStrategy(BaseFixStrategy):
         # 2. Target file exists (if the package declares one)
         if ctx.file_path:
             exists = file_exists(executor, ctx.file_path)
-            checks.append({
-                "check": "target_file_exists",
-                "passed": exists,
-                "file_path": ctx.file_path,
-            })
+            checks.append(
+                {
+                    "check": "target_file_exists",
+                    "passed": exists,
+                    "file_path": ctx.file_path,
+                }
+            )
             if not exists:
                 return PreFlightResult(
                     ready=False,
@@ -137,11 +139,13 @@ class IaCStrategy(BaseFixStrategy):
 
         # 3. Terraform available
         tf_probe = terraform_version(executor)
-        checks.append({
-            "check": "terraform_available",
-            "passed": tf_probe.succeeded,
-            "detail": tf_probe.stdout[:200] if tf_probe.succeeded else tf_probe.stderr[:200],
-        })
+        checks.append(
+            {
+                "check": "terraform_available",
+                "passed": tf_probe.succeeded,
+                "detail": tf_probe.stdout[:200] if tf_probe.succeeded else tf_probe.stderr[:200],
+            }
+        )
         if not tf_probe.succeeded:
             return PreFlightResult(
                 ready=False,
@@ -160,24 +164,24 @@ class IaCStrategy(BaseFixStrategy):
             )
             if not init_marker:
                 self._emit(
-                    ctx, "MESSAGE",
+                    ctx,
+                    "MESSAGE",
                     f"→ Pre-flight: running `terraform init` in {ctx.working_directory}",
                 )
-                init_result = terraform_init(
-                    executor, ctx.working_directory, config=self.config
+                init_result = terraform_init(executor, ctx.working_directory, config=self.config)
+                checks.append(
+                    {
+                        "check": "terraform_init",
+                        "passed": init_result.succeeded,
+                        "duration_ms": init_result.duration_ms,
+                    }
                 )
-                checks.append({
-                    "check": "terraform_init",
-                    "passed": init_result.succeeded,
-                    "duration_ms": init_result.duration_ms,
-                })
                 if not init_result.succeeded:
                     return PreFlightResult(
                         ready=False,
                         checks=checks,
                         blocking_reason=(
-                            "terraform init failed. stderr: "
-                            f"{init_result.stderr[:400]}"
+                            f"terraform init failed. stderr: {init_result.stderr[:400]}"
                         ),
                     )
 
@@ -230,7 +234,8 @@ class IaCStrategy(BaseFixStrategy):
                 # them). Belt-and-suspenders — record as skipped, but this
                 # shouldn't happen in practice.
                 self._emit(
-                    ctx, "MESSAGE",
+                    ctx,
+                    "MESSAGE",
                     f"⚠ Step {step_num}: no runnable command extracted — skipping",
                 )
                 results.append(
@@ -246,18 +251,16 @@ class IaCStrategy(BaseFixStrategy):
             safety = validate_command(combined, ctx.working_directory)
             if not safety.allowed:
                 self._emit(
-                    ctx, "ERROR",
+                    ctx,
+                    "ERROR",
                     f"🛑 Step {step_num} blocked by safety: {safety.reason}",
                 )
-                results.append(
-                    self._blocked_step(
-                        step_num, action_label, combined, safety.reason
-                    )
-                )
+                results.append(self._blocked_step(step_num, action_label, combined, safety.reason))
                 return results  # HALT — orchestrator triggers rollback
 
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"→ Step {step_num}/{len(remediation_steps)}: {action_label}",
             )
 
@@ -274,48 +277,54 @@ class IaCStrategy(BaseFixStrategy):
             except (RemoteExecError, CommandTimeoutError) as e:
                 finished = utcnow()
                 self._emit(
-                    ctx, "ERROR",
+                    ctx,
+                    "ERROR",
                     f"✗ Step {step_num} raised {type(e).__name__}: {str(e)[:200]}",
                 )
-                results.append(StepResult(
-                    step_num=step_num,
-                    action=action_label,
-                    command=combined,
-                    stderr=str(e)[:2000],
-                    exit_code=-1,
-                    duration_ms=int((finished - started).total_seconds() * 1000),
-                    status="failed",
-                    started_at=started,
-                    finished_at=finished,
-                    ssm_command_id=None,
-                ))
+                results.append(
+                    StepResult(
+                        step_num=step_num,
+                        action=action_label,
+                        command=combined,
+                        stderr=str(e)[:2000],
+                        exit_code=-1,
+                        duration_ms=int((finished - started).total_seconds() * 1000),
+                        status="failed",
+                        started_at=started,
+                        finished_at=finished,
+                        ssm_command_id=None,
+                    )
+                )
                 return results  # HALT
 
             status = "success" if cmd_result.succeeded else "failed"
-            results.append(StepResult(
-                step_num=step_num,
-                action=action_label,
-                command=combined,
-                stdout=cmd_result.stdout[:20000],
-                stderr=cmd_result.stderr[:5000],
-                exit_code=cmd_result.exit_code,
-                duration_ms=cmd_result.duration_ms,
-                status=status,
-                started_at=cmd_result.started_at,
-                finished_at=cmd_result.finished_at,
-                ssm_command_id=cmd_result.ssm_command_id,
-            ))
+            results.append(
+                StepResult(
+                    step_num=step_num,
+                    action=action_label,
+                    command=combined,
+                    stdout=cmd_result.stdout[:20000],
+                    stderr=cmd_result.stderr[:5000],
+                    exit_code=cmd_result.exit_code,
+                    duration_ms=cmd_result.duration_ms,
+                    status=status,
+                    started_at=cmd_result.started_at,
+                    finished_at=cmd_result.finished_at,
+                    ssm_command_id=cmd_result.ssm_command_id,
+                )
+            )
 
             if not cmd_result.succeeded:
                 self._emit(
-                    ctx, "ERROR",
-                    f"✗ Step {step_num} exit={cmd_result.exit_code}: "
-                    f"{cmd_result.stderr[:200]}",
+                    ctx,
+                    "ERROR",
+                    f"✗ Step {step_num} exit={cmd_result.exit_code}: {cmd_result.stderr[:200]}",
                 )
                 return results  # HALT
             else:
                 self._emit(
-                    ctx, "MESSAGE",
+                    ctx,
+                    "MESSAGE",
                     f"✓ Step {step_num} succeeded ({cmd_result.duration_ms}ms)",
                 )
 
@@ -366,37 +375,42 @@ class IaCStrategy(BaseFixStrategy):
             if method != "cli":
                 # http / sql / manual not supported in Phase-1 (Nikhil's scope).
                 # Record as inconclusive; caller can inspect the note.
-                results.append(ValidationResult(
-                    test_name=test_name,
-                    method=method,
-                    command=command,
-                    expected=expected,
-                    actual="",
-                    passed=False,
-                    is_rescan=is_rescan,
-                    comparison_note=(
-                        f"method={method!r} not supported in Phase-1 IaC strategy "
-                        "(cli only). Skipping."
-                    ),
-                ))
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual="",
+                        passed=False,
+                        is_rescan=is_rescan,
+                        comparison_note=(
+                            f"method={method!r} not supported in Phase-1 IaC strategy "
+                            "(cli only). Skipping."
+                        ),
+                    )
+                )
                 continue
 
             safety = validate_command(command, ctx.working_directory)
             if not safety.allowed:
-                results.append(ValidationResult(
-                    test_name=test_name,
-                    method=method,
-                    command=command,
-                    expected=expected,
-                    actual="",
-                    passed=False,
-                    is_rescan=is_rescan,
-                    comparison_note=f"Safety blocked: {safety.reason}",
-                ))
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual="",
+                        passed=False,
+                        is_rescan=is_rescan,
+                        comparison_note=f"Safety blocked: {safety.reason}",
+                    )
+                )
                 continue
 
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"→ Validating: {test_name}" + (" (RE-SCAN)" if is_rescan else ""),
             )
             try:
@@ -406,38 +420,44 @@ class IaCStrategy(BaseFixStrategy):
                     timeout_s=self.config.rescan_timeout_s if is_rescan else None,
                 )
             except (RemoteExecError, CommandTimeoutError) as e:
-                results.append(ValidationResult(
-                    test_name=test_name,
-                    method=method,
-                    command=command,
-                    expected=expected,
-                    actual=str(e)[:500],
-                    passed=False,
-                    is_rescan=is_rescan,
-                    comparison_note=f"Exec error: {type(e).__name__}",
-                ))
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual=str(e)[:500],
+                        passed=False,
+                        is_rescan=is_rescan,
+                        comparison_note=f"Exec error: {type(e).__name__}",
+                    )
+                )
                 continue
 
             actual = (cmd_result.stdout or "") + (cmd_result.stderr or "")
             passed = self._compare_expected(expected, actual, exit_code=cmd_result.exit_code)
 
-            results.append(ValidationResult(
-                test_name=test_name,
-                method=method,
-                command=command,
-                expected=expected,
-                actual=actual[:10000],
-                passed=passed,
-                duration_ms=cmd_result.duration_ms,
-                is_rescan=is_rescan,
-                comparison_note=(
-                    "string-contains + exit-zero match"
-                    if passed else "expected not found in actual OR non-zero exit"
-                ),
-            ))
+            results.append(
+                ValidationResult(
+                    test_name=test_name,
+                    method=method,
+                    command=command,
+                    expected=expected,
+                    actual=actual[:10000],
+                    passed=passed,
+                    duration_ms=cmd_result.duration_ms,
+                    is_rescan=is_rescan,
+                    comparison_note=(
+                        "string-contains + exit-zero match"
+                        if passed
+                        else "expected not found in actual OR non-zero exit"
+                    ),
+                )
+            )
 
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"{'✓' if passed else '✗'} {test_name}: {'passed' if passed else 'failed'}",
             )
 
@@ -450,7 +470,8 @@ class IaCStrategy(BaseFixStrategy):
         results: list[RollbackResult] = []
         if not ctx.backup_reference or not ctx.file_path:
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 "Rollback: no backup_reference/file_path — nothing to restore",
             )
             return results
@@ -460,56 +481,58 @@ class IaCStrategy(BaseFixStrategy):
         # 1. Restore the .bak
         started = utcnow()
         try:
-            restore_result = restore_from_backup(
-                executor, ctx.file_path, ctx.backup_reference
-            )
+            restore_result = restore_from_backup(executor, ctx.file_path, ctx.backup_reference)
             finished = utcnow()
-            results.append(RollbackResult(
-                step_num=1,
-                action=f"Restore {ctx.file_path} from {ctx.backup_reference}",
-                command=f"cp {ctx.backup_reference!r} {ctx.file_path!r}",
-                stdout=restore_result.stdout[:2000],
-                stderr=restore_result.stderr[:2000],
-                exit_code=restore_result.exit_code,
-                duration_ms=restore_result.duration_ms,
-                status="success" if restore_result.succeeded else "failed",
-                started_at=restore_result.started_at,
-                finished_at=restore_result.finished_at,
-            ))
+            results.append(
+                RollbackResult(
+                    step_num=1,
+                    action=f"Restore {ctx.file_path} from {ctx.backup_reference}",
+                    command=f"cp {ctx.backup_reference!r} {ctx.file_path!r}",
+                    stdout=restore_result.stdout[:2000],
+                    stderr=restore_result.stderr[:2000],
+                    exit_code=restore_result.exit_code,
+                    duration_ms=restore_result.duration_ms,
+                    status="success" if restore_result.succeeded else "failed",
+                    started_at=restore_result.started_at,
+                    finished_at=restore_result.finished_at,
+                )
+            )
             self._emit(ctx, "MESSAGE", f"↶ Rollback: restored {ctx.file_path}")
         except RemoteExecError as e:
             finished = utcnow()
-            results.append(RollbackResult(
-                step_num=1,
-                action=f"Restore {ctx.file_path}",
-                command=f"cp {ctx.backup_reference!r} {ctx.file_path!r}",
-                stderr=str(e)[:2000],
-                exit_code=-1,
-                duration_ms=int((finished - started).total_seconds() * 1000),
-                status="failed",
-                started_at=started,
-                finished_at=finished,
-            ))
+            results.append(
+                RollbackResult(
+                    step_num=1,
+                    action=f"Restore {ctx.file_path}",
+                    command=f"cp {ctx.backup_reference!r} {ctx.file_path!r}",
+                    stderr=str(e)[:2000],
+                    exit_code=-1,
+                    duration_ms=int((finished - started).total_seconds() * 1000),
+                    status="failed",
+                    started_at=started,
+                    finished_at=finished,
+                )
+            )
             self._emit(ctx, "ERROR", f"Rollback restore failed: {e}")
             return results  # Can't proceed to apply if restore failed
 
         # 2. Re-apply so live state converges back to pre-fix
         if ctx.working_directory:
-            apply_result = terraform_apply(
-                executor, ctx.working_directory, config=self.config
+            apply_result = terraform_apply(executor, ctx.working_directory, config=self.config)
+            results.append(
+                RollbackResult(
+                    step_num=2,
+                    action="terraform apply (reconcile to restored .tf)",
+                    command="terraform apply -auto-approve -no-color -input=false",
+                    stdout=apply_result.stdout[:20000],
+                    stderr=apply_result.stderr[:5000],
+                    exit_code=apply_result.exit_code,
+                    duration_ms=apply_result.duration_ms,
+                    status="success" if apply_result.succeeded else "failed",
+                    started_at=apply_result.started_at,
+                    finished_at=apply_result.finished_at,
+                )
             )
-            results.append(RollbackResult(
-                step_num=2,
-                action="terraform apply (reconcile to restored .tf)",
-                command="terraform apply -auto-approve -no-color -input=false",
-                stdout=apply_result.stdout[:20000],
-                stderr=apply_result.stderr[:5000],
-                exit_code=apply_result.exit_code,
-                duration_ms=apply_result.duration_ms,
-                status="success" if apply_result.succeeded else "failed",
-                started_at=apply_result.started_at,
-                finished_at=apply_result.finished_at,
-            ))
             self._emit(
                 ctx,
                 "MESSAGE" if apply_result.succeeded else "ERROR",
@@ -601,9 +624,7 @@ class IaCStrategy(BaseFixStrategy):
         )
 
     @staticmethod
-    def _blocked_step(
-        step_num: int, action: str, command: str, reason: str
-    ) -> StepResult:
+    def _blocked_step(step_num: int, action: str, command: str, reason: str) -> StepResult:
         ts = utcnow()
         return StepResult(
             step_num=step_num,

@@ -57,8 +57,8 @@ class StepResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     step_num: int  # 1-indexed to match package.remediation_steps ordering
-    action: str    # short human-readable label extracted from step.step's first line
-    command: str   # the actual command that ran (may differ from package if LLM adapted)
+    action: str  # short human-readable label extracted from step.step's first line
+    command: str  # the actual command that ran (may differ from package if LLM adapted)
     stdout: str = ""
     stderr: str = ""
     exit_code: int = 0
@@ -126,7 +126,7 @@ class BackupResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    backup_reference: str    # path to the .bak file or git branch name
+    backup_reference: str  # path to the .bak file or git branch name
     backup_type: Literal["file_copy", "git_branch", "state_snapshot", "none"]
     original_path: str | None = None
     created_at: datetime
