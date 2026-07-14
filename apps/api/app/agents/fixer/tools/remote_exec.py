@@ -73,7 +73,7 @@ class RemoteExecutor:
         *,
         region: str,
         config: FixerConfig,
-        ssm_client: "SSMClient | None" = None,
+        ssm_client: SSMClient | None = None,
     ) -> None:
         if not instance_id:
             raise ValueError("RemoteExecutor requires a non-empty instance_id")
@@ -81,7 +81,7 @@ class RemoteExecutor:
         self.region = region
         self.config = config
         # ssm_client is injectable for tests + LocalStack integration
-        self._ssm: "SSMClient" = ssm_client or boto3.client("ssm", region_name=region)
+        self._ssm: SSMClient = ssm_client or boto3.client("ssm", region_name=region)
 
     # =========================================================================
     # Reachability probe
@@ -196,11 +196,9 @@ class RemoteExecutor:
                     },
                     TimeoutSeconds=execution_timeout_s,
                 )
-                cmd_id = ((resp.get("Command") or {}).get("CommandId"))
+                cmd_id = (resp.get("Command") or {}).get("CommandId")
                 if not cmd_id:
-                    raise RemoteExecError(
-                        f"SSM SendCommand returned no CommandId (resp: {resp!r})"
-                    )
+                    raise RemoteExecError(f"SSM SendCommand returned no CommandId (resp: {resp!r})")
                 return cmd_id
             except ClientError as e:
                 code = (e.response.get("Error") or {}).get("Code", "")
@@ -212,9 +210,7 @@ class RemoteExecutor:
                 if attempt < retries and is_transient:
                     time.sleep(backoff * (attempt + 1))
                     continue
-                raise RemoteExecError(
-                    f"SSM SendCommand failed ({code}): {e}"
-                ) from e
+                raise RemoteExecError(f"SSM SendCommand failed ({code}): {e}") from e
             except BotoCoreError as e:
                 raise RemoteExecError(f"SSM connection error: {e}") from e
 
@@ -283,9 +279,7 @@ class RemoteExecutor:
                     InstanceId=self.instance_id,
                 )
             except ClientError as e:
-                raise RemoteExecError(
-                    f"SSM GetCommandInvocation polling failed: {e}"
-                ) from e
+                raise RemoteExecError(f"SSM GetCommandInvocation polling failed: {e}") from e
 
     # =========================================================================
     # Internal — command wrapping helpers

@@ -17,7 +17,7 @@ write/append/backup — reads are already allowlist-checked via working_dir).
 
 from __future__ import annotations
 
-from ..models import CommandResult, utcnow
+from ..models import CommandResult
 from .remote_exec import RemoteExecError, RemoteExecutor
 
 
@@ -43,8 +43,7 @@ def read_file(
     result = executor.run_command(cmd)
     if not result.succeeded:
         raise RemoteExecError(
-            f"read_file({file_path!r}) failed exit={result.exit_code}: "
-            f"{result.stderr[:200]}"
+            f"read_file({file_path!r}) failed exit={result.exit_code}: {result.stderr[:200]}"
         )
     return result.stdout
 
@@ -83,21 +82,17 @@ def backup_file(
     keeps timestamps consistent with the target's clock, which matters if
     logs correlate across systems.
     """
-    started = utcnow()
     timestamp_expr = "$(date -u +%Y%m%d-%H%M%SZ)"
-    backup_expr = f"{file_path}.bak-{timestamp_expr}"
 
     # Emit the resolved backup path back on stdout so caller can capture it
     # (env2's timestamp, not the API host's).
     cmd = (
-        f"BACKUP={file_path!r}.bak-{timestamp_expr} && "
-        f"cp {file_path!r} \"$BACKUP\" && echo \"$BACKUP\""
+        f'BACKUP={file_path!r}.bak-{timestamp_expr} && cp {file_path!r} "$BACKUP" && echo "$BACKUP"'
     )
     result = executor.run_command(cmd)
     if not result.succeeded:
         raise RemoteExecError(
-            f"backup_file({file_path!r}) failed exit={result.exit_code}: "
-            f"{result.stderr[:200]}"
+            f"backup_file({file_path!r}) failed exit={result.exit_code}: {result.stderr[:200]}"
         )
 
     backup_path = result.stdout.strip().splitlines()[-1] if result.stdout else ""
@@ -149,8 +144,7 @@ def append_file(
     result = executor.run_command(cmd)
     if not result.succeeded:
         raise RemoteExecError(
-            f"append_file({file_path!r}) failed exit={result.exit_code}: "
-            f"{result.stderr[:200]}"
+            f"append_file({file_path!r}) failed exit={result.exit_code}: {result.stderr[:200]}"
         )
     return result
 
@@ -173,17 +167,14 @@ def write_file(
     read + modified the file locally and wants to push the new state back.
     """
     if heredoc_marker in content:
-        raise ValueError(
-            f"write_file: heredoc marker {heredoc_marker!r} appears in content"
-        )
+        raise ValueError(f"write_file: heredoc marker {heredoc_marker!r} appears in content")
 
     cmd = f"cat > {file_path!r} << '{heredoc_marker}'\n{content}\n{heredoc_marker}"
 
     result = executor.run_command(cmd)
     if not result.succeeded:
         raise RemoteExecError(
-            f"write_file({file_path!r}) failed exit={result.exit_code}: "
-            f"{result.stderr[:200]}"
+            f"write_file({file_path!r}) failed exit={result.exit_code}: {result.stderr[:200]}"
         )
     return result
 

@@ -15,6 +15,7 @@ bottom-up without cyclic import pain during construction.
 def __getattr__(name):  # PEP 562 lazy module attribute
     if name == "run_fixer":
         from .orchestrator import run_fixer
+
         return run_fixer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
