@@ -218,14 +218,21 @@ def _try_parse_final_answer(
 
 
 def _repair_common_json_errors(text: str) -> str | None:
-    """Best-effort repair of common LLM JSON slips. Returns None if unchanged.
+    """Character-level JSON hygiene — nothing shape-aware.
 
     Handles:
       - Trailing commas before `}` or `]`
       - JavaScript-style comments `//` and `/* */`
       - Smart quotes replaced with ASCII
-      - Steps emitted as {action, command, why} instead of a single `step`
-        string — merge into a single step field with newlines
+
+    Structural shape normalization (action/command/why → step, or step →
+    command inside a ValidationTest slot) lives in the Pydantic schemas
+    themselves as @model_validator(mode='before') — see RemediationStep
+    and ValidationTest in app/models.py. Keeping shape logic there means
+    it applies wherever the schema is used (top-level or nested) with
+    zero location tracking here.
+
+    Returns None when nothing changed (short-circuit for the caller).
     """
     repaired = text
     # Strip line comments — but ONLY when they follow whitespace or a comma
@@ -239,61 +246,7 @@ def _repair_common_json_errors(text: str) -> str | None:
     repaired = repaired.replace("“", '"').replace("”", '"')
     repaired = repaired.replace("‘", "'").replace("’", "'")
 
-    # Structural repair: LLM sometimes emits action/command/why as separate
-    # JSON fields instead of one `step` string. Detect and merge.
-    repaired = _merge_split_step_fields(repaired)
-
     return repaired if repaired != text else None
-
-
-def _merge_split_step_fields(text: str) -> str:
-    """Detect `{"action": "...", "command": "...", "why": "..."}` step objects
-    and rewrite them as `{"step": "action\\n\\nCommand:\\n    command\\n\\nWhy: why"}`.
-
-    Handles the common LLM misinterpretation of our worked example where it
-    treats the three text-sections labels as three JSON keys.
-    """
-    # This regex is intentionally loose — captures action/command/why in any
-    # order, with source/source_url optionally present. We can't handle every
-    # nesting but the common shape is: {"action":"...","command":"...","why":"...","source":...,"source_url":...}
-    try:
-        parsed = json.loads(text)
-    except Exception:  # noqa: BLE001
-        return text  # Not valid JSON at all — can't structurally repair
-
-    def _fix_step_dict(d: dict) -> dict:
-        # If already has `step`, leave alone
-        if "step" in d:
-            return d
-        action = d.pop("action", None) or d.pop("Action", None)
-        command = d.pop("command", None) or d.pop("Command", None)
-        why = d.pop("why", None) or d.pop("Why", None) or d.pop("rationale", None)
-        if action or command or why:
-            parts = []
-            if action:
-                parts.append(str(action).rstrip())
-            if command:
-                # Indent command lines by 4 spaces for the STEP FORMAT shape
-                cmd_lines = str(command).splitlines() or [str(command)]
-                indented = "\n".join("    " + ln if ln.strip() else ln for ln in cmd_lines)
-                parts.append(f"Command:\n{indented}")
-            if why:
-                parts.append(f"Why: {str(why).rstrip()}")
-            d["step"] = "\n\n".join(parts)
-        return d
-
-    def _walk(node):
-        if isinstance(node, dict):
-            # If this dict looks like a step object, fix it
-            if any(k in node for k in ("action", "command", "why", "Action", "Command", "Why")):
-                node = _fix_step_dict(dict(node))
-            return {k: _walk(v) for k, v in node.items()}
-        if isinstance(node, list):
-            return [_walk(item) for item in node]
-        return node
-
-    fixed = _walk(parsed)
-    return json.dumps(fixed) if fixed != parsed else text
 
 
 def _candidate_json_slices(text: str) -> list[str]:

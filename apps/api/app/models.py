@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TriggerTargets(BaseModel):
@@ -89,38 +89,144 @@ class RemediationStep(BaseModel):
     """One step in a remediation or rollback plan, with its citation.
 
     The `step` field contains rich text — action + embedded command(s) +
-    'Why' rationale. Max length is generous (2000) so each step can carry
-    a paste-ready command + 2-3 sentences of context without exceeding
-    Pydantic validation.
+    'Why' rationale. Length cap is generous (8000 chars) so a single step
+    can carry a full HCL/Kubernetes-manifest/multi-line-CLI block plus
+    2-3 sentences of context. Steps for enterprise IaC changes (IAM
+    role + policy + replication config) legitimately hit 2500-4000 chars.
+
+    extra="ignore" — any field the LLM emits that isn't declared here is
+    silently dropped, so shape drift on unknown fields never hard-fails
+    the whole package. Required fields still enforced. See docstring at
+    LLMRemediationOutput for the design rationale.
+
+    _normalize_shape (mode=before) — recovers `step` field when the LLM
+    emitted its contents under separate `action`/`command`/`why` keys.
+    Same recovery logic used to live in agent_v2's JSON repair; moved
+    here so it applies wherever the schema is used (both remediation_steps
+    and rollback_plan.steps).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
-    step: str = Field(..., min_length=10, max_length=2000)
+    step: str = Field(..., min_length=10, max_length=8000)
     source: str = Field(..., min_length=3, max_length=200)
     source_url: str = Field("", max_length=500)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_shape(cls, data: Any) -> Any:
+        """If LLM emitted action/command/why as separate keys instead of one
+        `step` string, merge them. This is DATA RECOVERY — dropping the
+        misplaced fields would lose the actual instruction content.
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("step"):
+            return data  # Already has step — leave alone
+
+        # Try to reconstruct step from whatever the LLM split it into
+        action = data.pop("action", None) or data.pop("Action", None)
+        command = data.pop("command", None) or data.pop("Command", None)
+        why = (
+            data.pop("why", None)
+            or data.pop("Why", None)
+            or data.pop("rationale", None)
+        )
+        if not (action or command or why):
+            return data  # Nothing to reconstruct from
+
+        parts: list[str] = []
+        if action:
+            parts.append(str(action).rstrip())
+        if command:
+            cmd_lines = str(command).splitlines() or [str(command)]
+            indented = "\n".join(
+                "    " + ln if ln.strip() else ln for ln in cmd_lines
+            )
+            parts.append(f"Command:\n{indented}")
+        if why:
+            parts.append(f"Why: {str(why).rstrip()}")
+        data["step"] = "\n\n".join(parts)
+        return data
+
 
 class ValidationTest(BaseModel):
-    """One concrete test (validation or regression) the operator can run."""
+    """One concrete test (validation or regression) the operator can run.
 
-    model_config = ConfigDict(extra="forbid")
+    _normalize_shape (mode=before) — recovers the `command` field when the
+    LLM put its contents under a `step` key (confusing this shape with a
+    RemediationStep). Also recovers `name` from the first line of the step
+    text. Applies wherever ValidationTest is used (top-level validation_tests
+    AND rollback_plan.validation) — same code path, no location tracking.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     name: str = Field(..., min_length=5, max_length=200)
     method: str = Field(..., min_length=2, max_length=50)
-    command: str = Field(..., min_length=5, max_length=1000)
-    expected: str = Field(..., min_length=5, max_length=400)
+    # Cap at 4000 — some validation commands are multi-line pipelines with
+    # jq filters, awk, etc. Legitimate enterprise CLI checks hit 1500+ chars.
+    command: str = Field(..., min_length=5, max_length=4000)
+    # Cap at 1500 — expected output can be a full JSON snippet from a
+    # `describe-*` call the operator eyeballs against.
+    expected: str = Field(..., min_length=5, max_length=1500)
     source: str = Field(..., min_length=3, max_length=200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_shape(cls, data: Any) -> Any:
+        """If LLM put command text in a `step` field (a RemediationStep
+        misinterpretation), extract the command from it. DATA RECOVERY —
+        without this, the command would be silently dropped by extra=ignore
+        and Pydantic would then fail on missing required `command`.
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("command"):
+            return data  # Already has command — leave alone
+
+        step_text = data.pop("step", None) or data.pop("Step", None)
+        if not step_text:
+            return data  # Nothing to recover from — will fail on missing command
+
+        step_str = str(step_text)
+        # Try to pull a runnable command out of the step text
+        try:
+            from .agents.remediation.verifier import (  # noqa: PLC0415
+                _extract_commands,
+            )
+            commands = _extract_commands(step_str)
+            command = "\n".join(commands) if commands else ""
+        except Exception:  # noqa: BLE001
+            command = ""
+
+        if not command:
+            # Fallback: strip common headers + take a reasonable slice
+            command = step_str.replace("Command:", "").strip()
+
+        data["command"] = command[:4000]  # respect the cap
+        # If name is also missing, derive from first line of step text
+        if not data.get("name"):
+            first_line = step_str.split("\n", 1)[0].strip()
+            data["name"] = (first_line[:200] or "validation")[:200]
+        # Sensible defaults for other required fields the LLM may have
+        # legitimately omitted (schema still enforces min_length below)
+        data.setdefault("method", "cli")
+        data.setdefault("expected", "command exits 0")
+        data.setdefault("source", data.get("source_url", "recovered from step field"))
+        return data
 
 
 class TestScript(BaseModel):
     """A runnable script that automates one or more validation tests."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     language: Literal["bash", "python", "powershell", "yaml", "hcl"]
     description: str = Field(..., min_length=10, max_length=300)
-    code: str = Field(..., min_length=20, max_length=3000)
+    # Cap at 10000 — a complete Terraform module or a boto3 smoke test
+    # with error handling easily hits 4000-6000 chars.
+    code: str = Field(..., min_length=20, max_length=10000)
 
 
 class RollbackPlan(BaseModel):
@@ -131,7 +237,7 @@ class RollbackPlan(BaseModel):
     and the reasoning behind the recommendation (not "just revert to X").
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     supported: bool = Field(
         ..., description="True if rollback is technically possible for this finding"
@@ -180,7 +286,7 @@ class RemediationPathway(BaseModel):
     architectural change.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     # LLM-generated
     objective: str = Field(..., min_length=10, max_length=300)
@@ -207,12 +313,34 @@ class RemediationPathway(BaseModel):
 
 
 class LLMRemediationOutput(BaseModel):
-    """Sub-Agent 3's LLM output (v1.1). Caller attaches issue_id, family,
+    """Sub-Agent 3's LLM output. Caller attaches issue_id, family,
     validation_metadata, confidence, approval_required, recommended_pathway_index
     AFTER the call.
+
+    ─── Design: why LLM-facing sub-schemas use extra="ignore" ───
+    Every sub-schema below (RemediationStep, ValidationTest, TestScript,
+    RollbackPlan, RemediationPathway, LLMRemediationOutput itself) uses
+    extra="ignore" instead of extra="forbid".
+
+    Reason: LLMs periodically emit fields the schema doesn't declare —
+    the wrong-shape drift is unavoidable at scale. With extra="forbid",
+    any single unexpected field hard-fails the entire package parse and
+    the pipeline falls back to the hybrid CLI-only planner (bad). With
+    extra="ignore", the offending field is silently dropped and the rest
+    of the (well-formed) package parses cleanly.
+
+    Required fields still enforced — if the LLM drops something we
+    actually need, the parse still fails visibly. But it fails on missing
+    REQUIRED data, not on gratuitous extras. Genuine data errors surface;
+    LLM whims don't.
+
+    This is deliberately more permissive than the pattern for
+    LLMNormalizedIssue / LLMEnrichmentDecision (which stay extra="forbid"
+    — they operate on smaller, tighter, less-ambiguous schemas where
+    strict-mode drift is rare and revealing).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     finding: str = Field(..., min_length=20, max_length=400)
     root_cause: str = Field(..., min_length=20, max_length=400)
