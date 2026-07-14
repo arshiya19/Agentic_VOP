@@ -38,6 +38,7 @@ from .confidence import compute_confidence, compute_confidence_agentic
 from .planner import (
     _agent_validation_metadata,
     _derive_approval,
+    _extract_iac_context,
     _issue_payload,
     _pattern_payload,
     _validation_metadata_for,
@@ -157,7 +158,8 @@ def run_demo_remediation(run_id: str) -> dict:
 
             asset = _lookup_demo_asset(all_assets, issue)
 
-            pkg = _plan_and_enrich(run_id, prompt_row, issue, pattern, asset, family, sb_pub)
+            raw = _raw_for(issue)
+            pkg = _plan_and_enrich(run_id, prompt_row, issue, pattern, asset, family, sb_pub, raw)
             planned += 1
 
             _persist_to_demo(sb_demo, pkg, run_id)
@@ -240,11 +242,17 @@ def _plan_and_enrich(
     asset: dict,
     family: str,
     sb_pub,
+    raw: dict | None = None,
 ) -> RemediationPackage:
     """Try agentic path first (v2.0). On success, validation_metadata +
     confidence derive from the agent's actual citations + verifier report
     (pattern NOT used). On failure, fall back to hybrid v1.4 with pattern
     adaptation.
+
+    `raw` is the raw_findings.raw jsonb for this issue (or None). Used for
+    IaC context extraction (file_path, working_directory, resource_name,
+    scanner_type) that SA3 v2.4's prompt needs to decide IaC-first vs
+    direct-cloud fix shape.
     """
     agent_result = None  # tuple (LLMRemediationOutput, VerificationReport) | None
     llm_output: LLMRemediationOutput | None = None
@@ -254,8 +262,12 @@ def _plan_and_enrich(
         from .agent_v2 import run_agentic_planner  # noqa: PLC0415
 
         try:
+            # Augment issue with IaC context so SA3 v2.4's prompt has file_path,
+            # working_directory, resource_name, scanner_type. Preserves original
+            # issue for downstream persistence.
+            agent_issue = {**issue, **_extract_iac_context(issue, raw)}
             agent_result = run_agentic_planner(
-                issue=issue,
+                issue=agent_issue,
                 asset=asset,
                 family=family,
                 run_id=run_id,
@@ -303,7 +315,7 @@ def _plan_and_enrich(
         fallback_model = params.get("fallback_model", "gpt-4o")
 
         payload = {
-            "issue": _issue_payload(issue),
+            "issue": _issue_payload(issue, raw),
             "asset": asset,
             "pattern": _pattern_payload(pattern),
         }

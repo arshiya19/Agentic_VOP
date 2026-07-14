@@ -18,6 +18,7 @@ locals {
   optional_app_secrets = {
     "ANTHROPIC_API_KEY"       = "PLACEHOLDER"
     "GOOGLE_API_KEY"          = "PLACEHOLDER"
+    "TAVILY_API_KEY"          = "PLACEHOLDER"
     "TENABLE_ACCESS_KEY"      = "PLACEHOLDER"
     "TENABLE_SECRET_KEY"      = "PLACEHOLDER"
     "GITHUB_TOKEN"            = "PLACEHOLDER"

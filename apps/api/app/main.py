@@ -1940,3 +1940,88 @@ def reject_remediation_package(pkg_id: int, body: RejectPackageRequest) -> dict:
         "reason": body.reason,
         "rejected_by": body.rejected_by,
     }
+
+
+@app.post("/admin/remediation-packages/{pkg_id}/fix", status_code=202)
+def fix_remediation_package(
+    pkg_id: int, background_tasks: BackgroundTasks
+) -> dict:
+    """Dispatch Sub-Agent 4 (the Fixer) against this package.
+
+    Runs in the background — returns 202 immediately with the new fix_run id.
+    Poll `/admin/fix-runs/{id}` (Phase-2 endpoint) or watch the trace stream
+    for progress.
+
+    Requires:
+      - package.status = 'ready_for_execution' (previously approved)
+      - settings.fixer_env2_instance_id set (env2 provisioned)
+
+    Real pipeline is manual-trigger only — the demo pipeline auto-chains
+    via master_demo's fix node. Production intentionally requires an
+    explicit human click before touching env2.
+    """
+    sb = supabase_admin()
+    resp = (
+        sb.table("remediation_packages")
+        .select("status")
+        .eq("id", pkg_id)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(
+            status_code=404, detail=f"remediation_package {pkg_id} not found"
+        )
+    current = resp.data[0]["status"]
+    if current != "ready_for_execution":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"package status={current!r} — must be 'ready_for_execution' "
+                "(approve it first via /approve)"
+            ),
+        )
+
+    from .config import settings  # noqa: PLC0415
+    if not settings.fixer_env2_instance_id:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "FIXER_ENV2_INSTANCE_ID not configured. Provision env2 and set "
+                "the instance id via env before enabling the /fix endpoint."
+            ),
+        )
+
+    # Fresh agent_run_id for this fix — traces stream under this id.
+    fix_run_uuid = str(uuid.uuid4())
+    sb.table("agent_runs").insert(
+        {
+            "run_id": fix_run_uuid,
+            "event_id": f"fix-package-{pkg_id}",
+            "persona": "sub-agent-4",
+            "status": "pending",
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+    ).execute()
+
+    def _dispatch() -> None:
+        from .agents.fixer import run_fixer  # noqa: PLC0415
+        from .agents.trace import emit_trace  # noqa: PLC0415
+        try:
+            run_fixer(
+                pkg_id,
+                agent_run_id=fix_run_uuid,
+                sb=sb,
+                emit_fn=emit_trace,
+                environment="sandbox",
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_trace(
+                fix_run_uuid,
+                "sub-agent-4",
+                "ERROR",
+                f"Fixer dispatch failed: {type(exc).__name__}: {str(exc)[:300]}",
+            )
+
+    background_tasks.add_task(_dispatch)
+    return {"agent_run_id": fix_run_uuid, "package_id": pkg_id, "status": "dispatched"}

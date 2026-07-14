@@ -308,10 +308,10 @@ def _load_prompt(sb) -> dict:
     return rows[0]
 
 
-def _issue_payload(issue: dict) -> dict:
+def _issue_payload(issue: dict, raw: dict | None = None) -> dict:
     """Trim the issue row to the fields Sub-Agent 3 actually uses.
 
-    Includes two upstream-derived hints:
+    Includes upstream-derived hints:
       solution              — scanner-provided remediation text (Sub-Agent 1
                               extracts this from raw scanner output when
                               present: Snyk `remediation`, Trivy `FixedVersion`,
@@ -319,10 +319,16 @@ def _issue_payload(issue: dict) -> dict:
       remediation_suggestion — Sub-Agent 2's LLM-generated summary derived
                               from the whole enriched context.
 
-    Sub-Agent 3's prompt (v1.4+) treats these as ADDITIONAL CONTEXT — the
-    curated pattern from remediation_patterns remains authoritative for
-    rollback / test scripts / sources. Hints inform placeholder filling and
-    can align/override when they don't conflict with the pattern.
+    And v2.4 IaC context (Nikhil review 2026-07-13):
+      file_path             — the source artifact SA3 must edit (for IaC
+                              findings). Extracted from raw + asset_identity.
+      working_directory     — parent dir of file_path (for terraform/pip/etc.
+                              commands that need `cd` first)
+      resource_name         — Terraform address / Docker image ref / etc.
+      scanner_type          — lexical hint: iac | sca | sast | os_pkg | other
+
+    Sub-Agent 3's prompt v2.4 uses these to decide IaC-first vs direct-cloud
+    remediation shape. See migration 0052 + iac-first-remediation memory rule.
     """
     return {
         "id": issue.get("id"),
@@ -342,6 +348,115 @@ def _issue_payload(issue: dict) -> dict:
         # Upstream hints (v1.4)
         "solution": issue.get("solution"),
         "remediation_suggestion": issue.get("remediation_suggestion"),
+        # IaC context (v2.4) — universal fields for the fixer downstream
+        **_extract_iac_context(issue, raw),
+    }
+
+
+# ---------------------------------------------------------------------------
+# IaC context extraction (v2.4)
+#
+# Universal signal extraction — no per-scanner branches in the shape of the
+# output, only in the LOOKUP for each field. Each scanner emits the same raw
+# concept (file path, resource name) under a different key; we normalize.
+#
+# Scanner keys we've observed in the wild:
+#   Checkov     — raw.file_path, raw.resource, raw.check_id
+#   Prisma      — raw.file_path, raw.resource
+#   Tfsec       — raw.location.filename, raw.rule_id, raw.resource
+#   Trivy misc  — raw.Target, raw.MisconfSummary.Successes / Failures / Exceptions
+#   Trivy vuln  — raw.PkgName, raw.InstalledVersion, raw.FixedVersion
+#   Semgrep     — raw.path, raw.check_id, raw.start.line
+#   Bandit      — raw.filename, raw.test_id, raw.line_number
+#   Snyk-code   — raw.locations[0].physicalLocation.artifactLocation.uri
+#
+# Add new scanners by extending the ordered dispatch lists below — no
+# call-site changes needed.
+# ---------------------------------------------------------------------------
+
+_IAC_SOURCE_PREFIXES = (
+    "checkov", "prisma", "tfsec", "kics", "terrascan",
+    "conftest", "cfn-nag",
+)
+_SCA_SOURCE_PREFIXES = (
+    "trivy-fs", "trivy-image", "snyk", "grype", "dependabot", "osv",
+)
+_OS_SOURCE_PREFIXES = (
+    "trivy-os", "tenable", "qualys", "nessus", "wazuh",
+)
+_SAST_SOURCE_PREFIXES = (
+    "semgrep", "bandit", "sonarqube", "codeql", "snyk-code",
+)
+
+
+def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
+    """Return {file_path, working_directory, resource_name, scanner_type}.
+
+    Best-effort — any field may be None if the raw finding doesn't carry it.
+    SA3's prompt handles missing signals gracefully (falls back to asset_identity).
+    """
+    raw = raw or {}
+    identity = issue.get("asset_identity") or {}
+
+    # file_path — try scanner-specific keys in priority order
+    file_path = (
+        raw.get("file_path")               # Checkov, Prisma
+        or raw.get("FilePath")
+        or raw.get("filename")             # Bandit
+        or raw.get("path")                 # Semgrep
+        or (raw.get("location") or {}).get("filename")    # tfsec
+        or (raw.get("location") or {}).get("path")
+        or raw.get("Target")               # Trivy container/fs target
+        or identity.get("file")            # canonical fallback
+    )
+
+    # working_directory — parent of file_path
+    working_directory = None
+    if file_path:
+        # Strip filename to get dir. Handles both absolute and relative paths.
+        idx = file_path.rfind("/")
+        working_directory = file_path[:idx] if idx > 0 else None
+
+    # resource_name — Terraform address / package name / image ref
+    resource_name = (
+        raw.get("resource")                # Checkov: "aws_s3_bucket.foo"
+        or raw.get("Resource")
+        or raw.get("PkgName")              # Trivy dep
+        or raw.get("Repository")           # Trivy image
+        or (raw.get("package") or {}).get("name")   # Snyk
+        or identity.get("resource")
+    )
+
+    # scanner_type — lexical hint from source name (SA3 verifies)
+    source = (issue.get("source") or "").lower()
+    scanner_type: str | None = None
+    if any(source.startswith(p) for p in _IAC_SOURCE_PREFIXES):
+        scanner_type = "iac"
+    elif any(source.startswith(p) for p in _SCA_SOURCE_PREFIXES):
+        scanner_type = "sca"
+    elif any(source.startswith(p) for p in _OS_SOURCE_PREFIXES):
+        scanner_type = "os_pkg"
+    elif any(source.startswith(p) for p in _SAST_SOURCE_PREFIXES):
+        scanner_type = "sast"
+
+    # Special case: Trivy misconfig on .tf/.yaml files is IaC even though
+    # the source prefix says trivy-fs / trivy-image. If the file extension
+    # points at an IaC artifact, upgrade the hint.
+    if file_path and scanner_type == "sca":
+        iac_extensions = (
+            ".tf", ".tf.json", ".hcl",
+            ".yaml", ".yml", ".json",
+            ".dockerfile", "Dockerfile",
+            ".jsonnet", ".libsonnet",
+        )
+        if any(file_path.endswith(ext) for ext in iac_extensions):
+            scanner_type = "iac"
+
+    return {
+        "file_path": file_path,
+        "working_directory": working_directory,
+        "resource_name": resource_name,
+        "scanner_type": scanner_type,
     }
 
 
@@ -414,8 +529,13 @@ def plan_remediation(
         from .agent_v2 import run_agentic_planner  # noqa: PLC0415
 
         try:
+            # Augment issue with IaC context so SA3 v2.4's prompt has file_path,
+            # working_directory, resource_name, scanner_type to decide IaC-first
+            # vs direct-cloud fix shape. Preserves original issue for downstream
+            # persistence code.
+            agent_issue = {**issue, **_extract_iac_context(issue, raw)}
             agent_result = run_agentic_planner(
-                issue=issue,
+                issue=agent_issue,
                 asset=asset,
                 family=family,
                 run_id=run_id,
@@ -466,7 +586,7 @@ def plan_remediation(
         params = prompt_row.get("parameters") or {}
 
         payload = {
-            "issue": _issue_payload(issue),
+            "issue": _issue_payload(issue, raw),
             "asset": asset,
             "pattern": _pattern_payload(pattern),
         }

@@ -52,6 +52,20 @@ class Settings(BaseSettings):
     # 200K TPM limit for gpt-4o-mini. Bump to 10+ if you have a higher tier.
     llm_parallel_workers: int = 5
 
+    # --- Sub-Agent 4 (Fixer) settings ---
+    # env2 (Remediation Playground) EC2 instance id — the sandbox target for
+    # every fix run. Set once per deployment. Empty = Sub-Agent 4 refuses to
+    # start (fails fast rather than silently attempt fixes with no target).
+    fixer_env2_instance_id: str = ""
+
+    # Toggle for auto-chaining Sub-Agent 4 after Sub-Agent 3 in the demo
+    # pipeline. Set false to keep SA3 emitting packages without triggering
+    # execution (useful when env2 isn't provisioned yet).
+    fixer_auto_chain: bool = True
+
+    # AWS region for env2 + SSM RunCommand calls.
+    aws_region: str = "us-east-1"
+
     # --- Secrets encryption ---
     # Base64-encoded 32-byte key for AES-256-GCM encryption of sensitive
     # scanner metadata (headers, body, credentials). REQUIRED for production.
