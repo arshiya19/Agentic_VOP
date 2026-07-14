@@ -177,30 +177,10 @@ resource "aws_iam_role_policy" "cspm_s3" {
       {
         Sid    = "CSPMLabS3"
         Effect = "Allow"
-        Action = [
-          "s3:CreateBucket",
-          "s3:DeleteBucket",
-          "s3:PutBucketPolicy",
-          "s3:GetBucketPolicy",
-          "s3:DeleteBucketPolicy",
-          "s3:PutPublicAccessBlock",
-          "s3:GetPublicAccessBlock",
-          "s3:PutBucketEncryption",
-          "s3:GetBucketEncryption",
-          "s3:DeleteBucketEncryption",
-          "s3:PutBucketVersioning",
-          "s3:GetBucketVersioning",
-          "s3:PutBucketTagging",
-          "s3:GetBucketTagging",
-          "s3:ListBucket",
-          "s3:GetBucketLocation",
-          "s3:GetBucketAcl",
-          "s3:PutBucketAcl",
-          "s3:GetBucketLogging",
-          "s3:PutBucketLogging"
-        ]
+        Action = "s3:*"
         Resource = [
-          "arn:aws:s3:::cspm-lab-*"
+          "arn:aws:s3:::cspm-lab-*",
+          "arn:aws:s3:::cspm-lab-*/*"
         ]
       }
     ]
@@ -216,23 +196,9 @@ resource "aws_iam_role_policy" "cspm_sg" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "CSPMLabSGManage"
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateSecurityGroup",
-          "ec2:DeleteSecurityGroup",
-          "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:RevokeSecurityGroupIngress",
-          "ec2:AuthorizeSecurityGroupEgress",
-          "ec2:RevokeSecurityGroupEgress",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeSecurityGroupRules",
-          "ec2:DescribeVpcs",
-          "ec2:DescribeVpcAttribute",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:CreateTags",
-          "ec2:DeleteTags"
-        ]
+        Sid      = "CSPMLabSGManage"
+        Effect   = "Allow"
+        Action   = "ec2:*"
         Resource = "*"
       }
     ]
