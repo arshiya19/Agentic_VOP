@@ -37,6 +37,44 @@ FAMILIES = [
     "os_vulnerability",
 ]
 
+
+# Pinned demo issues — identified by (source_vuln_id, asset_identity.resource).
+# Row IDs drift across real-fetch runs (each fetch creates fresh rows), but
+# these two fields are stable identifiers for "the same finding on the same
+# resource". Sampler prefers pinned when present; falls back to
+# highest-risk-per-family when a pinned check has no matching row this run.
+#
+# Curated to give the demo pipeline a stable, reproducible set that exercises
+# the closed loop across a range of remediation shapes:
+#   * CKV_AWS_21, CKV2_AWS_6, CKV_AWS_18 — additive IaC edits (add a
+#     resource); the S3 bucket ends up with versioning, BPA, and access
+#     logging all successfully declared in main.tf.
+#   * CKV_AWS_24 — sed-mutation of an existing SG rule (harder shape; often
+#     rolls back cleanly).
+#   * CKV2_AWS_5 — orphan-SG check that SA3 misdiagnoses (adds a rule when
+#     the check requires the SG to be attached to a resource); demonstrated
+#     as an honest "rewriter cannot fix" case.
+#
+# CKV_AWS_145 was previously in this list to exercise the KMS-vs-AES256
+# rewriter path, but that check specifically mandates KMS and env2's IAM
+# role has zero KMS access — the rewriter correctly falls back to AES256
+# encryption (which fixes the vulnerability) but Checkov still fails the
+# specific check ID. Swapped for CKV_AWS_18 which is any-encryption
+# equivalent from a fix-executability standpoint.
+_PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
+    ("CKV_AWS_21", "aws_s3_bucket.vulnerable_bucket"),   # S3 versioning
+    ("CKV2_AWS_6", "aws_s3_bucket.vulnerable_bucket"),   # S3 public access block
+    ("CKV_AWS_18", "aws_s3_bucket.vulnerable_bucket"),   # S3 access logging enabled
+    ("CKV_AWS_24", "aws_security_group.vulnerable_sg"),  # SG ingress 0.0.0.0/0:22
+    ("CKV2_AWS_5", "aws_security_group.vulnerable_sg"),  # SG must be attached
+]
+
+
+def _resource_label(issue: dict) -> str:
+    """Extract the HCL-style resource label from an issue's asset_identity."""
+    ai = issue.get("asset_identity") or {}
+    return ai.get("resource") or ai.get("file") or ai.get("id") or ""
+
 # Rank severity/priority strings so we can pick the "highest-risk" issue per
 # family deterministically even when derived_risk is NULL. Fallback ordering.
 _SEVERITY_RANK = {
@@ -128,36 +166,81 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
         + (f" (plus {unknown_count} unclassified)" if unknown_count else ""),
     )
 
-    # ---- 3. Pick 1 per family (highest derived_risk, tie-break by severity) ----
+    # ---- 3. Pick issues ----
+    # Preferred path: index all -ec2 issues by (source_vuln_id, resource_label)
+    # and look up each pinned check. This makes demo runs reproducible — the
+    # same 5 findings feed the pipeline every time regardless of how many
+    # times real-fetch has been re-run (which creates fresh row IDs each time).
+    #
+    # Fallback path: if a pinned check has no matching row this run (fresh
+    # env2 doesn't have that scanner registered yet, etc.), we fill missing
+    # families from the highest-risk-per-family pool so the pipeline still
+    # has SOMETHING to work with rather than exiting empty.
     def _rank(issue: dict) -> tuple[float, int]:
         risk = issue.get("derived_risk")
         risk_val = float(risk) if risk is not None else -1.0
         sev_val = _SEVERITY_RANK.get(issue.get("severity") or "", 0)
         return (risk_val, sev_val)
 
-    picks: list[dict] = []
-    families_missing: list[str] = []
-    for fam in FAMILIES:
-        candidates = by_family[fam]
-        if not candidates:
-            families_missing.append(fam)
-            continue
-        picks.append(max(candidates, key=_rank))
+    by_pin: dict[tuple[str, str], dict] = {}
+    for iss in ec2_issues:
+        key = (iss.get("source_vuln_id") or "", _resource_label(iss))
+        # First-seen wins — real-fetch may create duplicate rows across runs.
+        by_pin.setdefault(key, iss)
 
-    if families_missing:
-        emit_trace_demo(
-            run_id,
-            "system",
-            "MESSAGE",
-            f"Sampled {len(picks)}/5 families. Missing: {families_missing}",
-        )
-    else:
-        emit_trace_demo(
-            run_id,
-            "system",
-            "MESSAGE",
-            f"Sampled {len(picks)}/5 families — all covered",
-        )
+    picks: list[dict] = []
+    pinned_hits: list[str] = []
+    pinned_misses: list[str] = []
+    for check_id, resource in _PINNED_DEMO_CHECKS:
+        hit = by_pin.get((check_id, resource))
+        if hit is not None:
+            picks.append(hit)
+            pinned_hits.append(f"{check_id}@{resource.split('.')[-1]}")
+        else:
+            pinned_misses.append(f"{check_id}@{resource.split('.')[-1]}")
+
+    emit_trace_demo(
+        run_id,
+        "system",
+        "MESSAGE",
+        f"Pinned picks: {len(picks)}/{len(_PINNED_DEMO_CHECKS)} hit "
+        f"(hit={pinned_hits or '-'}, missed={pinned_misses or '-'})",
+    )
+
+    # Fallback: if pinned picks < 2, top up from families that weren't
+    # covered by any pinned hit. Preserves the demo running on fresh env2
+    # setups where pinned checks may not exist yet.
+    if len(picks) < 2:
+        covered_families = {classify_finding(p, raw=raw_by_id.get(p.get("raw_finding_id"))) for p in picks}
+        for fam in FAMILIES:
+            if fam in covered_families:
+                continue
+            candidates = by_family[fam]
+            if not candidates:
+                continue
+            fallback_pick = max(candidates, key=_rank)
+            picks.append(fallback_pick)
+            emit_trace_demo(
+                run_id,
+                "system",
+                "MESSAGE",
+                f"⚠ Fallback: pinned set insufficient — added highest-risk {fam} "
+                f"issue (source_vuln_id={fallback_pick.get('source_vuln_id')})",
+            )
+
+    families_missing = [
+        f for f in FAMILIES
+        if f not in {classify_finding(p, raw=raw_by_id.get(p.get("raw_finding_id"))) for p in picks}
+    ]
+
+    emit_trace_demo(
+        run_id,
+        "system",
+        "MESSAGE",
+        f"Final sample: {len(picks)} issue(s) across "
+        f"{len(FAMILIES) - len(families_missing)}/{len(FAMILIES)} families"
+        + (f" (families uncovered: {families_missing})" if families_missing else ""),
+    )
 
     if not picks:
         return {"sampled": 0, "families_found": [], "families_missing": FAMILIES}

@@ -23,6 +23,7 @@ from .models import (
     StrategyOutcome,
     utcnow,
 )
+from .preflight import run_preflight_rewrite
 from .persistence import (
     any_concurrent_run,
     create_fix_run,
@@ -218,25 +219,75 @@ def run_fixer(
     )
     strategy = strategy_cls(config=cfg, emit_fn=emit_fn)
 
-    # 8. Execute lifecycle
+    # 8. Execute lifecycle — wrapped in try/finally so ANY internal bug
+    # (bad emit_fn signature, LLM crash, unexpected exception) still results
+    # in fix_run being finalized. A crashed run left in 'in_flight' state
+    # locks the concurrency check and blocks every subsequent fix — worse
+    # than the original bug. Better to record a 'failed' outcome and move on.
     started_at = utcnow()
-    outcome = _run_lifecycle(sb, fix_run_id, strategy, ctx, emit_fn=emit_fn)
+    outcome: StrategyOutcome
+    try:
+        outcome = _run_lifecycle(sb, fix_run_id, strategy, ctx, emit_fn=emit_fn)
+    except Exception as e:  # noqa: BLE001
+        # Belt-and-suspenders: _run_lifecycle already catches strategy-level
+        # errors; this catches orchestrator-level bugs (bad emit call, etc.).
+        # Fabricate a failed outcome so finalize_fix_run has something to persist.
+        outcome = StrategyOutcome(
+            status="failed",
+            error_message=(
+                f"orchestrator crashed: {type(e).__name__}: {str(e)[:400]} "
+                f"(fix_run finalized as 'failed' to release concurrency lock)"
+            ),
+        )
+        # Best-effort trace — swallow secondary errors so nothing here can
+        # prevent finalize_fix_run from running.
+        try:
+            emit_fn(
+                agent_run_id,
+                "sub-agent-4",
+                "ERROR",
+                f"✗ Fix run #{fix_run_id} crashed mid-lifecycle: "
+                f"{type(e).__name__}: {str(e)[:300]} — finalizing as failed",
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
 
-    # 9. Persist final state
-    finalize_fix_run(sb, fix_run_id, ctx=ctx, outcome=outcome, started_at=started_at)
+    # 9. Persist final state — MUST run so 'in_flight' status is cleared.
+    # If finalize itself crashes there's not much we can do, but at least the
+    # lifecycle exception path above will have produced a StrategyOutcome.
+    try:
+        finalize_fix_run(sb, fix_run_id, ctx=ctx, outcome=outcome, started_at=started_at)
+    except Exception as e:  # noqa: BLE001
+        try:
+            emit_fn(
+                agent_run_id,
+                "sub-agent-4",
+                "ERROR",
+                f"✗ finalize_fix_run crashed for fix_run #{fix_run_id}: "
+                f"{type(e).__name__}: {str(e)[:300]}. Row may remain 'in_flight' — "
+                f"manual DB fix required.",
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+        raise
 
-    emit_fn(
-        agent_run_id,
-        "sub-agent-4",
-        "DONE",
-        f"🔧 Fix run #{fix_run_id} finished — status={outcome.status} "
-        f"({len(outcome.step_results)} steps, {len(outcome.validation_results)} validations)",
-        payload={
-            "fix_run_id": fix_run_id,
-            "status": outcome.status,
-            "strategy": strategy_key,
-        },
-    )
+    # Best-effort trace — a crash here doesn't affect persisted state.
+    try:
+        emit_fn(
+            agent_run_id,
+            "sub-agent-4",
+            "DONE",
+            f"🔧 Fix run #{fix_run_id} finished — status={outcome.status} "
+            f"({len(outcome.step_results)} steps, {len(outcome.validation_results)} validations)",
+            payload={
+                "fix_run_id": fix_run_id,
+                "status": outcome.status,
+                "strategy": strategy_key,
+            },
+        )
+    except Exception:  # noqa: BLE001, S110
+        pass
+
     return fix_run_id
 
 
@@ -270,6 +321,35 @@ def _run_lifecycle(
         return StrategyOutcome(
             status="failed",
             error_message=preflight.blocking_reason or "pre_flight failed",
+        )
+
+    # ─── Phase 3.5: Pre-flight LLM rewriter ─────────────────────────────
+    # Snapshot env2 (IAM identity + attached policies + terraform state) and
+    # ask an LLM whether any remediation_steps will fail given that state.
+    # High-confidence rewrites are applied to a fresh pathway copy; the
+    # rewriter never modifies steps directly and always fail-opens on any
+    # error (returns the original pathway unchanged). See preflight.py for
+    # the full design.
+    #
+    # The canonical case this catches: SA3 emits `sse_algorithm = "aws:kms"`
+    # for S3 encryption but env2 lacks kms:CreateKey — rewriter swaps to
+    # AES256 which needs zero permissions.
+    try:
+        rewritten_pathway, rewrite_log = run_preflight_rewrite(ctx, emit_fn)
+        if rewrite_log:
+            # ctx is immutable Pydantic; construct a copy with the rewritten
+            # pathway so downstream phases execute the modified package.
+            ctx = ctx.model_copy(update={"pathway": rewritten_pathway})
+    except Exception as e:  # noqa: BLE001
+        # Belt-and-suspenders — run_preflight_rewrite already fail-opens
+        # internally, but if something upstream (import, module-level state)
+        # ever breaks, we still fall through to execute the original package.
+        emit_fn(
+            ctx.agent_run_id,
+            "sub-agent-4",
+            "MESSAGE",
+            f"⚠ Pre-flight rewriter wrapper crashed ({type(e).__name__}: "
+            f"{str(e)[:200]}) — executing original package.",
         )
 
     # ─── Phase 4: Backup ────────────────────────────────────────────────
@@ -372,6 +452,8 @@ def _run_lifecycle(
             # Scanner re-scan authoritatively confirmed the fix. Log the
             # ancillary CLI failures as warnings and mark the run successful.
             emit_fn(
+                ctx.agent_run_id,
+                "sub-agent-4",
                 "MESSAGE",
                 f"⚠ {len(non_rescan_failures)} ancillary validation test(s) failed "
                 f"but scanner re-scan passed — fix confirmed by authoritative check. "
