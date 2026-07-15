@@ -424,6 +424,57 @@ def _extract_commands(step_text: str) -> list[str]:
     return found
 
 
+def _extract_shell_blocks(step_text: str) -> list[str]:
+    """Pull out COMPLETE shell blocks preserved verbatim (newlines intact).
+
+    Different from ``_extract_commands``:
+      * ``_extract_commands`` returns per-line command *hints* for the verifier
+        (each line becomes its own cross-source search query). It drops lines
+        shorter than 4 chars — which mangles multi-line HCL/JSON/YAML blocks
+        appended via ``cat >> file << 'EOF' ... EOF`` because it eats the
+        closing ``}`` / ``]`` on their own lines.
+      * ``_extract_shell_blocks`` returns each ``Command:`` block (or fenced
+        code block) as ONE string with newlines preserved and no per-line
+        filtering. This is what Sub-Agent 4 needs to execute the block as a
+        single SSM invocation without corrupting heredoc content.
+
+    Returns a list because a step can carry more than one block (rare, but
+    supported). Blocks are dedented to their common leading indentation so
+    heredoc terminators like ``EOF`` land at column 0 as bash requires.
+    """
+    if not step_text:
+        return []
+
+    blocks: list[str] = []
+
+    def _dedent_and_add(raw: str) -> None:
+        raw = raw.strip("\n")
+        if not raw.strip():
+            return
+        lines = raw.splitlines()
+        non_empty = [ln for ln in lines if ln.strip()]
+        if non_empty:
+            common_indent = min(len(ln) - len(ln.lstrip()) for ln in non_empty)
+            if common_indent:
+                lines = [
+                    (ln[common_indent:] if len(ln) >= common_indent else ln)
+                    for ln in lines
+                ]
+        block = "\n".join(lines).strip("\n")
+        if block:
+            blocks.append(block)
+
+    # Shape 1+2 — "Command:" / "Commands:" block, preserved as one unit
+    for m in _COMMAND_BLOCK_RE.finditer(step_text):
+        _dedent_and_add(m.group(1))
+
+    # Shape 3 — fenced code blocks (```bash ... ```), preserved as one unit
+    for m in _FENCED_CODE_RE.finditer(step_text):
+        _dedent_and_add(m.group(1))
+
+    return blocks
+
+
 def _short_command(cmd: str, max_len: int = 80) -> str:
     """Compact command representation for search queries + trace messages."""
     cmd = " ".join(cmd.split())  # collapse whitespace

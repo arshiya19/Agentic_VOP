@@ -109,6 +109,19 @@ _BLOCKED_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         re.compile(r"\bkubectl\s+delete\s+(namespace|ns)\s+\S+", re.IGNORECASE),
         "Deletes entire namespace including all workloads + PVCs.",
     ),
+    (
+        "interactive-editor-or-pager",
+        # SSM RunCommand runs non-interactively — invoking vim/nano/less
+        # hangs the session waiting for TTY input until timeout. Fail fast
+        # with a clear reason instead of burning the whole step timeout.
+        # Matched at word boundaries so `vimdiff-plugin.tf` etc. don't trip.
+        re.compile(
+            r"(^|[\s;&|`])(vim|vi|nano|emacs|pico|less|more|top|htop|man)(\s|$)",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        "Interactive tool (editor/pager) — SSM runs non-interactively and will hang until timeout. "
+        "Use `cat >> file << 'EOF' ... EOF` for appends or `sed -i` for in-place edits instead.",
+    ),
 ]
 
 

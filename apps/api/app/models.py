@@ -163,7 +163,12 @@ class ValidationTest(BaseModel):
     command: str = Field(..., min_length=5, max_length=4000)
     # Cap at 1500 — expected output can be a full JSON snippet from a
     # `describe-*` call the operator eyeballs against.
-    expected: str = Field(..., min_length=5, max_length=1500)
+    # Floor at 1 because legitimate `expected` values include HTTP status codes
+    # ("403", "200"), terraform detailed-exitcodes ("2", "0"), and exit-status
+    # markers ("0", "ok"). An over-strict floor forced SA3's agentic path to
+    # give up and fall back to the hybrid pattern planner on every fix where
+    # the LLM chose a status-code check.
+    expected: str = Field(..., min_length=1, max_length=1500)
     source: str = Field(..., min_length=3, max_length=200)
 
     @model_validator(mode="before")
@@ -250,10 +255,14 @@ class RollbackPlan(BaseModel):
         max_length=600,
         description="WHY rollback is or isn't recommended for this specific finding",
     )
-    recommended_recovery: str = Field(
-        "",
+    recommended_recovery: str | None = Field(
+        None,
         max_length=400,
-        description="If supported=false, the alternative path (e.g. 'Restore from backup')",
+        description=(
+            "If supported=false, the alternative path (e.g. 'Restore from backup'). "
+            "Accepts None because the LLM correctly omits it when supported=true; "
+            "downstream code treats None/empty identically."
+        ),
     )
 
 
