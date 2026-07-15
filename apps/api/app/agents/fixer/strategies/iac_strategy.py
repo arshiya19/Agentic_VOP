@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...remediation.verifier import _extract_commands
+from ...remediation.verifier import _extract_shell_blocks
 from ..config import FixerConfig
 from ..models import (
     BackupResult,
@@ -106,14 +106,12 @@ class IaCStrategy(BaseFixStrategy):
         reachable = executor.is_reachable()
         checks.append({"check": "ssm_reachable", "passed": reachable})
         if not reachable:
-            return PreFlightResult(
-                ready=False,
-                checks=checks,
-                blocking_reason=(
-                    f"env2 instance {ctx.target_instance_id!r} is not reachable "
-                    "via SSM. Verify the instance is running + SSM agent is up."
-                ),
+            reason = (
+                f"env2 instance {ctx.target_instance_id!r} is not reachable "
+                "via SSM. Verify the instance is running + SSM agent is up."
             )
+            self._emit(ctx, "ERROR", f"✗ Pre-flight: {reason}")
+            return PreFlightResult(ready=False, checks=checks, blocking_reason=reason)
         self._emit(ctx, "MESSAGE", "✓ Pre-flight: SSM reachable")
 
         # 2. Target file exists (if the package declares one)
@@ -127,14 +125,12 @@ class IaCStrategy(BaseFixStrategy):
                 }
             )
             if not exists:
-                return PreFlightResult(
-                    ready=False,
-                    checks=checks,
-                    blocking_reason=(
-                        f"Target file {ctx.file_path!r} not present on "
-                        f"instance {ctx.target_instance_id!r}. Cannot proceed with IaC edit."
-                    ),
+                reason = (
+                    f"Target file {ctx.file_path!r} not present on "
+                    f"instance {ctx.target_instance_id!r}. Cannot proceed with IaC edit."
                 )
+                self._emit(ctx, "ERROR", f"✗ Pre-flight: {reason}")
+                return PreFlightResult(ready=False, checks=checks, blocking_reason=reason)
             self._emit(ctx, "MESSAGE", f"✓ Pre-flight: {ctx.file_path} present")
 
         # 3. Terraform available
@@ -147,14 +143,12 @@ class IaCStrategy(BaseFixStrategy):
             }
         )
         if not tf_probe.succeeded:
-            return PreFlightResult(
-                ready=False,
-                checks=checks,
-                blocking_reason=(
-                    "terraform not available on env2 (or returned error). "
-                    f"stderr: {tf_probe.stderr[:200]}"
-                ),
+            reason = (
+                "terraform not available on env2 (or returned error). "
+                f"stderr: {tf_probe.stderr[:200]}"
             )
+            self._emit(ctx, "ERROR", f"✗ Pre-flight: {reason}")
+            return PreFlightResult(ready=False, checks=checks, blocking_reason=reason)
         self._emit(ctx, "MESSAGE", "✓ Pre-flight: terraform binary present")
 
         # 4. Terraform init if working directory not yet initialized
@@ -177,13 +171,12 @@ class IaCStrategy(BaseFixStrategy):
                     }
                 )
                 if not init_result.succeeded:
-                    return PreFlightResult(
-                        ready=False,
-                        checks=checks,
-                        blocking_reason=(
-                            f"terraform init failed. stderr: {init_result.stderr[:400]}"
-                        ),
+                    reason = (
+                        f"terraform init failed in {ctx.working_directory!r}. "
+                        f"stderr: {init_result.stderr[:400]}"
                     )
+                    self._emit(ctx, "ERROR", f"✗ Pre-flight: {reason}")
+                    return PreFlightResult(ready=False, checks=checks, blocking_reason=reason)
 
         return PreFlightResult(ready=True, checks=checks)
 
@@ -192,7 +185,11 @@ class IaCStrategy(BaseFixStrategy):
     # =========================================================================
     def backup(self, ctx: FixContext) -> BackupResult:
         if not ctx.file_path:
-            # Rare — non-file-based IaC (e.g. pure state edit). Nothing to snapshot.
+            self._emit(
+                ctx, "MESSAGE",
+                "⏭ Backup phase: no file_path in context — skipping "
+                "(no source artifact to snapshot for this run)",
+            )
             return BackupResult(
                 backup_reference="",
                 backup_type="none",
@@ -200,9 +197,16 @@ class IaCStrategy(BaseFixStrategy):
                 created_at=utcnow(),
             )
 
+        self._emit(
+            ctx, "MESSAGE",
+            f"💾 Backup phase: snapshotting {ctx.file_path} → .bak-<timestamp> on env2",
+        )
         executor = self._executor_for(ctx)
         backup_path, _cmd_result = backup_file(executor, ctx.file_path)
-        self._emit(ctx, "MESSAGE", f"✓ Backup: {ctx.file_path} → {backup_path}")
+        self._emit(
+            ctx, "MESSAGE",
+            f"✓ Backup created: {backup_path} (rollback anchor persisted to fix_run.backup_reference)",
+        )
 
         return BackupResult(
             backup_reference=backup_path,
@@ -223,20 +227,38 @@ class IaCStrategy(BaseFixStrategy):
             self._emit(ctx, "ERROR", "No remediation_steps in package pathway")
             return results
 
+        self._emit(
+            ctx, "MESSAGE",
+            f"▶ Execute phase: {len(remediation_steps)} step(s) to run "
+            f"(wd={ctx.working_directory}, file={ctx.file_path})",
+        )
+
         for step_num, step_dict in enumerate(remediation_steps, start=1):
             step_text = step_dict.get("step", "") or ""
             action_label = self._action_label(step_text)
 
-            # Extract commands from the step text
-            commands = _extract_commands(step_text)
-            if not commands:
+            # Announce the step BEFORE parsing — user sees what SA3 emitted
+            self._emit(
+                ctx, "MESSAGE",
+                f"→ Step {step_num}/{len(remediation_steps)}: {action_label}",
+            )
+
+            # Extract shell blocks from the step text. We deliberately use
+            # `_extract_shell_blocks` (whole blocks preserved verbatim) rather
+            # than `_extract_commands` (per-line hints). Per-line splitting
+            # dropped short lines like the closing `}` of an HCL block, which
+            # corrupted `cat >> file << 'EOF' ... EOF` heredocs and produced
+            # unclosed configuration blocks. Whole-block extraction preserves
+            # heredoc structure exactly as SA3 emitted it.
+            blocks = _extract_shell_blocks(step_text)
+            if not blocks:
                 # SA3 v2.4 shouldn't emit prose-only steps (verifier rejects
                 # them). Belt-and-suspenders — record as skipped, but this
                 # shouldn't happen in practice.
                 self._emit(
-                    ctx,
-                    "MESSAGE",
-                    f"⚠ Step {step_num}: no runnable command extracted — skipping",
+                    ctx, "MESSAGE",
+                    f"⚠ Step {step_num}: no runnable Command:/fenced block found in step text "
+                    f"({len(step_text)} chars) — skipping",
                 )
                 results.append(
                     self._skipped_step(step_num, action_label, "No Command: block found")
@@ -244,28 +266,34 @@ class IaCStrategy(BaseFixStrategy):
                 # Skip — don't halt (v2.4 verifier should catch this before us)
                 continue
 
-            # Combine into a single SSM invocation (preserves order + timing)
-            combined = "\n".join(commands)
+            # Concatenate all blocks with a newline separator. Each block is
+            # already a self-contained multi-line shell fragment; a blank line
+            # between them is safe (bash treats it as no-op).
+            combined = "\n\n".join(blocks)
+            self._emit(
+                ctx, "MESSAGE",
+                f"   📝 Extracted {len(blocks)} shell block(s) from step text "
+                f"({len(combined)} chars total)",
+            )
 
             # Safety check
             safety = validate_command(combined, ctx.working_directory)
             if not safety.allowed:
                 self._emit(
-                    ctx,
-                    "ERROR",
-                    f"🛑 Step {step_num} blocked by safety: {safety.reason}",
+                    ctx, "ERROR",
+                    f"🛑 Step {step_num} blocked by safety layer — pattern={safety.matched_pattern!r}, "
+                    f"reason: {safety.reason}",
                 )
                 results.append(self._blocked_step(step_num, action_label, combined, safety.reason))
                 return results  # HALT — orchestrator triggers rollback
-
-            self._emit(
-                ctx,
-                "MESSAGE",
-                f"→ Step {step_num}/{len(remediation_steps)}: {action_label}",
-            )
+            self._emit(ctx, "MESSAGE", "   🛡 Safety check passed (no destructive patterns)")
 
             # Choose a per-step timeout — terraform ops get more headroom
             timeout_s = self._per_step_timeout(combined)
+            self._emit(
+                ctx, "MESSAGE",
+                f"   ⏱ Timeout: {timeout_s}s (chosen based on command shape)",
+            )
 
             started = utcnow()
             try:
@@ -297,24 +325,23 @@ class IaCStrategy(BaseFixStrategy):
                 )
                 return results  # HALT
 
-            status = "success" if cmd_result.succeeded else "failed"
-            results.append(
-                StepResult(
-                    step_num=step_num,
-                    action=action_label,
-                    command=combined,
-                    stdout=cmd_result.stdout[:20000],
-                    stderr=cmd_result.stderr[:5000],
-                    exit_code=cmd_result.exit_code,
-                    duration_ms=cmd_result.duration_ms,
-                    status=status,
-                    started_at=cmd_result.started_at,
-                    finished_at=cmd_result.finished_at,
-                    ssm_command_id=cmd_result.ssm_command_id,
-                )
-            )
+            step_ok = self._step_succeeded(combined, cmd_result.exit_code)
+            status = "success" if step_ok else "failed"
+            results.append(StepResult(
+                step_num=step_num,
+                action=action_label,
+                command=combined,
+                stdout=cmd_result.stdout[:20000],
+                stderr=cmd_result.stderr[:5000],
+                exit_code=cmd_result.exit_code,
+                duration_ms=cmd_result.duration_ms,
+                status=status,
+                started_at=cmd_result.started_at,
+                finished_at=cmd_result.finished_at,
+                ssm_command_id=cmd_result.ssm_command_id,
+            ))
 
-            if not cmd_result.succeeded:
+            if not step_ok:
                 self._emit(
                     ctx,
                     "ERROR",
@@ -322,10 +349,16 @@ class IaCStrategy(BaseFixStrategy):
                 )
                 return results  # HALT
             else:
+                # For `terraform plan -detailed-exitcode` exit=2 means
+                # "changes present" (success). Surface this explicitly so
+                # the trace reads correctly instead of hiding a non-zero exit.
+                extra = (
+                    " (exit=2 = changes planned, treated as success)"
+                    if cmd_result.exit_code == 2 else ""
+                )
                 self._emit(
-                    ctx,
-                    "MESSAGE",
-                    f"✓ Step {step_num} succeeded ({cmd_result.duration_ms}ms)",
+                    ctx, "MESSAGE",
+                    f"✓ Step {step_num} succeeded ({cmd_result.duration_ms}ms){extra}",
                 )
 
         # If SA3's package did NOT emit an explicit terraform plan step,
@@ -361,58 +394,70 @@ class IaCStrategy(BaseFixStrategy):
 
         validation_tests = ctx.pathway.get("validation_tests", [])
         if not validation_tests:
-            self._emit(ctx, "ERROR", "No validation_tests in package pathway")
+            self._emit(ctx, "ERROR", "❌ Validate phase: no validation_tests in package pathway")
             return results
 
-        for test in validation_tests:
+        self._emit(
+            ctx, "MESSAGE",
+            f"🔬 Validate phase: {len(validation_tests)} test(s) queued "
+            "(exactly one MUST be a scanner re-scan per SA3 v2.4 hard rule 17)",
+        )
+
+        for idx, test in enumerate(validation_tests, start=1):
             test_name = test.get("name", "unnamed")
             method = test.get("method", "manual")
             command = test.get("command", "") or ""
             expected = test.get("expected", "") or ""
 
             is_rescan = self._looks_like_rescan(command)
+            rescan_tag = " ✨ RE-SCAN" if is_rescan else ""
+
+            self._emit(
+                ctx, "MESSAGE",
+                f"→ Test {idx}/{len(validation_tests)}: {test_name}{rescan_tag}",
+            )
+            self._emit(
+                ctx, "MESSAGE",
+                f"   method={method}, expected≈{self._one_line(expected, 100)!r}",
+            )
 
             if method != "cli":
-                # http / sql / manual not supported in Phase-1 (Nikhil's scope).
-                # Record as inconclusive; caller can inspect the note.
-                results.append(
-                    ValidationResult(
-                        test_name=test_name,
-                        method=method,
-                        command=command,
-                        expected=expected,
-                        actual="",
-                        passed=False,
-                        is_rescan=is_rescan,
-                        comparison_note=(
-                            f"method={method!r} not supported in Phase-1 IaC strategy "
-                            "(cli only). Skipping."
-                        ),
-                    )
+                self._emit(
+                    ctx, "MESSAGE",
+                    f"   ⏭ Skipping — method={method!r} not supported in Phase-1 IaC strategy",
                 )
+                results.append(ValidationResult(
+                    test_name=test_name,
+                    method=method,
+                    command=command,
+                    expected=expected,
+                    actual="",
+                    passed=False,
+                    is_rescan=is_rescan,
+                    comparison_note=(
+                        f"method={method!r} not supported in Phase-1 IaC strategy "
+                        "(cli only). Skipping."
+                    ),
+                ))
                 continue
 
             safety = validate_command(command, ctx.working_directory)
             if not safety.allowed:
-                results.append(
-                    ValidationResult(
-                        test_name=test_name,
-                        method=method,
-                        command=command,
-                        expected=expected,
-                        actual="",
-                        passed=False,
-                        is_rescan=is_rescan,
-                        comparison_note=f"Safety blocked: {safety.reason}",
-                    )
+                self._emit(
+                    ctx, "ERROR",
+                    f"   🛑 Safety blocked test — pattern={safety.matched_pattern!r}: {safety.reason}",
                 )
+                results.append(ValidationResult(
+                    test_name=test_name,
+                    method=method,
+                    command=command,
+                    expected=expected,
+                    actual="",
+                    passed=False,
+                    is_rescan=is_rescan,
+                    comparison_note=f"Safety blocked: {safety.reason}",
+                ))
                 continue
-
-            self._emit(
-                ctx,
-                "MESSAGE",
-                f"→ Validating: {test_name}" + (" (RE-SCAN)" if is_rescan else ""),
-            )
             try:
                 cmd_result = executor.run_command(
                     command,
@@ -455,12 +500,21 @@ class IaCStrategy(BaseFixStrategy):
                 )
             )
 
+            outcome = "PASSED" if passed else "FAILED"
             self._emit(
-                ctx,
-                "MESSAGE",
-                f"{'✓' if passed else '✗'} {test_name}: {'passed' if passed else 'failed'}",
+                ctx, "MESSAGE" if passed else "ERROR",
+                f"   {'✓' if passed else '✗'} {test_name}: {outcome} "
+                f"(expected≈{self._one_line(expected, 80)!r} vs actual≈{self._one_line(actual, 80)!r})",
             )
 
+        # Summary: how many rescans, how many passed
+        rescans = [v for v in results if v.is_rescan]
+        passed_ct = sum(1 for v in results if v.passed)
+        self._emit(
+            ctx, "MESSAGE",
+            f"🔬 Validate phase complete: {passed_ct}/{len(results)} tests passed "
+            f"({len(rescans)} was a scanner re-scan)",
+        )
         return results
 
     # =========================================================================
@@ -470,11 +524,17 @@ class IaCStrategy(BaseFixStrategy):
         results: list[RollbackResult] = []
         if not ctx.backup_reference or not ctx.file_path:
             self._emit(
-                ctx,
-                "MESSAGE",
-                "Rollback: no backup_reference/file_path — nothing to restore",
+                ctx, "MESSAGE",
+                "↶ Rollback phase: no backup_reference or file_path in context — "
+                "nothing to restore (backup phase likely didn't complete)",
             )
             return results
+
+        self._emit(
+            ctx, "MESSAGE",
+            f"↶ Rollback phase started — restoring {ctx.file_path} from {ctx.backup_reference}, "
+            "then reconciling via terraform apply",
+        )
 
         executor = self._executor_for(ctx)
 
@@ -537,19 +597,36 @@ class IaCStrategy(BaseFixStrategy):
                 ctx,
                 "MESSAGE" if apply_result.succeeded else "ERROR",
                 f"{'✓' if apply_result.succeeded else '✗'} Rollback: terraform apply "
-                f"{'succeeded' if apply_result.succeeded else 'failed'}",
+                f"{'succeeded' if apply_result.succeeded else 'failed'} "
+                f"(exit={apply_result.exit_code}, {apply_result.duration_ms}ms)",
             )
 
+        # Rollback summary
+        succeeded_ct = sum(1 for r in results if r.status == "success")
+        self._emit(
+            ctx, "MESSAGE",
+            f"↶ Rollback phase complete: {succeeded_ct}/{len(results)} steps succeeded. "
+            f"{'Env restored to pre-fix state.' if succeeded_ct == len(results) else 'Manual verification recommended.'}",
+        )
         return results
 
     # =========================================================================
     # Helpers
     # =========================================================================
     def _executor_for(self, ctx: FixContext) -> RemoteExecutor:
+        """Construct a per-run RemoteExecutor with tracing wired.
+
+        Passes emit_fn + run_id so every SSM call the strategy makes gets
+        logged verbatim to agent_trace_events. This is the primary source
+        of behind-the-scenes visibility — every command + exit + output
+        preview shows up in the UI trace live.
+        """
         return RemoteExecutor(
             instance_id=ctx.target_instance_id,
             region=ctx.aws_region,
             config=self.config,
+            emit_fn=self.emit_fn,
+            run_id=ctx.agent_run_id,
         )
 
     def _emit(self, ctx: FixContext, event_type: str, message: str) -> None:
@@ -571,6 +648,32 @@ class IaCStrategy(BaseFixStrategy):
             if line:
                 return line[:150]
         return "(no action line)"
+
+    @staticmethod
+    def _one_line(text: str, cap: int = 100) -> str:
+        """Collapse whitespace + newlines for readable one-line trace previews."""
+        if not text:
+            return ""
+        collapsed = " ".join(str(text).split())
+        return collapsed[:cap] + ("…" if len(collapsed) > cap else "")
+
+    @staticmethod
+    def _step_succeeded(command: str, exit_code: int) -> bool:
+        """Semantic success check that understands command-specific exit codes.
+
+        `terraform plan -detailed-exitcode` uses a three-state exit code:
+          0 → no changes needed (success)
+          1 → error (failure)
+          2 → changes present (success — this is the *expected* outcome
+              after an edit step; treating it as failure aborts every fix
+              that actually did something)
+
+        Everything else follows the standard shell convention: 0 = success.
+        """
+        cmd_l = command.lower()
+        if "terraform plan" in cmd_l and "-detailed-exitcode" in cmd_l:
+            return exit_code in (0, 2)
+        return exit_code == 0
 
     def _per_step_timeout(self, command: str) -> int:
         """Return the appropriate SSM timeout for the command shape."""

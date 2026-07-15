@@ -58,6 +58,18 @@ class Settings(BaseSettings):
     # start (fails fast rather than silently attempt fixes with no target).
     fixer_env2_instance_id: str = ""
 
+    # Path prefix to prepend to raw-finding absolute paths so they resolve to
+    # env2's real filesystem layout. Example:
+    #   Raw finding says:  /main.tf         (relative to Checkov's scan root)
+    #   env2 actually has: /opt/vuln-labs/cspm-lab/main.tf
+    #   Set:               FIXER_ENV2_PATH_PREFIX=/opt/vuln-labs/cspm-lab
+    #   Result:            file_path = /opt/vuln-labs/cspm-lab/main.tf
+    #
+    # Empty (default) = no translation, use raw path as-is. This works when
+    # the scanner + fix target share the same filesystem view (e.g. running
+    # SA4 locally against a Terraform module on your laptop).
+    fixer_env2_path_prefix: str = ""
+
     # Toggle for auto-chaining Sub-Agent 4 after Sub-Agent 3 in the demo
     # pipeline. Set false to keep SA3 emitting packages without triggering
     # execution (useful when env2 isn't provisioned yet).

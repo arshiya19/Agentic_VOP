@@ -341,8 +341,17 @@ def _run_lifecycle(
             error_message=f"validate raised {type(e).__name__}: {str(e)[:500]}",
         )
 
-    # Re-scan (mandatory per SA3 v2.4 hard rule 17) must pass. Other
-    # validation failures also trigger rollback.
+    # Rollback decision policy:
+    #   - Scanner re-scan is the AUTHORITATIVE proof of fix (Checkov / Trivy /
+    #     Semgrep etc. re-run on the same file, filtered to the same check).
+    #     If it passes, the vulnerability is objectively closed. Ancillary
+    #     CLI checks (aws s3api get-*, describe-*) are supplementary — useful
+    #     for the trace but they can fail for reasons unrelated to whether
+    #     the fix worked (unset shell var, missing IAM permission, output
+    #     format shift). Rolling back a confirmed fix because of a supplementary
+    #     check failure defeats the whole point of the closed loop.
+    #   - Absent a scanner re-scan (SA3 v2.4 hard rule 17 violation), fall
+    #     back to strict mode: any non-rescan failure triggers rollback.
     rescan = next((v for v in validation_results if v.is_rescan), None)
     non_rescan_failures = [v for v in validation_results if not v.is_rescan and not v.passed]
 
@@ -359,19 +368,33 @@ def _run_lifecycle(
         )
 
     if non_rescan_failures:
-        rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
-        return StrategyOutcome(
-            status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
-            step_results=step_results,
-            validation_results=validation_results,
-            rollback_results=rollback,
-            backup_reference=backup.backup_reference,
-            terraform_plan_output=plan_out,
-            error_message=(
-                f"{len(non_rescan_failures)} validation test(s) failed — first: "
-                f"{non_rescan_failures[0].test_name}"
-            ),
-        )
+        if rescan is not None and rescan.passed:
+            # Scanner re-scan authoritatively confirmed the fix. Log the
+            # ancillary CLI failures as warnings and mark the run successful.
+            emit_fn(
+                "MESSAGE",
+                f"⚠ {len(non_rescan_failures)} ancillary validation test(s) failed "
+                f"but scanner re-scan passed — fix confirmed by authoritative check. "
+                f"Warnings preserved in validation_results for review. First warning: "
+                f"{non_rescan_failures[0].test_name}",
+            )
+            # Fall through to success
+        else:
+            # No re-scan emitted — strict mode. Ancillary failures trigger rollback.
+            rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
+            return StrategyOutcome(
+                status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
+                step_results=step_results,
+                validation_results=validation_results,
+                rollback_results=rollback,
+                backup_reference=backup.backup_reference,
+                terraform_plan_output=plan_out,
+                error_message=(
+                    f"{len(non_rescan_failures)} validation test(s) failed "
+                    f"(no scanner re-scan present to authoritatively confirm fix) — "
+                    f"first failure: {non_rescan_failures[0].test_name}"
+                ),
+            )
 
     # 🎉 Success
     return StrategyOutcome(

@@ -73,6 +73,8 @@ class RemoteExecutor:
         *,
         region: str,
         config: FixerConfig,
+        emit_fn=None,
+        run_id: str | None = None,
         ssm_client: SSMClient | None = None,
     ) -> None:
         if not instance_id:
@@ -80,8 +82,30 @@ class RemoteExecutor:
         self.instance_id = instance_id
         self.region = region
         self.config = config
+        # emit_fn + run_id enable behind-the-scenes tracing of every SSM call.
+        # Optional so tests can construct executors without wiring trace infra.
+        self.emit_fn = emit_fn
+        self.run_id = run_id
         # ssm_client is injectable for tests + LocalStack integration
         self._ssm: SSMClient = ssm_client or boto3.client("ssm", region_name=region)
+
+    def _emit(self, event_type: str, message: str) -> None:
+        """Emit a trace event as sub-agent-4 (if wiring is set). Fail-open —
+        tracing must never break execution."""
+        if not (self.emit_fn and self.run_id):
+            return
+        try:
+            self.emit_fn(self.run_id, "sub-agent-4", event_type, message)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    @staticmethod
+    def _one_line(text: str, cap: int = 200) -> str:
+        """Collapse whitespace + newlines for readable one-line trace previews."""
+        if not text:
+            return ""
+        collapsed = " ".join(text.split())
+        return collapsed[:cap] + ("…" if len(collapsed) > cap else "")
 
     # =========================================================================
     # Reachability probe
@@ -93,16 +117,37 @@ class RemoteExecutor:
         so we don't record a spurious invocation in CloudTrail every time
         we do a pre-flight check.
         """
+        self._emit(
+            "MESSAGE",
+            f"🔍 SSM probe: ssm.describe_instance_information(InstanceIds=[{self.instance_id}])",
+        )
         try:
             resp = self._ssm.describe_instance_information(
                 Filters=[{"Key": "InstanceIds", "Values": [self.instance_id]}]
             )
             infos = resp.get("InstanceInformationList", []) or []
             if not infos:
+                self._emit(
+                    "ERROR",
+                    f"❌ SSM probe: instance {self.instance_id} not registered with SSM "
+                    "(agent never checked in). Verify SSM agent installed + IAM role attached.",
+                )
                 return False
-            status = (infos[0] or {}).get("PingStatus")
+            info = infos[0] or {}
+            status = info.get("PingStatus")
+            platform = info.get("PlatformName", "unknown")
+            last_ping = info.get("LastPingDateTime")
+            self._emit(
+                "MESSAGE",
+                f"✓ SSM probe: {self.instance_id} PingStatus={status} "
+                f"platform={platform} lastPing={last_ping}",
+            )
             return status == "Online"
-        except (ClientError, BotoCoreError):
+        except (ClientError, BotoCoreError) as e:
+            self._emit(
+                "ERROR",
+                f"❌ SSM probe raised {type(e).__name__}: {str(e)[:200]}",
+            )
             return False
 
     # =========================================================================
@@ -138,10 +183,22 @@ class RemoteExecutor:
             CommandTimeoutError — command status was TimedOut after polling.
         """
         eff_timeout = timeout_s or self.config.ssm_command_timeout_s
-        wrapped = self._wrap_with_cd(command, working_directory)
 
-        # 1. Dispatch
-        command_id = self._send_command(wrapped, eff_timeout)
+        # Behind-the-scenes: log EVERY SSM call — command, target, timeout, wd.
+        # Truncated to keep the trace scannable but includes the actual command.
+        wd_str = f" [cwd={working_directory}]" if working_directory else ""
+        self._emit(
+            "MESSAGE",
+            f"⚙ SSM → {self._one_line(command, cap=250)}{wd_str} "
+            f"(timeout={eff_timeout}s, target={self.instance_id})",
+        )
+
+        # 1. Dispatch — pass working_directory as an SSM parameter, NOT wrapped
+        # inline as `cd DIR && ( ... )`. The subshell wrapper was breaking bash
+        # heredocs (EOF terminator on same line as `)` isn't recognized as a
+        # terminator). SSM's workingDirectory param runs the command in the
+        # right cwd without touching the command string.
+        command_id = self._send_command(command, eff_timeout, working_directory)
         started_at = utcnow()
 
         # 2. Poll to terminal
@@ -157,10 +214,28 @@ class RemoteExecutor:
         duration_ms = int((finished_at - started_at).total_seconds() * 1000)
 
         if status == "TimedOut":
+            self._emit(
+                "ERROR",
+                f"⏱ SSM TIMEOUT — command {command_id} on {self.instance_id} "
+                f"exceeded {eff_timeout}s. Partial stdout: {self._one_line(stdout)}",
+            )
             raise CommandTimeoutError(
                 f"SSM command {command_id} on {self.instance_id} timed out after "
                 f"{eff_timeout}s. Partial stdout ({len(stdout)} chars): {stdout[:200]!r}"
             )
+
+        # Behind-the-scenes: log every SSM RESULT — exit code, timing,
+        # output previews. ERROR event_type on non-zero exit for visibility.
+        symbol = "✓" if exit_code == 0 else "✗"
+        stdout_preview = self._one_line(stdout, cap=180)
+        stderr_preview = self._one_line(stderr, cap=180)
+        result_msg = (
+            f"{symbol} SSM ← exit={exit_code} ({duration_ms}ms, cmd_id={command_id[:8]}…) | "
+            f"stdout: {stdout_preview or '(empty)'}"
+        )
+        if stderr_preview:
+            result_msg += f" | stderr: {stderr_preview}"
+        self._emit("MESSAGE" if exit_code == 0 else "ERROR", result_msg)
 
         return CommandResult(
             command=command,
@@ -176,24 +251,38 @@ class RemoteExecutor:
     # =========================================================================
     # Internal — SendCommand with transient-retry
     # =========================================================================
-    def _send_command(self, wrapped_command: str, execution_timeout_s: int) -> str:
+    def _send_command(
+        self,
+        command: str,
+        execution_timeout_s: int,
+        working_directory: str | None = None,
+    ) -> str:
         """Dispatch to SSM. Retry only on transient AWS errors (throttling,
         RequestLimitExceeded). Application errors surface via CommandResult
         instead.
+
+        `working_directory` is passed as SSM's native workingDirectory
+        Parameter — SSM `cd`s there before running the command. Avoids
+        inline `cd DIR && ( ... )` wrapping which breaks bash heredocs.
         """
         retries = self.config.ssm_transient_retries
         backoff = self.config.ssm_retry_backoff_s
+
+        # SSM Parameters — workingDirectory is optional; omit when not given
+        # so we don't send an empty list (some SSM doc validators are picky).
+        params: dict[str, list[str]] = {
+            "commands": [command],
+            "executionTimeout": [str(execution_timeout_s)],
+        }
+        if working_directory:
+            params["workingDirectory"] = [working_directory]
 
         for attempt in range(retries + 1):
             try:
                 resp = self._ssm.send_command(
                     InstanceIds=[self.instance_id],
                     DocumentName=self.config.ssm_document_name,
-                    Parameters={
-                        "commands": [wrapped_command],
-                        # ExecutionTimeout is a STRING per AWS API (weird but true)
-                        "executionTimeout": [str(execution_timeout_s)],
-                    },
+                    Parameters=params,
                     TimeoutSeconds=execution_timeout_s,
                 )
                 cmd_id = (resp.get("Command") or {}).get("CommandId")
@@ -281,19 +370,3 @@ class RemoteExecutor:
             except ClientError as e:
                 raise RemoteExecError(f"SSM GetCommandInvocation polling failed: {e}") from e
 
-    # =========================================================================
-    # Internal — command wrapping helpers
-    # =========================================================================
-    @staticmethod
-    def _wrap_with_cd(command: str, working_directory: str | None) -> str:
-        """Prepend `cd <working_directory> && ` if provided.
-
-        We wrap in a subshell so the caller's command can use its own
-        redirection operators without interfering with cd's exit status
-        detection.
-        """
-        if not working_directory:
-            return command
-        # Parens create a subshell so the cd doesn't persist state we don't
-        # want, and so multi-line commands work as one unit.
-        return f"cd {working_directory!r} && ( {command} )"

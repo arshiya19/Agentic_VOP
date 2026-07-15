@@ -428,12 +428,33 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
         or identity.get("file")  # canonical fallback
     )
 
+    # Translate raw-finding path to env2's real filesystem layout, if a
+    # prefix is configured. Scanners often emit paths relative to their
+    # scan root (Checkov shows `/main.tf` when scanning `/opt/lab/`), so
+    # env2's actual path is `<prefix>/main.tf`. Without translation, SA4's
+    # pre-flight file-existence check fails on the raw path.
+    if file_path and file_path.startswith("/"):
+        prefix = (settings.fixer_env2_path_prefix or "").rstrip("/")
+        # Only prepend if the file_path isn't already inside the prefix
+        # (idempotent — safe if raw_finding already emits full env2 paths).
+        if prefix and not file_path.startswith(prefix + "/"):
+            file_path = prefix + file_path
+
     # working_directory — parent of file_path
+    # Handles four cases:
+    #   /main.tf              → working_directory = "/"      (root-level file)
+    #   /opt/vuln/main.tf     → working_directory = "/opt/vuln"
+    #   main.tf               → working_directory = "."      (no dir component)
+    #   ""                    → working_directory = None
     working_directory = None
     if file_path:
-        # Strip filename to get dir. Handles both absolute and relative paths.
         idx = file_path.rfind("/")
-        working_directory = file_path[:idx] if idx > 0 else None
+        if idx == 0:
+            working_directory = "/"
+        elif idx > 0:
+            working_directory = file_path[:idx]
+        else:
+            working_directory = "."
 
     # resource_name — Terraform address / package name / image ref
     resource_name = (
