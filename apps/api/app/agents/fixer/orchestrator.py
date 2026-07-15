@@ -122,14 +122,55 @@ def run_fixer(
     """
     cfg = config or load_config_from_settings()
 
-    # Concurrency lock — MVP runs one fix at a time (Nikhil's design note)
+    # Concurrency lock — env2 is a single shared sandbox; only one fix_run
+    # at a time (Nikhil's design note: parallel runs race on terraform state
+    # + AWS API rate limits). Wait with backoff when locked rather than
+    # raising immediately, so teammates iterating together don't step on
+    # each other's dispatches.
     if not FixerConfig.allow_concurrent_runs:
+        import time  # noqa: PLC0415 — local import; keeps top-of-file clean
+
+        LOCK_WAIT_MAX_S = 300  # 5 min total wait
+        LOCK_POLL_INTERVAL_S = 10
+        waited_s = 0
         other = any_concurrent_run(sb)
+        first_wait_notice_sent = False
+
+        while other is not None and waited_s < LOCK_WAIT_MAX_S:
+            if not first_wait_notice_sent:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"⏳ env2 shared sandbox is busy — another fix_run "
+                    f"(#{other['id']}, package #{other['package_id']}, "
+                    f"status={other['status']}, started {other.get('started_at', '?')[:19]}) "
+                    f"is active. Waiting up to {LOCK_WAIT_MAX_S}s for it to complete "
+                    f"before dispatching this run…",
+                )
+                first_wait_notice_sent = True
+            time.sleep(LOCK_POLL_INTERVAL_S)
+            waited_s += LOCK_POLL_INTERVAL_S
+            other = any_concurrent_run(sb)
+
         if other is not None:
             raise RuntimeError(
-                f"Another fix_run (#{other}) is currently in-flight. "
-                "Sub-Agent 4 runs sequentially in MVP. Wait for it to complete "
-                "or cancel it, then retry."
+                f"env2 shared sandbox is still busy after waiting {waited_s}s. "
+                f"Another user's fix_run (#{other['id']}, package "
+                f"#{other['package_id']}, status={other['status']}, started "
+                f"{other.get('started_at', '?')[:19]}) has been running for a long "
+                f"time. env2 supports one fix at a time — coordinate with "
+                f"whoever is running the other demo, wait a few more minutes, "
+                f"then retry. Run `python scripts/check_env2_status.py` from "
+                f"apps/api to see live state."
+            )
+
+        if waited_s > 0:
+            emit_fn(
+                agent_run_id,
+                "sub-agent-4",
+                "MESSAGE",
+                f"✓ env2 lock released after {waited_s}s wait — dispatching now.",
             )
 
     # 1. Load the package

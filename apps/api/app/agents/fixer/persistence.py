@@ -159,20 +159,26 @@ def get_fix_run(sb: Any, fix_run_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
-def any_concurrent_run(sb: Any) -> int | None:
-    """Return the id of any in-flight fix_run (status in the mutating set),
-    or None if the fleet is idle.
+def any_concurrent_run(sb: Any) -> dict | None:
+    """Return {id, status, package_id, started_at, updated_at} of any in-flight
+    fix_run (status in the mutating set), or None if the fleet is idle.
 
     The orchestrator uses this to enforce single-run concurrency (Nikhil's
     architecture note: parallel runs would race on env2 + terraform state
     lock). MVP-safe conservative default.
+
+    Returns the richer dict rather than just an id so caller error messages
+    can name WHAT is in flight (which package, when it started, how long
+    it's been running). Callers who only need the id can use `["id"]`.
+    Returns None when nothing is in flight.
     """
     resp = (
         sb.table("fix_runs")
-        .select("id")
+        .select("id, status, package_id, started_at, updated_at")
         .in_("status", ("pending", "provisioning", "executing", "validating"))
+        .order("id", desc=False)
         .limit(1)
         .execute()
     )
     rows = resp.data or []
-    return int(rows[0]["id"]) if rows else None
+    return rows[0] if rows else None

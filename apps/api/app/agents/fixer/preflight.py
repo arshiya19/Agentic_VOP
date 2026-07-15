@@ -33,6 +33,7 @@ Design principles:
 from __future__ import annotations
 
 import copy as _copy
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -43,6 +44,85 @@ from .config import FixerConfig
 from .models import FixContext
 from .safety import validate_command
 from .tools.remote_exec import RemoteExecutor
+
+
+# ============================================================================
+# Hallucination guard for no-op rewrites
+# ============================================================================
+# Matches Terraform HCL resource addresses (e.g. `aws_s3_bucket.vulnerable_bucket`,
+# `aws_security_group_rule.restrict_ssh_ingress`). Datasource addresses
+# (data.aws_vpc.default) are matched by the same pattern via the `data.` alt.
+# Not a strict HCL parser — good enough to spot address citations in prose.
+_HCL_ADDRESS_RE = re.compile(
+    r"\b((?:data\.)?[a-z][a-z0-9_]*\.[A-Za-z][A-Za-z0-9_-]*)"
+)
+
+# Prose signals that the rewriter is claiming a no-op due to state duplication.
+# If any of these appear in either the `reason` OR the `new_step`, the rewrite
+# is a "duplicate resource" no-op and its claimed addresses must be verifiable.
+_NOOP_CLAIM_SIGNALS = (
+    "already in state",
+    "already present",
+    "duplicate resource",
+    "nothing to add",
+    "no-op",
+    "no edit needed",
+    "no change",
+    "already declared",
+    "already exists",
+)
+
+
+def _verify_no_op_claim(
+    reason: str,
+    new_step: str,
+    terraform_resources: list[str],
+) -> tuple[bool, str]:
+    """Sanity-check a rewriter's 'duplicate resource / already in state' claim
+    against the actual snapshot. Returns (ok, diagnostic).
+
+    The rewriter LLM sometimes hallucinates that a resource is 'already in
+    state' when the snapshot's `terraform_resources` list clearly doesn't
+    contain it — especially after a state reset when the snapshot only has
+    the baseline resources. Applying such rewrites silently no-ops the fix
+    (the step becomes `echo ...`) and the scanner re-scan then reports the
+    vuln is still open.
+
+    Logic:
+      1. If neither the reason nor new_step contains no-op-claim language,
+         this is not a duplicate-resource rewrite — pass through.
+      2. If it IS a no-op claim, extract every HCL address (aws_X.Y form)
+         from the reason and new_step text.
+      3. Every extracted address MUST appear literally in terraform_resources.
+         If ANY doesn't, the claim is unverifiable → reject as hallucination.
+
+    Returns (True, "") when the rewrite is safe to apply, or
+    (False, "<diagnostic>") when it should be rejected.
+    """
+    combined = f"{reason}\n{new_step}".lower()
+    if not any(sig in combined for sig in _NOOP_CLAIM_SIGNALS):
+        # Not a no-op claim (e.g. it's a KMS→AES256 rewrite). Nothing to verify.
+        return True, ""
+
+    # Extract every HCL address the LLM cited. Search both fields — the reason
+    # is where the LLM usually names the resource; the new_step often echoes it.
+    addrs_in_reason = set(_HCL_ADDRESS_RE.findall(reason))
+    addrs_in_step = set(_HCL_ADDRESS_RE.findall(new_step))
+    cited_addresses = addrs_in_reason | addrs_in_step
+
+    if not cited_addresses:
+        # LLM claimed no-op but didn't name any specific address. That's
+        # itself a red flag — refuse without a concrete citation.
+        return False, "no-op claim cites no specific HCL address"
+
+    resources_set = set(terraform_resources)
+    missing = [a for a in cited_addresses if a not in resources_set]
+    if missing:
+        return False, (
+            f"no-op claim cites address(es) not in terraform_resources: "
+            f"{sorted(missing)} (snapshot has: {sorted(resources_set) or '[]'})"
+        )
+    return True, ""
 
 
 # ============================================================================
@@ -567,6 +647,28 @@ def run_preflight_rewrite(
                 "MESSAGE",
                 f"   ⚠ Rewrite skipped (step_index={r.step_index} out of range "
                 f"0..{len(steps) - 1})",
+            )
+            skipped += 1
+            continue
+
+        # Hallucination guard — reject "already in state" no-op rewrites when
+        # the cited HCL address isn't actually in the snapshot's
+        # terraform_resources list. Without this, the LLM occasionally
+        # pattern-matches on the Pattern 2 example in its prompt and invents
+        # duplicate-resource concerns that don't exist (observed at
+        # 2026-07-15 15:53 after a state reset). Silent no-op'ing a real
+        # remediation step is worse than skipping the rewrite — the step
+        # never runs, the scanner re-scan still fails, and rollback fires.
+        ok, diagnostic = _verify_no_op_claim(
+            r.reason, r.new_step, snapshot.terraform_resources
+        )
+        if not ok:
+            emit_fn(
+                ctx.agent_run_id,
+                "sub-agent-4",
+                "MESSAGE",
+                f"   🛑 Rewrite step_index={r.step_index} REJECTED — "
+                f"hallucinated no-op ({diagnostic}). Keeping original step.",
             )
             skipped += 1
             continue
