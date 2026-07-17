@@ -255,7 +255,7 @@ resource "aws_security_group" "lab" {
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "lab" {
-  ami                    = data.aws_ami.ubuntu.id
+  ami                    = var.ami_override != "" ? var.ami_override : data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.lab.key_name
   vpc_security_group_ids = [aws_security_group.lab.id]
