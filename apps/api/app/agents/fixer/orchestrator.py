@@ -427,25 +427,68 @@ def _run_lifecycle(
     if plan_out:
         set_terraform_plan_output(sb, fix_run_id, plan_out)
 
-    # Any step failure → rollback
+    # Step failure handling — context-aware rollback decision.
+    #
+    # If a step fails BEFORE terraform apply has succeeded, the fix hasn't
+    # been committed to infrastructure yet → rollback immediately (safe,
+    # nothing to undo except the file edit which the .bak handles).
+    #
+    # If a step fails AFTER terraform apply succeeded, the IaC change is
+    # already live. Post-apply steps are typically verification commands
+    # (aws CLI checks, IAM probes, etc.) that can fail for reasons unrelated
+    # to whether the fix actually worked (missing IAM permission, empty
+    # variable, broken awk pattern). Rolling back a successful apply because
+    # a post-apply CLI check is broken is counterproductive — it destroys a
+    # valid fix. Instead: log the failure as a warning and proceed to the
+    # validation phase where the scanner re-scan (the authoritative proof)
+    # will determine whether the fix actually worked.
+    #
+    # This mirrors the validation phase's existing "re-scan is authoritative"
+    # logic — ancillary failures don't override a passing re-scan.
     failed_step = next(
         (r for r in step_results if r.status in ("failed", "safety_blocked")),
         None,
     )
     if failed_step is not None:
-        rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
-        return StrategyOutcome(
-            status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
-            step_results=step_results,
-            rollback_results=rollback,
-            backup_reference=backup.backup_reference,
-            terraform_plan_output=plan_out,
-            error_message=(
-                f"Step {failed_step.step_num} {failed_step.status}: "
-                + (failed_step.safety_reason or failed_step.stderr[:300])
-            ),
-            error_step_number=failed_step.step_num,
+        # Determine if terraform apply already succeeded in an earlier step.
+        # We check for any step with "terraform apply" in its command that
+        # exited successfully (exit_code 0).
+        apply_succeeded = any(
+            "terraform apply" in (r.command or "") and r.status == "success" for r in step_results
         )
+
+        if apply_succeeded:
+            # Post-apply failure — the fix is live. Log warning, proceed to
+            # validation. The re-scan will be the authoritative judge.
+            try:
+                emit_fn(
+                    ctx.agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"⚠ Step {failed_step.step_num} failed AFTER terraform apply "
+                    f"succeeded — treating as non-critical warning. "
+                    f"Proceeding to validation (re-scan will determine outcome). "
+                    f"Failed step: {failed_step.action[:100]} | "
+                    f"Error: {(failed_step.safety_reason or failed_step.stderr[:150])}",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+            # Fall through to the validation phase below — do NOT rollback
+        else:
+            # Pre-apply failure — fix was never committed. Rollback is safe.
+            rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
+            return StrategyOutcome(
+                status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
+                step_results=step_results,
+                rollback_results=rollback,
+                backup_reference=backup.backup_reference,
+                terraform_plan_output=plan_out,
+                error_message=(
+                    f"Step {failed_step.step_num} {failed_step.status}: "
+                    + (failed_step.safety_reason or failed_step.stderr[:300])
+                ),
+                error_step_number=failed_step.step_num,
+            )
 
     # ─── Phase 6: Validate ──────────────────────────────────────────────
     set_status(sb, fix_run_id, "validating")

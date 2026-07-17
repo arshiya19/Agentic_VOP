@@ -62,11 +62,11 @@ FAMILIES = [
 # specific check ID. Swapped for CKV_AWS_18 which is any-encryption
 # equivalent from a fix-executability standpoint.
 _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
-    ("CKV_AWS_21", "aws_s3_bucket.vulnerable_bucket"),   # S3 versioning
-    ("CKV2_AWS_6", "aws_s3_bucket.vulnerable_bucket"),   # S3 public access block
-    ("CKV_AWS_18", "aws_s3_bucket.vulnerable_bucket"),   # S3 access logging enabled
+    ("CKV_AWS_21", "aws_s3_bucket.vulnerable_bucket"),  # S3 versioning
+    ("CKV2_AWS_6", "aws_s3_bucket.vulnerable_bucket"),  # S3 public access block
+    ("CKV_AWS_18", "aws_s3_bucket.vulnerable_bucket"),  # S3 access logging enabled
     ("CKV_AWS_24", "aws_security_group.vulnerable_sg"),  # SG ingress 0.0.0.0/0:22
-    ("CKV2_AWS_5", "aws_security_group.vulnerable_sg"),  # SG must be attached
+    # ("CKV2_AWS_5", "aws_security_group.vulnerable_sg"),  # SG must be attached
 ]
 
 
@@ -74,6 +74,7 @@ def _resource_label(issue: dict) -> str:
     """Extract the HCL-style resource label from an issue's asset_identity."""
     ai = issue.get("asset_identity") or {}
     return ai.get("resource") or ai.get("file") or ai.get("id") or ""
+
 
 # Rank severity/priority strings so we can pick the "highest-risk" issue per
 # family deterministically even when derived_risk is NULL. Fallback ordering.
@@ -211,7 +212,9 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
     # covered by any pinned hit. Preserves the demo running on fresh env2
     # setups where pinned checks may not exist yet.
     if len(picks) < 2:
-        covered_families = {classify_finding(p, raw=raw_by_id.get(p.get("raw_finding_id"))) for p in picks}
+        covered_families = {
+            classify_finding(p, raw=raw_by_id.get(p.get("raw_finding_id"))) for p in picks
+        }
         for fam in FAMILIES:
             if fam in covered_families:
                 continue
@@ -229,7 +232,8 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
             )
 
     families_missing = [
-        f for f in FAMILIES
+        f
+        for f in FAMILIES
         if f not in {classify_finding(p, raw=raw_by_id.get(p.get("raw_finding_id"))) for p in picks}
     ]
 

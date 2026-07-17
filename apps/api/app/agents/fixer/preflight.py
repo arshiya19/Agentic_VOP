@@ -53,9 +53,7 @@ from .tools.remote_exec import RemoteExecutor
 # `aws_security_group_rule.restrict_ssh_ingress`). Datasource addresses
 # (data.aws_vpc.default) are matched by the same pattern via the `data.` alt.
 # Not a strict HCL parser — good enough to spot address citations in prose.
-_HCL_ADDRESS_RE = re.compile(
-    r"\b((?:data\.)?[a-z][a-z0-9_]*\.[A-Za-z][A-Za-z0-9_-]*)"
-)
+_HCL_ADDRESS_RE = re.compile(r"\b((?:data\.)?[a-z][a-z0-9_]*\.[A-Za-z][A-Za-z0-9_-]*)")
 
 # Prose signals that the rewriter is claiming a no-op due to state duplication.
 # If any of these appear in either the `reason` OR the `new_step`, the rewrite
@@ -88,6 +86,15 @@ def _verify_no_op_claim(
     (the step becomes `echo ...`) and the scanner re-scan then reports the
     vuln is still open.
 
+    TWO failure modes this catches:
+      1. LLM cites an address NOT in terraform_resources at all (pure hallucination).
+      2. LLM cites a BASE resource (aws_s3_bucket.X, aws_security_group.Y)
+         that always exists, and claims "adding it would duplicate" — when
+         the step actually adds a COMPANION resource (aws_s3_bucket_versioning.X,
+         aws_s3_bucket_public_access_block.X). The LLM confuses a Terraform
+         reference INSIDE the HCL block (bucket = aws_s3_bucket.X.id) with
+         the resource declaration itself.
+
     Logic:
       1. If neither the reason nor new_step contains no-op-claim language,
          this is not a duplicate-resource rewrite — pass through.
@@ -95,6 +102,10 @@ def _verify_no_op_claim(
          from the reason and new_step text.
       3. Every extracted address MUST appear literally in terraform_resources.
          If ANY doesn't, the claim is unverifiable → reject as hallucination.
+      4. At least one cited address must be a COMPANION resource — not just
+         the base resources that always exist in state. If every cited address
+         is a base resource (bucket, SG, VPC data source), the LLM likely
+         confused an HCL reference with the resource being created → reject.
 
     Returns (True, "") when the rewrite is safe to apply, or
     (False, "<diagnostic>") when it should be rejected.
@@ -122,6 +133,41 @@ def _verify_no_op_claim(
             f"no-op claim cites address(es) not in terraform_resources: "
             f"{sorted(missing)} (snapshot has: {sorted(resources_set) or '[]'})"
         )
+
+    # Guard against the "parent confusion" hallucination: the LLM sees
+    # `bucket = aws_s3_bucket.vulnerable_bucket.id` INSIDE the step's HCL
+    # and concludes that the step is creating aws_s3_bucket.vulnerable_bucket
+    # (which obviously exists). But the step is actually creating a COMPANION
+    # resource (aws_s3_bucket_versioning, aws_s3_bucket_logging, etc.).
+    #
+    # A legitimate no-op claim should cite the COMPANION resource address
+    # (e.g. aws_s3_bucket_versioning.vulnerable_bucket_versioning) — not just
+    # the base resource. If all cited addresses are base resources that
+    # ALWAYS exist in state (the immutable infrastructure), the claim is
+    # almost certainly a false positive.
+    #
+    # Base resources = the ones that exist in a CLEAN state (before any fix).
+    # These are typically: the bucket itself, the SG itself, data sources.
+    _BASE_RESOURCE_TYPES = (
+        "aws_s3_bucket.",
+        "aws_security_group.",
+        "data.",
+    )
+    non_base_cited = [
+        a
+        for a in cited_addresses
+        if not any(a.startswith(prefix) for prefix in _BASE_RESOURCE_TYPES)
+    ]
+    if not non_base_cited:
+        # Every cited address is a base resource — the LLM confused a
+        # Terraform reference with the resource being created.
+        return False, (
+            f"no-op claim cites only base resource(s) {sorted(cited_addresses)} "
+            f"that always exist in state. The step likely creates a COMPANION "
+            f"resource (versioning, logging, encryption, etc.) — not the base "
+            f"resource itself. Rejecting as parent-confusion hallucination."
+        )
+
     return True, ""
 
 
@@ -173,9 +219,7 @@ class EnvSnapshot:
                 + "\n".join(f"  - {r}" for r in self.terraform_resources)
             )
         if self.target_resource_state:
-            parts.append(
-                f"\nTarget resource current state:\n{self.target_resource_state}"
-            )
+            parts.append(f"\nTarget resource current state:\n{self.target_resource_state}")
         if self.snapshot_errors:
             parts.append(
                 "\nSnapshot errors (info the reviewer could not fetch):\n"
@@ -214,9 +258,7 @@ def snapshot_env2(executor: RemoteExecutor, ctx: FixContext, emit_fn: Any) -> En
         else:
             snap.snapshot_errors.append(f"aws sts failed: {(r.stderr or r.stdout)[:200]}")
     except Exception as e:  # noqa: BLE001
-        snap.snapshot_errors.append(
-            f"aws sts crashed: {type(e).__name__}: {str(e)[:200]}"
-        )
+        snap.snapshot_errors.append(f"aws sts crashed: {type(e).__name__}: {str(e)[:200]}")
 
     # 2. IAM permissions summary — extract role name from caller-identity ARN,
     #    then list its attached managed policies. Coarse-grained (names, not
@@ -235,8 +277,7 @@ def snapshot_env2(executor: RemoteExecutor, ctx: FixContext, emit_fn: Any) -> En
             )
             if r.exit_code == 0:
                 snap.iam_summary = (
-                    f"Role: {role_name}\nAttached managed policies: "
-                    f"{r.stdout.strip()[:500]}"
+                    f"Role: {role_name}\nAttached managed policies: {r.stdout.strip()[:500]}"
                 )
             else:
                 snap.snapshot_errors.append(
@@ -244,8 +285,7 @@ def snapshot_env2(executor: RemoteExecutor, ctx: FixContext, emit_fn: Any) -> En
                 )
         except Exception as e:  # noqa: BLE001
             snap.snapshot_errors.append(
-                f"iam list-attached-role-policies crashed: "
-                f"{type(e).__name__}: {str(e)[:200]}"
+                f"iam list-attached-role-policies crashed: {type(e).__name__}: {str(e)[:200]}"
             )
     else:
         snap.snapshot_errors.append(
@@ -261,9 +301,9 @@ def snapshot_env2(executor: RemoteExecutor, ctx: FixContext, emit_fn: Any) -> En
             timeout_s=60,
         )
         if r.exit_code == 0:
-            snap.terraform_resources = [
-                ln.strip() for ln in r.stdout.splitlines() if ln.strip()
-            ][:100]
+            snap.terraform_resources = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()][
+                :100
+            ]
         else:
             snap.snapshot_errors.append(
                 f"terraform state list failed: {(r.stderr or r.stdout)[:200]}"
@@ -292,9 +332,7 @@ def snapshot_env2(executor: RemoteExecutor, ctx: FixContext, emit_fn: Any) -> En
                 stderr_preview = (r.stderr or r.stdout or "").strip()[:200]
                 snap.capabilities[probe_key] = f"DENIED ({stderr_preview})"
         except Exception as e:  # noqa: BLE001
-            snap.capabilities[probe_key] = (
-                f"PROBE_CRASHED ({type(e).__name__}: {str(e)[:120]})"
-            )
+            snap.capabilities[probe_key] = f"PROBE_CRASHED ({type(e).__name__}: {str(e)[:120]})"
 
     # 5. Target resource current state (if we know what it is)
     if ctx.resource_name:
@@ -316,10 +354,13 @@ def snapshot_env2(executor: RemoteExecutor, ctx: FixContext, emit_fn: Any) -> En
                 f"terraform state show crashed: {type(e).__name__}: {str(e)[:200]}"
             )
 
-    cap_summary = ", ".join(
-        f"{k}={'OK' if v.startswith('OK') else 'DENIED' if v.startswith('DENIED') else '?'}"
-        for k, v in snap.capabilities.items()
-    ) or "none"
+    cap_summary = (
+        ", ".join(
+            f"{k}={'OK' if v.startswith('OK') else 'DENIED' if v.startswith('DENIED') else '?'}"
+            for k, v in snap.capabilities.items()
+        )
+        or "none"
+    )
     emit_fn(
         ctx.agent_run_id,
         "sub-agent-4",
@@ -342,9 +383,7 @@ class PreflightRewrite(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    step_index: int = Field(
-        ..., ge=0, description="0-based index into remediation_steps"
-    )
+    step_index: int = Field(..., ge=0, description="0-based index into remediation_steps")
     reason: str = Field(
         ...,
         min_length=10,
@@ -502,9 +541,7 @@ def _build_llm_messages(pathway: dict, snapshot: EnvSnapshot, issue: dict) -> li
         "severity": issue.get("severity"),
         "resource": (issue.get("asset_identity") or {}).get("resource"),
     }
-    finding_summary = "\n".join(
-        f"  - {k}: {str(v)[:200]}" for k, v in finding_pairs.items() if v
-    )
+    finding_summary = "\n".join(f"  - {k}: {str(v)[:200]}" for k, v in finding_pairs.items() if v)
 
     user_text = (
         f"FINDING:\n{finding_summary}\n\n"
@@ -610,8 +647,7 @@ def run_preflight_rewrite(
             ctx.agent_run_id,
             "sub-agent-4",
             "MESSAGE",
-            f"   ↳ Advisory (confidence={r.confidence}, step={r.step_index}): "
-            f"{r.reason[:200]}",
+            f"   ↳ Advisory (confidence={r.confidence}, step={r.step_index}): {r.reason[:200]}",
         )
 
     for concern in plan.unfixable_concerns:
@@ -627,8 +663,7 @@ def run_preflight_rewrite(
             ctx.agent_run_id,
             "sub-agent-4",
             "MESSAGE",
-            "✓ Pre-flight: no high-confidence rewrites to apply. "
-            "Executing original package.",
+            "✓ Pre-flight: no high-confidence rewrites to apply. Executing original package.",
         )
         return original_pathway, []
 
@@ -659,9 +694,7 @@ def run_preflight_rewrite(
         # 2026-07-15 15:53 after a state reset). Silent no-op'ing a real
         # remediation step is worse than skipping the rewrite — the step
         # never runs, the scanner re-scan still fails, and rollback fires.
-        ok, diagnostic = _verify_no_op_claim(
-            r.reason, r.new_step, snapshot.terraform_resources
-        )
+        ok, diagnostic = _verify_no_op_claim(r.reason, r.new_step, snapshot.terraform_resources)
         if not ok:
             emit_fn(
                 ctx.agent_run_id,
@@ -705,7 +738,6 @@ def run_preflight_rewrite(
         ctx.agent_run_id,
         "sub-agent-4",
         "MESSAGE",
-        f"🧠 Pre-flight complete: {applied} applied, {skipped} skipped. "
-        "Proceeding to execute.",
+        f"🧠 Pre-flight complete: {applied} applied, {skipped} skipped. Proceeding to execute.",
     )
     return new_pathway, log

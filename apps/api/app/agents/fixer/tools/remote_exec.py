@@ -369,4 +369,3 @@ class RemoteExecutor:
                 )
             except ClientError as e:
                 raise RemoteExecError(f"SSM GetCommandInvocation polling failed: {e}") from e
-
