@@ -262,26 +262,11 @@ def run_trivy_image():
 
 
 def run_trivy_os():
-    """Pull Ubuntu 18.04 (EOL) and scan it for OS-level CVEs."""
-    old_image = "ubuntu:18.04"
+    """Scan the host OS (Ubuntu 20.04) for OS-level CVEs using trivy rootfs."""
     try:
-        pull_result = subprocess.run(
-            ["docker", "pull", old_image],
-            capture_output=True, text=True, timeout=120
-        )
-        if pull_result.returncode != 0:
-            error_msg = f"docker pull failed (rc={pull_result.returncode}): {pull_result.stderr[:300]}"
-            print(f"[scan] {error_msg}")
-            error_data = {"findings": [], "total": 0, "error": error_msg,
-                          "scanned_at": datetime.utcnow().isoformat()}
-            with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
-                json.dump(error_data, f)
-            scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
-            return
-
         result = subprocess.run(
-            ["trivy", "image", old_image, "--format", "json", "--scanners", "vuln"],
-            capture_output=True, text=True, timeout=180
+            ["trivy", "rootfs", "/", "--format", "json", "--scanners", "vuln"],
+            capture_output=True, text=True, timeout=300
         )
 
         if not result.stdout:
@@ -308,14 +293,14 @@ def run_trivy_os():
                     "description": vuln.get("Description"),
                     "target": target_result.get("Target"),
                     "type": target_result.get("Type"),
-                    "os": "ubuntu 18.04 (end-of-life)",
+                    "os": "ubuntu 20.04 (host)",
                 })
 
         result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
         with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
-        print(f"[scan] Trivy OS (ubuntu:18.04) complete: {len(findings)} findings")
+        print(f"[scan] Trivy OS (host rootfs) complete: {len(findings)} findings")
     except Exception as e:
         print(f"[scan] Trivy OS failed: {e}")
         error_data = {"findings": [], "total": 0, "error": str(e),
