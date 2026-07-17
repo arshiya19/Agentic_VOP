@@ -62,3 +62,9 @@ variable "terraform_lock_table" {
   description = "DynamoDB table name for Terraform state locking"
   type        = string
 }
+
+variable "ami_override" {
+  description = "Optional AMI ID to use instead of latest Ubuntu. Set to an older AMI to get OS-level vulnerabilities for Trivy scanning."
+  type        = string
+  default     = ""
+}

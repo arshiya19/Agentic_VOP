@@ -69,6 +69,10 @@ module "lab" {
   scan_server_port       = 8090
   terraform_state_bucket = "sisyfix-terraform-state-486655355038"
   terraform_lock_table   = "sisyfix-terraform-locks"
+
+  # Old Ubuntu 20.04 LTS snapshot — has 100+ unpatched CVEs (MEDIUM + HIGH)
+  # for Trivy OS scanning demos
+  ami_override           = "ami-0dba2cb6798deb6d8"
 }
 
 # -----------------------------------------------------------------------------
