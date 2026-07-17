@@ -186,7 +186,8 @@ class IaCStrategy(BaseFixStrategy):
     def backup(self, ctx: FixContext) -> BackupResult:
         if not ctx.file_path:
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 "⏭ Backup phase: no file_path in context — skipping "
                 "(no source artifact to snapshot for this run)",
             )
@@ -198,13 +199,15 @@ class IaCStrategy(BaseFixStrategy):
             )
 
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"💾 Backup phase: snapshotting {ctx.file_path} → .bak-<timestamp> on env2",
         )
         executor = self._executor_for(ctx)
         backup_path, _cmd_result = backup_file(executor, ctx.file_path)
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"✓ Backup created: {backup_path} (rollback anchor persisted to fix_run.backup_reference)",
         )
 
@@ -228,7 +231,8 @@ class IaCStrategy(BaseFixStrategy):
             return results
 
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"▶ Execute phase: {len(remediation_steps)} step(s) to run "
             f"(wd={ctx.working_directory}, file={ctx.file_path})",
         )
@@ -239,7 +243,8 @@ class IaCStrategy(BaseFixStrategy):
 
             # Announce the step BEFORE parsing — user sees what SA3 emitted
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"→ Step {step_num}/{len(remediation_steps)}: {action_label}",
             )
 
@@ -256,7 +261,8 @@ class IaCStrategy(BaseFixStrategy):
                 # them). Belt-and-suspenders — record as skipped, but this
                 # shouldn't happen in practice.
                 self._emit(
-                    ctx, "MESSAGE",
+                    ctx,
+                    "MESSAGE",
                     f"⚠ Step {step_num}: no runnable Command:/fenced block found in step text "
                     f"({len(step_text)} chars) — skipping",
                 )
@@ -271,7 +277,8 @@ class IaCStrategy(BaseFixStrategy):
             # between them is safe (bash treats it as no-op).
             combined = "\n\n".join(blocks)
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"   📝 Extracted {len(blocks)} shell block(s) from step text "
                 f"({len(combined)} chars total)",
             )
@@ -280,7 +287,8 @@ class IaCStrategy(BaseFixStrategy):
             safety = validate_command(combined, ctx.working_directory)
             if not safety.allowed:
                 self._emit(
-                    ctx, "ERROR",
+                    ctx,
+                    "ERROR",
                     f"🛑 Step {step_num} blocked by safety layer — pattern={safety.matched_pattern!r}, "
                     f"reason: {safety.reason}",
                 )
@@ -291,7 +299,8 @@ class IaCStrategy(BaseFixStrategy):
             # Choose a per-step timeout — terraform ops get more headroom
             timeout_s = self._per_step_timeout(combined)
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"   ⏱ Timeout: {timeout_s}s (chosen based on command shape)",
             )
 
@@ -327,19 +336,21 @@ class IaCStrategy(BaseFixStrategy):
 
             step_ok = self._step_succeeded(combined, cmd_result.exit_code)
             status = "success" if step_ok else "failed"
-            results.append(StepResult(
-                step_num=step_num,
-                action=action_label,
-                command=combined,
-                stdout=cmd_result.stdout[:20000],
-                stderr=cmd_result.stderr[:5000],
-                exit_code=cmd_result.exit_code,
-                duration_ms=cmd_result.duration_ms,
-                status=status,
-                started_at=cmd_result.started_at,
-                finished_at=cmd_result.finished_at,
-                ssm_command_id=cmd_result.ssm_command_id,
-            ))
+            results.append(
+                StepResult(
+                    step_num=step_num,
+                    action=action_label,
+                    command=combined,
+                    stdout=cmd_result.stdout[:20000],
+                    stderr=cmd_result.stderr[:5000],
+                    exit_code=cmd_result.exit_code,
+                    duration_ms=cmd_result.duration_ms,
+                    status=status,
+                    started_at=cmd_result.started_at,
+                    finished_at=cmd_result.finished_at,
+                    ssm_command_id=cmd_result.ssm_command_id,
+                )
+            )
 
             if not step_ok:
                 self._emit(
@@ -354,10 +365,12 @@ class IaCStrategy(BaseFixStrategy):
                 # the trace reads correctly instead of hiding a non-zero exit.
                 extra = (
                     " (exit=2 = changes planned, treated as success)"
-                    if cmd_result.exit_code == 2 else ""
+                    if cmd_result.exit_code == 2
+                    else ""
                 )
                 self._emit(
-                    ctx, "MESSAGE",
+                    ctx,
+                    "MESSAGE",
                     f"✓ Step {step_num} succeeded ({cmd_result.duration_ms}ms){extra}",
                 )
 
@@ -398,7 +411,8 @@ class IaCStrategy(BaseFixStrategy):
             return results
 
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"🔬 Validate phase: {len(validation_tests)} test(s) queued "
             "(exactly one MUST be a scanner re-scan per SA3 v2.4 hard rule 17)",
         )
@@ -413,50 +427,58 @@ class IaCStrategy(BaseFixStrategy):
             rescan_tag = " ✨ RE-SCAN" if is_rescan else ""
 
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"→ Test {idx}/{len(validation_tests)}: {test_name}{rescan_tag}",
             )
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 f"   method={method}, expected≈{self._one_line(expected, 100)!r}",
             )
 
             if method != "cli":
                 self._emit(
-                    ctx, "MESSAGE",
+                    ctx,
+                    "MESSAGE",
                     f"   ⏭ Skipping — method={method!r} not supported in Phase-1 IaC strategy",
                 )
-                results.append(ValidationResult(
-                    test_name=test_name,
-                    method=method,
-                    command=command,
-                    expected=expected,
-                    actual="",
-                    passed=False,
-                    is_rescan=is_rescan,
-                    comparison_note=(
-                        f"method={method!r} not supported in Phase-1 IaC strategy "
-                        "(cli only). Skipping."
-                    ),
-                ))
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual="",
+                        passed=False,
+                        is_rescan=is_rescan,
+                        comparison_note=(
+                            f"method={method!r} not supported in Phase-1 IaC strategy "
+                            "(cli only). Skipping."
+                        ),
+                    )
+                )
                 continue
 
             safety = validate_command(command, ctx.working_directory)
             if not safety.allowed:
                 self._emit(
-                    ctx, "ERROR",
+                    ctx,
+                    "ERROR",
                     f"   🛑 Safety blocked test — pattern={safety.matched_pattern!r}: {safety.reason}",
                 )
-                results.append(ValidationResult(
-                    test_name=test_name,
-                    method=method,
-                    command=command,
-                    expected=expected,
-                    actual="",
-                    passed=False,
-                    is_rescan=is_rescan,
-                    comparison_note=f"Safety blocked: {safety.reason}",
-                ))
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual="",
+                        passed=False,
+                        is_rescan=is_rescan,
+                        comparison_note=f"Safety blocked: {safety.reason}",
+                    )
+                )
                 continue
             try:
                 cmd_result = executor.run_command(
@@ -502,7 +524,8 @@ class IaCStrategy(BaseFixStrategy):
 
             outcome = "PASSED" if passed else "FAILED"
             self._emit(
-                ctx, "MESSAGE" if passed else "ERROR",
+                ctx,
+                "MESSAGE" if passed else "ERROR",
                 f"   {'✓' if passed else '✗'} {test_name}: {outcome} "
                 f"(expected≈{self._one_line(expected, 80)!r} vs actual≈{self._one_line(actual, 80)!r})",
             )
@@ -511,7 +534,8 @@ class IaCStrategy(BaseFixStrategy):
         rescans = [v for v in results if v.is_rescan]
         passed_ct = sum(1 for v in results if v.passed)
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"🔬 Validate phase complete: {passed_ct}/{len(results)} tests passed "
             f"({len(rescans)} was a scanner re-scan)",
         )
@@ -524,14 +548,16 @@ class IaCStrategy(BaseFixStrategy):
         results: list[RollbackResult] = []
         if not ctx.backup_reference or not ctx.file_path:
             self._emit(
-                ctx, "MESSAGE",
+                ctx,
+                "MESSAGE",
                 "↶ Rollback phase: no backup_reference or file_path in context — "
                 "nothing to restore (backup phase likely didn't complete)",
             )
             return results
 
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"↶ Rollback phase started — restoring {ctx.file_path} from {ctx.backup_reference}, "
             "then reconciling via terraform apply",
         )
@@ -604,7 +630,8 @@ class IaCStrategy(BaseFixStrategy):
         # Rollback summary
         succeeded_ct = sum(1 for r in results if r.status == "success")
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"↶ Rollback phase complete: {succeeded_ct}/{len(results)} steps succeeded. "
             f"{'Env restored to pre-fix state.' if succeeded_ct == len(results) else 'Manual verification recommended.'}",
         )

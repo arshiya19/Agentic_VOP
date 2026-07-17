@@ -456,10 +456,7 @@ def _extract_shell_blocks(step_text: str) -> list[str]:
         if non_empty:
             common_indent = min(len(ln) - len(ln.lstrip()) for ln in non_empty)
             if common_indent:
-                lines = [
-                    (ln[common_indent:] if len(ln) >= common_indent else ln)
-                    for ln in lines
-                ]
+                lines = [(ln[common_indent:] if len(ln) >= common_indent else ln) for ln in lines]
         block = "\n".join(lines).strip("\n")
         if block:
             blocks.append(block)
