@@ -68,7 +68,7 @@ def run_checkov():
             for f in failed:
                 findings.append({
                     "check_id": f.get("check_id"),
-                    "check_name": f.get("name") or f.get("check_id"),
+                    "check_name": f.get("check_name") or f.get("check_id"),
                     "severity": f.get("severity") or "MEDIUM",
                     "resource": f.get("resource"),
                     "file_path": f.get("file_path"),
