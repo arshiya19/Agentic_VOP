@@ -105,12 +105,10 @@ resource "aws_iam_role_policy" "ec2_ssm_send_command" {
         Effect = "Allow"
         Action = [
           "ssm:SendCommand",
-          "ssm:GetCommandInvocation"
+          "ssm:GetCommandInvocation",
+          "ssm:ListCommandInvocations"
         ]
-        Resource = [
-          "arn:aws:ec2:${var.aws_region}:${local.account_id}:instance/*",
-          "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript"
-        ]
+        Resource = "*"
       }
     ]
   })
