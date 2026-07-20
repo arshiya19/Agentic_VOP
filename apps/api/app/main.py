@@ -238,6 +238,136 @@ def reset_demo_state() -> dict:
     }
 
 
+@app.post("/admin/env2/reset")
+def reset_env2_baseline() -> dict:
+    """Reset the env2 vulnerable-lab EC2 back to its fresh baseline.
+
+    Runs the same 5-step SSM sequence Revanth was doing from the terminal:
+      1. terraform destroy (drops current resources)
+      2. Wipe S3 state file + DynamoDB lock (clean slate for terraform)
+      3. Restore main.tf from main.tf.original + wipe .bak-* files
+      4. terraform init + terraform apply (recreates the vulnerable baseline)
+      5. checkov re-scan to confirm the 11-failure baseline
+
+    Blocks until the SSM command finishes (~60s on a healthy env2). Returns
+    the parsed checkov count + new SG id so the UI can display "env cleaned,
+    11 checkov failures, SG sg-xxx" without a second call.
+    """
+    import base64
+    import time
+    import boto3
+
+    instance_id = settings.fixer_env2_instance_id
+    if not instance_id:
+        raise HTTPException(
+            status_code=500,
+            detail="fixer_env2_instance_id not configured — set it in .env",
+        )
+
+    reset_script = """#!/bin/bash
+set -e
+cd /opt/vuln-labs/cspm-lab
+echo "=== STEP 1: terraform destroy ==="
+terraform destroy -auto-approve -no-color -input=false 2>&1 | tail -n 5
+echo "=== STEP 2: delete S3 state file ==="
+aws s3 rm "s3://sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate" 2>&1 || echo "(state may already be empty)"
+echo "=== STEP 3: delete DynamoDB lock entry ==="
+aws dynamodb delete-item --table-name sisyfix-terraform-locks --key '{"LockID":{"S":"sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate-md5"}}' 2>&1 || echo "(lock may not exist)"
+echo "=== STEP 4: restore main.tf + wipe .bak files ==="
+if [ ! -f main.tf.original ]; then echo "ERROR: main.tf.original not found"; exit 1; fi
+cp main.tf.original main.tf
+rm -f main.tf.bak-*
+rm -rf .terraform .terraform.lock.hcl
+echo "=== STEP 5: terraform init + apply ==="
+terraform init -backend-config=backend.hcl -input=false -no-color 2>&1 | tail -n 3
+terraform apply -auto-approve -no-color -input=false 2>&1 | tail -n 6
+echo "=== VERIFY: checkov count ==="
+checkov -d . --compact --quiet 2>&1 | grep -E "Passed checks|Failed checks" || echo "checkov output missing"
+echo "=== DONE ==="
+"""
+
+    b64 = base64.b64encode(reset_script.encode()).decode()
+    ssm = boto3.client("ssm", region_name="us-east-1")
+    started = datetime.now(UTC)
+
+    try:
+        resp = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            TimeoutSeconds=600,
+            Parameters={"commands": [f"echo {b64} | base64 -d | bash"]},
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"SSM send_command failed: {type(e).__name__}: {e}"
+        ) from e
+
+    command_id = resp["Command"]["CommandId"]
+
+    # Poll with a 3-minute ceiling. Reset normally finishes in ~60s.
+    deadline = time.time() + 180
+    invocation = None
+    while time.time() < deadline:
+        try:
+            invocation = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        except ssm.exceptions.InvocationDoesNotExist:
+            # SSM hasn't materialised the invocation yet — very early poll
+            time.sleep(2)
+            continue
+        if invocation["Status"] not in ("InProgress", "Pending", "Delayed"):
+            break
+        time.sleep(4)
+    else:
+        raise HTTPException(
+            status_code=504,
+            detail=f"env2 reset exceeded 180s (command_id={command_id})",
+        )
+
+    status = invocation["Status"]
+    stdout = invocation.get("StandardOutputContent") or ""
+    stderr = invocation.get("StandardErrorContent") or ""
+    duration_s = int((datetime.now(UTC) - started).total_seconds())
+
+    # Parse the checkov summary + new SG id out of stdout. Non-fatal if missing.
+    import re
+
+    checkov_passed = None
+    checkov_failed = None
+    m = re.search(r"Passed checks:\s*(\d+),\s*Failed checks:\s*(\d+)", stdout)
+    if m:
+        checkov_passed = int(m.group(1))
+        checkov_failed = int(m.group(2))
+    new_sg_id = None
+    m = re.search(
+        r"aws_security_group\.vulnerable_sg:\s*Creation complete[^\[]*\[id=(sg-[a-f0-9]+)\]", stdout
+    )
+    if m:
+        new_sg_id = m.group(1)
+
+    if status != "Success":
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": f"env2 reset failed with SSM status {status}",
+                "command_id": command_id,
+                "stderr_tail": stderr[-1500:],
+                "stdout_tail": stdout[-1500:],
+                "duration_s": duration_s,
+            },
+        )
+
+    return {
+        "status": "success",
+        "command_id": command_id,
+        "duration_s": duration_s,
+        "checkov_passed": checkov_passed,
+        "checkov_failed": checkov_failed,
+        "new_sg_id": new_sg_id,
+        "instance_id": instance_id,
+        "stdout_tail": stdout[-800:],
+    }
+
+
 @app.get("/agents/demo/runs")
 def list_demo_runs(limit: int = 20) -> dict:
     """List demo pipeline runs — newest first."""
@@ -1940,3 +2070,82 @@ def reject_remediation_package(pkg_id: int, body: RejectPackageRequest) -> dict:
         "reason": body.reason,
         "rejected_by": body.rejected_by,
     }
+
+
+@app.post("/admin/remediation-packages/{pkg_id}/fix", status_code=202)
+def fix_remediation_package(pkg_id: int, background_tasks: BackgroundTasks) -> dict:
+    """Dispatch Sub-Agent 4 (the Fixer) against this package.
+
+    Runs in the background — returns 202 immediately with the new fix_run id.
+    Poll `/admin/fix-runs/{id}` (Phase-2 endpoint) or watch the trace stream
+    for progress.
+
+    Requires:
+      - package.status = 'ready_for_execution' (previously approved)
+      - settings.fixer_env2_instance_id set (env2 provisioned)
+
+    Real pipeline is manual-trigger only — the demo pipeline auto-chains
+    via master_demo's fix node. Production intentionally requires an
+    explicit human click before touching env2.
+    """
+    sb = supabase_admin()
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"remediation_package {pkg_id} not found")
+    current = resp.data[0]["status"]
+    if current != "ready_for_execution":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"package status={current!r} — must be 'ready_for_execution' "
+                "(approve it first via /approve)"
+            ),
+        )
+
+    from .config import settings  # noqa: PLC0415
+
+    if not settings.fixer_env2_instance_id:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "FIXER_ENV2_INSTANCE_ID not configured. Provision env2 and set "
+                "the instance id via env before enabling the /fix endpoint."
+            ),
+        )
+
+    # Fresh agent_run_id for this fix — traces stream under this id.
+    import uuid  # noqa: PLC0415
+
+    fix_run_uuid = str(uuid.uuid4())
+    sb.table("agent_runs").insert(
+        {
+            "run_id": fix_run_uuid,
+            "event_id": f"fix-package-{pkg_id}",
+            "persona": "sub-agent-4",
+            "status": "pending",
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+    ).execute()
+
+    def _dispatch() -> None:
+        from .agents.fixer import run_fixer  # noqa: PLC0415
+        from .agents.trace import emit_trace  # noqa: PLC0415
+
+        try:
+            run_fixer(
+                pkg_id,
+                agent_run_id=fix_run_uuid,
+                sb=sb,
+                emit_fn=emit_trace,
+                environment="sandbox",
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_trace(
+                fix_run_uuid,
+                "sub-agent-4",
+                "ERROR",
+                f"Fixer dispatch failed: {type(exc).__name__}: {str(exc)[:300]}",
+            )
+
+    background_tasks.add_task(_dispatch)
+    return {"agent_run_id": fix_run_uuid, "package_id": pkg_id, "status": "dispatched"}

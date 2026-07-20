@@ -52,6 +52,32 @@ class Settings(BaseSettings):
     # 200K TPM limit for gpt-4o-mini. Bump to 10+ if you have a higher tier.
     llm_parallel_workers: int = 5
 
+    # --- Sub-Agent 4 (Fixer) settings ---
+    # env2 (Remediation Playground) EC2 instance id — the sandbox target for
+    # every fix run. Set once per deployment. Empty = Sub-Agent 4 refuses to
+    # start (fails fast rather than silently attempt fixes with no target).
+    fixer_env2_instance_id: str = ""
+
+    # Path prefix to prepend to raw-finding absolute paths so they resolve to
+    # env2's real filesystem layout. Example:
+    #   Raw finding says:  /main.tf         (relative to Checkov's scan root)
+    #   env2 actually has: /opt/vuln-labs/cspm-lab/main.tf
+    #   Set:               FIXER_ENV2_PATH_PREFIX=/opt/vuln-labs/cspm-lab
+    #   Result:            file_path = /opt/vuln-labs/cspm-lab/main.tf
+    #
+    # Empty (default) = no translation, use raw path as-is. This works when
+    # the scanner + fix target share the same filesystem view (e.g. running
+    # SA4 locally against a Terraform module on your laptop).
+    fixer_env2_path_prefix: str = ""
+
+    # Toggle for auto-chaining Sub-Agent 4 after Sub-Agent 3 in the demo
+    # pipeline. Set false to keep SA3 emitting packages without triggering
+    # execution (useful when env2 isn't provisioned yet).
+    fixer_auto_chain: bool = True
+
+    # AWS region for env2 + SSM RunCommand calls.
+    aws_region: str = "us-east-1"
+
     # --- Secrets encryption ---
     # Base64-encoded 32-byte key for AES-256-GCM encryption of sensitive
     # scanner metadata (headers, body, credentials). REQUIRED for production.

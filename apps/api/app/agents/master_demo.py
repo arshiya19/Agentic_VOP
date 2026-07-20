@@ -1,17 +1,20 @@
 """Master — DEMO orchestrator.
 
 LangGraph shape:
-  START → load_context → sample → enrich → remediate → summarize → END
+  START → load_context → sample → enrich → remediate → fix → summarize → END
 
 The demo pipeline seeds `demo.issues` by SAMPLING 1 issue per family from
-real -ec2 issues in `public.issues` (see sample_from_real.py). Enrichment
-and remediation then run against those copied rows, isolated in demo schema.
+real -ec2 issues in `public.issues` (see sample_from_real.py). Enrichment,
+remediation (SA3), and execution (SA4) then run against those copied rows,
+isolated in demo schema.
 
 Differences vs real master.py:
   - No planning step — fixed sequence, no LLM plan needed.
   - No FETCH step — real fetch already ran and populated public.issues with
     -ec2 sources; the demo just samples from those.
   - Adds a REMEDIATE step (via planner_demo) after enrichment.
+  - Adds a FIX step (Sub-Agent 4) after remediation — auto-chained per
+    settings.fixer_auto_chain. Runs against env2 via SSM RunCommand.
   - All state reads/writes go through demo.* (via supabase_admin_demo()).
 
 Run entry: run_demo_master(run_id) — mirrors run_master().
@@ -24,6 +27,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from ..config import settings
 from ..db import supabase_admin_demo
 from .remediation import planner_demo
 from .sample_from_real import sample_and_copy_ec2_issues
@@ -39,6 +43,7 @@ class DemoMasterState(TypedDict, total=False):
     sample_result: dict
     enrich_result: dict
     remediation_result: dict
+    fix_result: dict
     error_message: str | None
 
 
@@ -55,9 +60,14 @@ def _load_context_node(state: DemoMasterState) -> dict:
         run_id,
         "master",
         "DISPATCH",
-        "Demo pipeline started: sample -ec2 → enrich → remediate",
+        "Demo pipeline started: sample -ec2 → enrich → remediate → fix",
     )
-    return {"sample_result": {}, "enrich_result": {}, "remediation_result": {}}
+    return {
+        "sample_result": {},
+        "enrich_result": {},
+        "remediation_result": {},
+        "fix_result": {},
+    }
 
 
 def _sample_node(state: DemoMasterState) -> dict:
@@ -120,6 +130,135 @@ def _remediate_node(state: DemoMasterState) -> dict:
     return {"remediation_result": result}
 
 
+def _fix_node(state: DemoMasterState) -> dict:
+    """Sub-Agent 4 demo — auto-chained execution of every persisted package.
+
+    Runs the fixer once per remediation_package created by this demo run.
+    Sequential (one at a time) because env2 + terraform state can't be
+    raced in parallel — see FixerConfig.allow_concurrent_runs.
+
+    Two config toggles govern behavior:
+      settings.fixer_auto_chain      — when False, skip the fixer entirely
+                                        (useful pre-env2 provisioning)
+      settings.fixer_env2_instance_id — when empty, skip + emit a warning
+                                        (fail-soft, don't halt demo)
+    """
+    run_id = state["run_id"]
+    if is_cancellation_requested_demo(run_id):
+        raise RunCancelledError("Demo run cancelled before fix stage")
+
+    # Toggle 1 — auto-chain off?
+    if not settings.fixer_auto_chain:
+        emit_trace_demo(
+            run_id,
+            "master",
+            "MESSAGE",
+            "Skipping Sub-Agent 4 — settings.fixer_auto_chain is False",
+        )
+        return {"fix_result": {"skipped": True, "reason": "auto_chain_disabled"}}
+
+    # Toggle 2 — no env2 configured?
+    if not settings.fixer_env2_instance_id:
+        emit_trace_demo(
+            run_id,
+            "master",
+            "MESSAGE",
+            "Skipping Sub-Agent 4 — FIXER_ENV2_INSTANCE_ID not set (env2 not provisioned yet)",
+        )
+        return {"fix_result": {"skipped": True, "reason": "env2_not_configured"}}
+
+    # Load packages this demo run just persisted
+    sb = supabase_admin_demo()
+    pkg_rows = (
+        sb.table("remediation_packages")
+        .select("id, family, issue_id")
+        .eq("agent_run_id", run_id)
+        .execute()
+        .data
+        or []
+    )
+
+    if not pkg_rows:
+        emit_trace_demo(
+            run_id,
+            "master",
+            "MESSAGE",
+            "Skipping Sub-Agent 4 — no packages to fix (upstream stage produced none)",
+        )
+        return {"fix_result": {"skipped": True, "reason": "no_packages"}}
+
+    emit_trace_demo(
+        run_id,
+        "master",
+        "MESSAGE",
+        f"Dispatching to Sub-Agent 4 (demo) — {len(pkg_rows)} package(s) to fix on env2",
+    )
+
+    # Import lazily so the demo module doesn't force the SA4 dependency graph
+    # to import at module-load time (kept the fixer package light for tests).
+    from .fixer import run_fixer  # noqa: PLC0415
+
+    fix_runs: list[dict] = []
+    succeeded = 0
+    failed = 0
+    rolled_back = 0
+
+    for pkg in pkg_rows:
+        if is_cancellation_requested_demo(run_id):
+            raise RunCancelledError("Demo run cancelled during fix stage")
+
+        try:
+            fix_run_id = run_fixer(
+                pkg["id"],
+                agent_run_id=run_id,
+                sb=sb,
+                emit_fn=emit_trace_demo,
+                environment="sandbox",
+            )
+        except Exception as e:  # noqa: BLE001
+            emit_trace_demo(
+                run_id,
+                "master",
+                "ERROR",
+                f"Sub-Agent 4 dispatch failed for package #{pkg['id']}: "
+                f"{type(e).__name__}: {str(e)[:200]}",
+            )
+            failed += 1
+            fix_runs.append({"package_id": pkg["id"], "status": "dispatch_failed"})
+            continue
+
+        # Read back final status so summary can report accurately
+        row = (
+            sb.table("fix_runs").select("id, status").eq("id", fix_run_id).limit(1).execute().data
+            or []
+        )
+        status = (row[0] if row else {}).get("status", "unknown")
+        fix_runs.append({"package_id": pkg["id"], "fix_run_id": fix_run_id, "status": status})
+
+        if status == "success":
+            succeeded += 1
+        elif status == "rolled_back":
+            rolled_back += 1
+        else:
+            failed += 1
+
+    result = {
+        "skipped": False,
+        "total": len(pkg_rows),
+        "succeeded": succeeded,
+        "failed": failed,
+        "rolled_back": rolled_back,
+        "fix_runs": fix_runs,
+    }
+    emit_trace_demo(
+        run_id,
+        "master",
+        "MESSAGE",
+        f"Received FIX_DONE — {succeeded} succeeded, {rolled_back} rolled back, {failed} failed",
+    )
+    return {"fix_result": result}
+
+
 def _summarize_node(state: DemoMasterState) -> dict:
     """Finalize the demo run — update agent_runs, emit DONE."""
     run_id = state["run_id"]
@@ -128,6 +267,7 @@ def _summarize_node(state: DemoMasterState) -> dict:
     sample = state.get("sample_result", {})
     enrich = state.get("enrich_result", {})
     remediation = state.get("remediation_result", {})
+    fix = state.get("fix_result", {})
 
     sampled = sample.get("sampled", 0)
 
@@ -138,13 +278,21 @@ def _summarize_node(state: DemoMasterState) -> dict:
         }
     ).eq("run_id", run_id).execute()
 
+    fix_summary = (
+        "fix stage skipped"
+        if fix.get("skipped")
+        else f"{fix.get('succeeded', 0)} fixed"
+        f" · {fix.get('rolled_back', 0)} rolled back"
+        f" · {fix.get('failed', 0)} failed"
+    )
+
     emit_trace_demo(
         run_id,
         "master",
         "DONE",
         f"DEMO_COMPLETE — {sampled} sampled · "
         f"{enrich.get('enriched', 0)} enriched · "
-        f"{remediation.get('persisted', 0)} remediation package(s) generated",
+        f"{remediation.get('persisted', 0)} remediation package(s) generated · {fix_summary}",
         payload={
             "from": "master",
             "status": "DEMO_COMPLETE",
@@ -157,6 +305,7 @@ def _summarize_node(state: DemoMasterState) -> dict:
             "epss_hits": enrich.get("epss_hits", 0),
             "kev_hits": enrich.get("kev_hits", 0),
             "nvd_hits": enrich.get("nvd_hits", 0),
+            "fix_result": fix,
         },
     )
     return {}
@@ -190,6 +339,7 @@ def _build_graph():
     graph.add_node("sample", _sample_node)
     graph.add_node("enrich", _enrich_node)
     graph.add_node("remediate", _remediate_node)
+    graph.add_node("fix", _fix_node)
     graph.add_node("summarize", _summarize_node)
     graph.add_node("fail", _fail_node)
 
@@ -197,7 +347,8 @@ def _build_graph():
     graph.add_edge("load_context", "sample")
     graph.add_edge("sample", "enrich")
     graph.add_edge("enrich", "remediate")
-    graph.add_edge("remediate", "summarize")
+    graph.add_edge("remediate", "fix")
+    graph.add_edge("fix", "summarize")
     graph.add_edge("summarize", END)
     graph.add_edge("fail", END)
 
