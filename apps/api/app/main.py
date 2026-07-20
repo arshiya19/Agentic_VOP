@@ -1,7 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,6 +54,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Ensure unhandled 500s still carry CORS headers so the browser can read the error."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Ensure HTTPException responses also pass through middleware for CORS headers."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
 
 
 @app.get("/healthz")
@@ -287,8 +306,14 @@ echo "=== DONE ==="
 """
 
     b64 = base64.b64encode(reset_script.encode()).decode()
-    ssm = boto3.client("ssm", region_name="us-east-1")
     started = datetime.now(UTC)
+
+    try:
+        ssm = boto3.client("ssm", region_name="us-east-1")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"Failed to create SSM client: {type(e).__name__}: {e}"
+        ) from e
 
     try:
         resp = ssm.send_command(
@@ -314,6 +339,11 @@ echo "=== DONE ==="
             # SSM hasn't materialised the invocation yet — very early poll
             time.sleep(2)
             continue
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=f"SSM get_command_invocation failed: {type(e).__name__}: {e}",
+            ) from e
         if invocation["Status"] not in ("InProgress", "Pending", "Delayed"):
             break
         time.sleep(4)
