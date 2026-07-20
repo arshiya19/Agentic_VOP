@@ -106,7 +106,8 @@ resource "aws_iam_role_policy" "ec2_ssm_send_command" {
         Action = [
           "ssm:SendCommand",
           "ssm:GetCommandInvocation",
-          "ssm:ListCommandInvocations"
+          "ssm:ListCommandInvocations",
+          "ssm:DescribeInstanceInformation"
         ]
         Resource = "*"
       }
