@@ -65,6 +65,9 @@ export default function Agents() {
   const [selectedTrace, setSelectedTrace] = useState(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [modelConfigOpen, setModelConfigOpen] = useState(false)
+  // env2 reset state — button next to Real/Demo toggle
+  const [resetting, setResetting] = useState(false)
+  const [resetToast, setResetToast] = useState(null)  // { kind: 'success'|'error', message: string }
   // Contextual switch: 'real' (supabase realtime on public.*) or 'demo' (poll
   // backend demo endpoints). Set by Integrations page's trigger buttons; can
   // be overridden manually via the pill at the top of the page.
@@ -192,44 +195,113 @@ export default function Agents() {
     window.dispatchEvent(new Event('pipelineModeChanged'))
   }
 
-  // ----- Derived: agents (master + 2 sub-agents with live status) -----
+  const handleResetEnv2 = async () => {
+    if (resetting) return
+    const ok = window.confirm(
+      "Reset env2 to the vulnerable baseline?\n\n" +
+      "This will:\n" +
+      "  • terraform destroy the current lab resources\n" +
+      "  • wipe S3 terraform state + DynamoDB lock\n" +
+      "  • restore main.tf from main.tf.original\n" +
+      "  • terraform apply the fresh vulnerable baseline\n\n" +
+      "Takes ~60 seconds. Do not trigger a demo run during this."
+    )
+    if (!ok) return
+    setResetting(true)
+    setResetToast(null)
+    try {
+      const res = await fetch(`${API_URL}/admin/env2/reset`, { method: 'POST' })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const detail = typeof body?.detail === 'string' ? body.detail : JSON.stringify(body?.detail || body)
+        setResetToast({ kind: 'error', message: `Reset failed: ${detail.slice(0, 300)}` })
+      } else {
+        const bits = []
+        if (body.checkov_failed != null) bits.push(`${body.checkov_failed} checkov failures`)
+        if (body.new_sg_id) bits.push(`new SG ${body.new_sg_id}`)
+        if (body.duration_s != null) bits.push(`${body.duration_s}s`)
+        setResetToast({
+          kind: 'success',
+          message: `✅ env2 cleaned — ${bits.join(' · ') || 'ready'}`,
+        })
+      }
+    } catch (e) {
+      setResetToast({ kind: 'error', message: `Reset request failed: ${e.message || e}` })
+    } finally {
+      setResetting(false)
+    }
+  }
+
+  // Auto-dismiss the reset toast after 8s so it doesn't cover the trace
+  useEffect(() => {
+    if (!resetToast) return
+    const t = setTimeout(() => setResetToast(null), 8000)
+    return () => clearTimeout(t)
+  }, [resetToast])
+
+  // ----- Derived: agents (master + 4 sub-agents with live status) -----
+  // "working" = the agent has emitted at least one trace event for an
+  // actively running run. Stays green for the entire duration of the run,
+  // not just 30s after the last event (SA-4 can take 60s+ between events
+  // during terraform apply).
   const agents = useMemo(() => {
     const activeRunIds = new Set(
       runs.filter((r) => r.status === 'running').map((r) => r.run_id)
     )
 
-    const lastEventFor = (agentName) => {
-      const events = traceEvents.filter(
+    const isActiveInRun = (agentName) => {
+      if (activeRunIds.size === 0) return false
+      return traceEvents.some(
         (e) => e.from === agentName && activeRunIds.has(e.runId)
       )
-      return events[events.length - 1]
+    }
+
+    const lastEventFor = (agentName) => {
+      const events = traceEvents.filter((e) => e.from === agentName)
+      return events[events.length - 1] || null
     }
 
     const masterEvent = lastEventFor('master')
     const sub1Event = lastEventFor('sub-agent-1')
     const sub2Event = lastEventFor('sub-agent-2')
+    const sub3Event = lastEventFor('sub-agent-3')
+    const sub4Event = lastEventFor('sub-agent-4')
 
     return [
       {
         id: 'master',
         name: 'Master Orchestrator',
         role: 'master',
-        status: masterEvent ? 'working' : 'idle',
+        status: isActiveInRun('master') ? 'working' : 'idle',
         currentTask: masterEvent?.message || null,
       },
       {
         id: 'sub-agent-1',
         name: 'Sub-Agent 1 — Smart Connector',
         role: 'sub',
-        status: sub1Event ? 'working' : 'idle',
+        status: isActiveInRun('sub-agent-1') ? 'working' : 'idle',
         currentTask: sub1Event?.message || null,
       },
       {
         id: 'sub-agent-2',
         name: 'Sub-Agent 2 — Enrichment Specialist',
         role: 'sub',
-        status: sub2Event ? 'working' : 'idle',
+        status: isActiveInRun('sub-agent-2') ? 'working' : 'idle',
         currentTask: sub2Event?.message || null,
+      },
+      {
+        id: 'sub-agent-3',
+        name: 'Sub-Agent 3 — Remediation Planner',
+        role: 'sub',
+        status: isActiveInRun('sub-agent-3') ? 'working' : 'idle',
+        currentTask: sub3Event?.message || null,
+      },
+      {
+        id: 'sub-agent-4',
+        name: 'Sub-Agent 4 — Fixer',
+        role: 'sub',
+        status: isActiveInRun('sub-agent-4') ? 'working' : 'idle',
+        currentTask: sub4Event?.message || null,
       },
     ]
   }, [runs, traceEvents])
@@ -276,9 +348,9 @@ export default function Agents() {
         : '—'
 
     return {
-      activeAgents: activeRuns > 0 ? 3 : 0,   // 1 master + 2 sub-agents
+      activeAgents: activeRuns > 0 ? 5 : 0,   // 1 master + 4 sub-agents
       activeMasters: activeRuns > 0 ? 1 : 0,
-      activeSubs: activeRuns > 0 ? 2 : 0,
+      activeSubs: activeRuns > 0 ? 4 : 0,
       tasksInFlight: activeRuns,
       tasksQueued: queuedRuns,
       completedToday: completedTodayRuns.length,
@@ -398,7 +470,36 @@ export default function Agents() {
                 {pipelineMode === 'demo' && ' — DEMO PIPELINE (5 pre-seeded issues)'}
               </p>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={handleResetEnv2}
+                disabled={resetting}
+                title="Destroy + recreate env2 to the vulnerable baseline (~60s)"
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: 999,
+                  border: '1px solid ' + (resetting ? '#334155' : '#f59e0b'),
+                  background: resetting ? 'transparent' : 'rgba(245,158,11,0.12)',
+                  color: resetting ? '#94a3b8' : '#f59e0b',
+                  fontSize: 12, fontWeight: 600,
+                  cursor: resetting ? 'wait' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                {resetting ? (
+                  <>
+                    <span style={{
+                      width: 10, height: 10, border: '2px solid currentColor',
+                      borderTopColor: 'transparent', borderRadius: '50%',
+                      animation: 'spin 0.8s linear infinite', display: 'inline-block',
+                    }} />
+                    Resetting env2…
+                  </>
+                ) : (
+                  <>🧹 Reset env2</>
+                )}
+              </button>
               <button
                 type="button"
                 onClick={() => setModeManual('real')}
@@ -429,6 +530,25 @@ export default function Agents() {
               </button>
             </div>
           </div>
+
+          {resetToast && (
+            <div
+              role="status"
+              style={{
+                marginTop: 8,
+                padding: '8px 14px',
+                borderRadius: 8,
+                fontSize: 13,
+                border: '1px solid ' + (resetToast.kind === 'success' ? '#22c55e' : '#ef4444'),
+                background: resetToast.kind === 'success' ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
+                color: resetToast.kind === 'success' ? '#22c55e' : '#ef4444',
+              }}
+            >
+              {resetToast.message}
+            </div>
+          )}
+
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
           <div className="agents-stats-row">
             <div className="agent-stat-card">
