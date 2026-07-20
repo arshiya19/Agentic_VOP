@@ -22,6 +22,7 @@ Design principles held here:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ...remediation.verifier import _extract_shell_blocks
@@ -373,6 +374,37 @@ class IaCStrategy(BaseFixStrategy):
                     "MESSAGE",
                     f"✓ Step {step_num} succeeded ({cmd_result.duration_ms}ms){extra}",
                 )
+
+                # Vulnerable-pattern guard: if this step edited the source
+                # file, verify the finding's check no longer fails on the
+                # modified (but not-yet-applied) config. Catches SA3 emitting
+                # a fake fix — e.g. appending a new rule instead of modifying
+                # the vulnerable one — BEFORE we waste time on terraform
+                # plan+apply and the subsequent rollback. Generic across any
+                # Checkov check; opt-out for non-Checkov findings.
+                if self._step_modified_file(combined, ctx.file_path):
+                    guard_ok, guard_msg, guard_evidence = self._run_vuln_pattern_guard(
+                        ctx, executor
+                    )
+                    if not guard_ok:
+                        self._emit(ctx, "ERROR", f"🛡 {guard_msg}")
+                        results.append(
+                            StepResult(
+                                step_num=step_num + 1,
+                                action="Vulnerable-pattern guard (pre-apply)",
+                                command="checkov (guard)",
+                                stderr=guard_evidence[:5000],
+                                exit_code=1,
+                                duration_ms=0,
+                                status="failed",
+                                started_at=utcnow(),
+                                finished_at=utcnow(),
+                                adaptation_note=guard_msg[:500],
+                            )
+                        )
+                        return results  # HALT — orchestrator triggers rollback
+                    else:
+                        self._emit(ctx, "MESSAGE", f"   🛡 {guard_msg}")
 
         # If SA3's package did NOT emit an explicit terraform plan step,
         # verify state converged by running one now. This is defensive — it
@@ -739,6 +771,112 @@ class IaCStrategy(BaseFixStrategy):
             # If the package didn't declare an expected string, just trust exit code
             return True
         return expected.strip() in actual
+
+    @staticmethod
+    def _step_modified_file(command: str, file_path: str | None) -> bool:
+        """Heuristic: did this step modify the target IaC source file?
+
+        Detects the two shapes SA3 emits for edits:
+          * `sed -i '...' /path/main.tf`
+          * `cat >> /path/main.tf << 'EOF' ... EOF` (or `>`, `>>`, `echo >>`)
+
+        Anything else (backup cp, terraform plan/apply, aws-cli reads,
+        scanner re-scans) doesn't trigger the guard so we don't run
+        expensive checks on no-op steps.
+        """
+        if not file_path or not command:
+            return False
+        fname = file_path.rsplit("/", 1)[-1]
+        if fname not in command:
+            return False
+        cmd_l = command.lower()
+        # sed in-place edit
+        if "sed -i" in cmd_l or "sed --in-place" in cmd_l:
+            return True
+        # heredoc / redirection append/overwrite
+        if any(op in command for op in (" >>", " >")) and (
+            "cat " in cmd_l or "echo " in cmd_l or "printf " in cmd_l or "<<" in command
+        ):
+            return True
+        return False
+
+    def _run_vuln_pattern_guard(
+        self, ctx: FixContext, executor: RemoteExecutor
+    ) -> tuple[bool, str, str]:
+        """Re-run the finding's scanner on the modified source, pre-apply.
+
+        The guard is a shift-left of the final re-scan validation. If the
+        finding's check still fails on the just-edited file, SA3's edit
+        did not remove the vulnerability (classic case: appended a new
+        resource next to the vulnerable one instead of modifying it).
+        We reject BEFORE terraform plan/apply so we don't burn AWS API
+        calls, apply time, and rollback overhead on a fix that's already
+        provably fake.
+
+        Generic — uses the finding's own check_id, no per-check logic.
+        Opt-out for non-Checkov findings; other scanners can be added
+        by extending the CLI recipe below.
+
+        Returns (passed, human_message, evidence). Evidence is stored in
+        the synthetic StepResult so `fix_runs.step_results` captures why.
+        """
+        check_id = (ctx.issue or {}).get("source_vuln_id") or ""
+        if not check_id.startswith("CKV"):
+            return True, f"guard skipped (not a Checkov finding: {check_id!r})", ""
+
+        wd = ctx.working_directory or "."
+        cmd = f"checkov -d {wd} --check {check_id} --output json --quiet --compact"
+        try:
+            result = executor.run_command(
+                cmd, working_directory=wd, timeout_s=self.config.rescan_timeout_s
+            )
+        except (RemoteExecError, CommandTimeoutError) as e:
+            # Don't block the fix on a guard-infrastructure failure — log
+            # and continue. The final validation re-scan is authoritative.
+            return (
+                True,
+                f"guard skipped ({type(e).__name__} running checkov: {str(e)[:120]})",
+                "",
+            )
+
+        # Checkov: exit 0 = all pass, exit 1 = at least one fail
+        if result.exit_code == 0:
+            return (
+                True,
+                f"vuln-pattern guard PASSED — {check_id} no longer fails on modified source",
+                "",
+            )
+
+        # Parse to confirm the SAME check_id is still failing (not a
+        # different one that happens to share the file).
+        still_failing = False
+        try:
+            parsed = json.loads(result.stdout or "{}")
+            fails = (parsed.get("results") or {}).get("failed_checks") or []
+            still_failing = any(f.get("check_id") == check_id for f in fails)
+        except (ValueError, TypeError):
+            # Malformed output — treat as failure to be safe
+            still_failing = True
+
+        if still_failing:
+            return (
+                False,
+                (
+                    f"vuln-pattern guard REJECTED — {check_id} still fails on "
+                    f"modified source. SA3's edit did not remove the root cause "
+                    f"(likely appended a new resource instead of modifying the "
+                    f"vulnerable one). Aborting before terraform apply."
+                ),
+                (result.stdout or "")[:5000],
+            )
+
+        # Different check(s) failed but not ours — that's not this guard's
+        # concern (final re-scan will catch anything). Pass.
+        return (
+            True,
+            f"vuln-pattern guard PASSED — {check_id} not in failed_checks",
+            "",
+        )
 
     @staticmethod
     def _skipped_step(step_num: int, action: str, reason: str) -> StepResult:

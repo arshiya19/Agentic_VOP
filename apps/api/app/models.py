@@ -181,6 +181,19 @@ class ValidationTest(BaseModel):
         """
         if not isinstance(data, dict):
             return data
+
+        # Auto-heal LLM's habit of emitting empty strings for these
+        # always-required fields. Without this, an empty `expected: ""`
+        # fails Pydantic min_length=1 and drops the whole package into
+        # the hybrid fallback path. Observed live 2026-07-17 on CKV_AWS_24.
+        # Only rewrites empty strings — non-empty values are LEFT ALONE.
+        if data.get("expected") == "":
+            data["expected"] = "command exits 0"
+        if data.get("source") == "":
+            data["source"] = "recovered — LLM emitted empty source"
+        if data.get("method") == "":
+            data["method"] = "cli"
+
         if data.get("command"):
             return data  # Already has command — leave alone
 
