@@ -92,6 +92,30 @@ resource "aws_iam_role_policy" "ec2_dynamodb_read" {
   })
 }
 
+# Inline policy: SSM SendCommand to vuln-labs instances (for SA4 remediation)
+resource "aws_iam_role_policy" "ec2_ssm_send_command" {
+  name = "sisyfix-ec2-ssm-send-command-${var.env}-policy"
+  role = aws_iam_role.ec2_instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SSMSendCommandToVulnLabs"
+        Effect = "Allow"
+        Action = [
+          "ssm:SendCommand",
+          "ssm:GetCommandInvocation"
+        ]
+        Resource = [
+          "arn:aws:ec2:${var.aws_region}:${local.account_id}:instance/*",
+          "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript"
+        ]
+      }
+    ]
+  })
+}
+
 # Instance Profile for EC2 attachment
 resource "aws_iam_instance_profile" "ec2_instance" {
   name = "sisyfix-${var.env}-ec2-instance"
