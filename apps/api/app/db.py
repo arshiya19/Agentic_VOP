@@ -4,11 +4,21 @@ from .config import settings
 
 
 def supabase_admin() -> Client:
-    """Service-role client for the new project. Bypasses RLS — use for backend writes."""
-    return create_client(
+    """Service-role client scoped to the configured schema.
+
+    In production (DB_SCHEMA unset or "public"): targets public.* — no behavioral change.
+    In local dev (DB_SCHEMA=dev): targets dev.* — full isolation from prod data.
+
+    The demo pipeline is NOT affected — supabase_admin_demo() remains hardcoded
+    to the "demo" schema regardless of this setting.
+    """
+    client = create_client(
         settings.agentic_vop_supabase_url,
         settings.agentic_vop_supabase_service_key,
     )
+    if settings.db_schema != "public":
+        return client.schema(settings.db_schema)
+    return client
 
 
 def supabase_admin_demo() -> Client:
