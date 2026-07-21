@@ -111,5 +111,12 @@ class Settings(BaseSettings):
     # Threshold for cache misses before emitting CacheMissesLookupFailed metric.
     max_sync_cache_misses: int = 10
 
+    # --- Schema isolation for local development ---
+    # Postgres schema that supabase_admin() targets. Defaults to "public"
+    # (production behavior). Set to "dev" in your local .env to route all
+    # reads/writes to the isolated dev schema — zero agent code changes needed.
+    # The "demo" pipeline is unaffected (supabase_admin_demo() stays hardcoded).
+    db_schema: str = "public"
+
 
 settings = Settings()
