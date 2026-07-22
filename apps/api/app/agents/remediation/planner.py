@@ -636,6 +636,26 @@ def plan_remediation(
             "pattern": _pattern_payload(pattern),
         }
 
+        # --- Knowledge Base injection (few-shot from proven fixes) ---
+        kb_context = ""
+        try:
+            from .kb_retrieval import retrieve_examples, format_examples_for_prompt  # noqa: PLC0415
+
+            check_id = (issue.get("source_vuln_id") or issue.get("cve_id")
+                        or (issue.get("source_raw") or {}).get("check_id"))
+            kb_examples = retrieve_examples(sb, check_id=check_id, family=family)
+            if kb_examples:
+                kb_context = format_examples_for_prompt(kb_examples)
+                emit_trace(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"Injected {len(kb_examples)} proven fix(es) from knowledge base "
+                    f"(checks: {[e.check_id for e in kb_examples]})",
+                )
+        except Exception:  # noqa: BLE001, S110
+            pass  # KB retrieval is best-effort — never blocks planner
+
         base_temp = float(params.get("temperature", 0.3))
         max_tokens = int(params.get("max_tokens", 2500))
         primary_model = prompt_row["model"]
@@ -647,6 +667,9 @@ def plan_remediation(
             schema=LLMRemediationOutput,
             messages=[
                 SystemMessage(content=prompt_row["prompt_text"]),
+                *(
+                    [HumanMessage(content=kb_context)] if kb_context else []
+                ),
                 HumanMessage(content=str(payload)),
             ],
             attempts=[

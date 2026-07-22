@@ -702,8 +702,32 @@ def run_agentic_planner(
         "family": family,
     }
 
+    # --- Knowledge Base injection (few-shot from proven fixes) ---
+    kb_context_msg: list[Any] = []
+    try:
+        from .kb_retrieval import retrieve_examples, format_examples_for_agentic_prompt  # noqa: PLC0415
+        from ...db import supabase_admin  # noqa: PLC0415
+
+        sb_pub = supabase_admin()
+        check_id = (issue.get("source_vuln_id") or issue.get("cve_id")
+                    or (issue.get("source_raw") or {}).get("check_id"))
+        kb_examples = retrieve_examples(sb_pub, check_id=check_id, family=family)
+        if kb_examples:
+            kb_text = format_examples_for_agentic_prompt(kb_examples)
+            if kb_text:
+                kb_context_msg = [HumanMessage(content=kb_text)]
+                emit_fn(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"Injected {len(kb_examples)} proven fix pattern(s) from knowledge base",
+                )
+    except Exception:  # noqa: BLE001, S110
+        pass  # KB retrieval is best-effort
+
     messages: list[Any] = [
         SystemMessage(content=prompt_row["prompt_text"]),
+        *kb_context_msg,
         HumanMessage(content=json.dumps(user_payload, default=str)),
     ]
 

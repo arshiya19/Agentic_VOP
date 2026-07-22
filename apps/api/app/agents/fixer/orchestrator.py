@@ -312,6 +312,22 @@ def run_fixer(
             pass
         raise
 
+    # 10. Knowledge Base capture — store successful fixes for future few-shot reuse.
+    # Best-effort: never blocks the main flow. Only fires on verified success.
+    if outcome.status == "success":
+        try:
+            from ..remediation.kb_capture import capture_successful_fix  # noqa: PLC0415
+
+            capture_successful_fix(
+                sb,
+                ctx=ctx,
+                outcome=outcome,
+                confidence_score=None,  # TODO: wire confidence from package when available
+                emit_fn=emit_fn,
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     # Best-effort trace — a crash here doesn't affect persisted state.
     try:
         emit_fn(
