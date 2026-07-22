@@ -314,19 +314,40 @@ def run_fixer(
 
     # 10. Knowledge Base capture — store successful fixes for future few-shot reuse.
     # Best-effort: never blocks the main flow. Only fires on verified success.
+    # NOTE: Always writes to the PUBLIC schema — the KB is a shared knowledge
+    # base that feeds SA-3 across all pipelines (real + demo). The `sb` passed
+    # to run_fixer may be a demo-schema client, so we use a fresh public client.
     if outcome.status == "success":
         try:
             from ..remediation.kb_capture import capture_successful_fix  # noqa: PLC0415
+            from ...db import supabase_admin as _kb_admin  # noqa: PLC0415
 
-            capture_successful_fix(
-                sb,
+            kb_id = capture_successful_fix(
+                _kb_admin(),
                 ctx=ctx,
                 outcome=outcome,
                 confidence_score=None,  # TODO: wire confidence from package when available
                 emit_fn=emit_fn,
             )
-        except Exception:  # noqa: BLE001, S110
-            pass
+            try:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"📚 KB capture result: kb_id={kb_id} (None = skipped/guard)",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+        except Exception as e:  # noqa: BLE001
+            try:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "ERROR",
+                    f"📚 KB capture FAILED: {type(e).__name__}: {str(e)[:300]}",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     # Best-effort trace — a crash here doesn't affect persisted state.
     try:
