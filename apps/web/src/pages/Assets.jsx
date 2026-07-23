@@ -6,6 +6,7 @@ import Tooltip from '../components/Tooltip'
 import '../styles/Assets.css'
 import MultiSelectFilter from '../components/MultiSelectFilter'
 import { useNavigate } from 'react-router-dom'
+import { useAssetsData, fetchIssuesForAsset } from '../hooks/useAssetsData'
 
 const assetsColumns = [
   { key: 'asset_id', label: 'Asset ID' },
@@ -18,7 +19,7 @@ const assetsColumns = [
 ]
 
 export default function Assets() {
-  const [assets] = useState([])
+  const { assets, loading } = useAssetsData()
   const [assetIssues, setAssetIssues] = useState([])
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFilter, setSelectedFilter] = useState('All')
@@ -31,9 +32,13 @@ export default function Assets() {
   const itemsPerPage = 10
   const navigate = useNavigate()
 
+  // When an asset is selected, fetch its issues from the database
   useEffect(() => {
     if (selectedAsset) {
       setSortByRisk(true)
+      fetchIssuesForAsset(selectedAsset.asset_id).then(setAssetIssues)
+    } else {
+      setAssetIssues([])
     }
   }, [selectedAsset])
 
