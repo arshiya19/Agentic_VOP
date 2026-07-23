@@ -40,27 +40,42 @@ def main():
         "check_id": "CKV_AWS_18_TEST",
         "family": "public_exposure",
         "finding_fingerprint": "test_fingerprint_manual_001",
-        "remediation_steps": json.dumps([
-            {
-                "step": "Back up the current bucket configuration.\n\nCommand:\n    aws s3api get-bucket-logging --bucket my-bucket > backup.json\n\nWhy: Preserves rollback state.",
-                "source_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html",
-                "source": "AWS S3 Documentation",
-            },
-            {
-                "step": "Enable access logging on the S3 bucket.\n\nCommand:\n    aws s3api put-bucket-logging --bucket my-bucket --bucket-logging-status '{\"LoggingEnabled\":{\"TargetBucket\":\"my-logs-bucket\",\"TargetPrefix\":\"s3-logs/\"}}'\n\nWhy: CKV_AWS_18 requires S3 access logging to be enabled.",
-                "source_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html",
-                "source": "AWS S3 Documentation",
-            },
-        ]),
-        "rollback_steps": json.dumps([
-            {
-                "step": "Restore original logging config.\n\nCommand:\n    aws s3api put-bucket-logging --bucket my-bucket --bucket-logging-status file://backup.json",
-            },
-        ]),
-        "validation_results": json.dumps([
-            {"test_name": "Verify logging enabled", "passed": True, "command": "aws s3api get-bucket-logging --bucket my-bucket"},
-            {"test_name": "Re-scan Checkov", "passed": True, "is_rescan": True, "command": "checkov -f main.tf --check CKV_AWS_18"},
-        ]),
+        "remediation_steps": json.dumps(
+            [
+                {
+                    "step": "Back up the current bucket configuration.\n\nCommand:\n    aws s3api get-bucket-logging --bucket my-bucket > backup.json\n\nWhy: Preserves rollback state.",
+                    "source_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html",
+                    "source": "AWS S3 Documentation",
+                },
+                {
+                    "step": 'Enable access logging on the S3 bucket.\n\nCommand:\n    aws s3api put-bucket-logging --bucket my-bucket --bucket-logging-status \'{"LoggingEnabled":{"TargetBucket":"my-logs-bucket","TargetPrefix":"s3-logs/"}}\'\n\nWhy: CKV_AWS_18 requires S3 access logging to be enabled.',
+                    "source_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html",
+                    "source": "AWS S3 Documentation",
+                },
+            ]
+        ),
+        "rollback_steps": json.dumps(
+            [
+                {
+                    "step": "Restore original logging config.\n\nCommand:\n    aws s3api put-bucket-logging --bucket my-bucket --bucket-logging-status file://backup.json",
+                },
+            ]
+        ),
+        "validation_results": json.dumps(
+            [
+                {
+                    "test_name": "Verify logging enabled",
+                    "passed": True,
+                    "command": "aws s3api get-bucket-logging --bucket my-bucket",
+                },
+                {
+                    "test_name": "Re-scan Checkov",
+                    "passed": True,
+                    "is_rescan": True,
+                    "command": "checkov -f main.tf --check CKV_AWS_18",
+                },
+            ]
+        ),
         "finding_summary": "S3 bucket 'my-bucket' does not have access logging enabled",
         "root_cause": "Missing aws_s3_bucket_logging resource in Terraform configuration",
         "resource_type": "aws_s3_bucket",
@@ -104,7 +119,9 @@ def main():
 
     print(f"  Retrieved {len(examples)} example(s)")
     for ex in examples:
-        print(f"    - KB #{ex.kb_id}: check={ex.check_id}, confidence={ex.confidence_score}, match={ex.match_type}")
+        print(
+            f"    - KB #{ex.kb_id}: check={ex.check_id}, confidence={ex.confidence_score}, match={ex.match_type}"
+        )
 
     # -------------------------------------------------------------------------
     # Step 3: Format for hybrid prompt
@@ -130,7 +147,9 @@ def main():
     # Step 5: Verify reuse counter incremented
     # -------------------------------------------------------------------------
     print("\n[5] Checking reuse counter...")
-    check = sb.table("remediation_kb").select("times_reused, last_used_at").eq("id", kb_id).execute()
+    check = (
+        sb.table("remediation_kb").select("times_reused, last_used_at").eq("id", kb_id).execute()
+    )
     row = (check.data or [{}])[0]
     print(f"  times_reused = {row.get('times_reused')} (expected: 1)")
     print(f"  last_used_at = {row.get('last_used_at')}")

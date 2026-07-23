@@ -23,7 +23,7 @@ Design:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from .kb_capture import increment_reuse_count
@@ -104,7 +104,7 @@ def retrieve_examples(
                 if ex:
                     examples.append(ex)
                     seen_ids.add(ex.kb_id)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass  # Best-effort — don't block planner
 
     # --- Pass 2: same-family backfill (if not enough exact matches) ---
@@ -131,14 +131,14 @@ def retrieve_examples(
                     seen_ids.add(ex.kb_id)
                     if len(examples) >= max_examples:
                         break
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
     # --- Increment reuse counters for returned examples ---
     for ex in examples:
         try:
             increment_reuse_count(sb, ex.kb_id)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
     return examples

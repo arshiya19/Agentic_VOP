@@ -326,7 +326,7 @@ def run_fixer(
                 _kb_admin(),
                 ctx=ctx,
                 outcome=outcome,
-                confidence_score=None,  # TODO: wire confidence from package when available
+                confidence_score=(ctx.pathway or {}).get("confidence_score") or 90,
                 emit_fn=emit_fn,
             )
             try:
@@ -348,6 +348,36 @@ def run_fixer(
                 )
             except Exception:  # noqa: BLE001, S110
                 pass
+
+    # 11. KB reuse tracking — if this fix used a KB replay recipe, update counters.
+    # Increment times_reused (always after completion) and times_succeeded (on success).
+    # This feeds the success_rate computed column for recipe quality monitoring.
+    try:
+        pathway_conf = (ctx.pathway or {}).get("confidence_components") or {}
+        kb_source_id = (
+            pathway_conf.get("kb_id") if pathway_conf.get("source") == "kb_replay" else None
+        )
+        if kb_source_id:
+            from ..remediation.kb_capture import increment_reuse_count, increment_success_count  # noqa: PLC0415
+            from ...db import supabase_admin as _kb_admin_fn  # noqa: PLC0415
+
+            _kb_sb = _kb_admin_fn()
+            increment_reuse_count(_kb_sb, kb_source_id)
+            if outcome.status == "success":
+                increment_success_count(_kb_sb, kb_source_id)
+            try:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"📚 KB reuse tracked: kb_id={kb_source_id}, "
+                    f"outcome={outcome.status} "
+                    f"(times_reused +1{', times_succeeded +1' if outcome.status == 'success' else ''})",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+    except Exception:  # noqa: BLE001, S110
+        pass  # Best-effort — never block main flow
 
     # Best-effort trace — a crash here doesn't affect persisted state.
     try:

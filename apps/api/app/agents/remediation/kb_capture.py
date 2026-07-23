@@ -118,8 +118,12 @@ def _build_kb_row(
         "check_id": check_id,
         "family": family,
         "finding_fingerprint": fingerprint,
-        "remediation_steps": json.dumps(remediation_steps) if isinstance(remediation_steps, list) else remediation_steps,
-        "rollback_steps": json.dumps(rollback_steps) if isinstance(rollback_steps, list) else rollback_steps,
+        "remediation_steps": json.dumps(remediation_steps)
+        if isinstance(remediation_steps, list)
+        else remediation_steps,
+        "rollback_steps": json.dumps(rollback_steps)
+        if isinstance(rollback_steps, list)
+        else rollback_steps,
         "validation_results": json.dumps(validation_results),
         "finding_summary": finding_summary[:500] if finding_summary else None,
         "root_cause": root_cause[:500] if root_cause else None,
@@ -191,12 +195,14 @@ def capture_successful_fix(
             existing_confidence = existing_row.get("confidence_score") or 0
 
             if confidence_score and confidence_score > existing_confidence:
-                sb.table("remediation_kb").update({
-                    "confidence_score": confidence_score,
-                    "remediation_steps": row["remediation_steps"],
-                    "validation_results": row["validation_results"],
-                    "source_fix_run_id": row["source_fix_run_id"],
-                }).eq("id", existing_id).execute()
+                sb.table("remediation_kb").update(
+                    {
+                        "confidence_score": confidence_score,
+                        "remediation_steps": row["remediation_steps"],
+                        "validation_results": row["validation_results"],
+                        "source_fix_run_id": row["source_fix_run_id"],
+                    }
+                ).eq("id", existing_id).execute()
 
                 if emit_fn:
                     try:
@@ -207,7 +213,7 @@ def capture_successful_fix(
                             f"Updated KB entry #{existing_id} (check={row['check_id']}) "
                             f"— confidence {existing_confidence} → {confidence_score}",
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110
                         pass
 
             return existing_id
@@ -229,7 +235,7 @@ def capture_successful_fix(
                     f"Captured fix to KB #{kb_id} (check={row['check_id']}, "
                     f"family={row['family']}, confidence={confidence_score})",
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
         return kb_id
@@ -248,16 +254,19 @@ def increment_reuse_count(sb: Any, kb_id: int) -> None:
     """Bump times_reused and last_used_at when an example is used in a prompt."""
     try:
         # Use RPC or raw SQL for atomic increment
-        sb.table("remediation_kb").update({
-            "times_reused": sb.table("remediation_kb")
-            .select("times_reused")
-            .eq("id", kb_id)
-            .limit(1)
-            .execute()
-            .data[0]["times_reused"] + 1,
-            "last_used_at": "now()",
-        }).eq("id", kb_id).execute()
-    except Exception:
+        sb.table("remediation_kb").update(
+            {
+                "times_reused": sb.table("remediation_kb")
+                .select("times_reused")
+                .eq("id", kb_id)
+                .limit(1)
+                .execute()
+                .data[0]["times_reused"]
+                + 1,
+                "last_used_at": "now()",
+            }
+        ).eq("id", kb_id).execute()
+    except Exception:  # noqa: BLE001, S110
         pass  # Best-effort — don't block prompt assembly
 
 
@@ -265,16 +274,14 @@ def increment_success_count(sb: Any, kb_id: int) -> None:
     """Bump times_succeeded when a reused example led to another success."""
     try:
         current = (
-            sb.table("remediation_kb")
-            .select("times_succeeded")
-            .eq("id", kb_id)
-            .limit(1)
-            .execute()
+            sb.table("remediation_kb").select("times_succeeded").eq("id", kb_id).limit(1).execute()
         )
         rows = current.data or []
         if rows:
-            sb.table("remediation_kb").update({
-                "times_succeeded": rows[0]["times_succeeded"] + 1,
-            }).eq("id", kb_id).execute()
-    except Exception:
+            sb.table("remediation_kb").update(
+                {
+                    "times_succeeded": rows[0]["times_succeeded"] + 1,
+                }
+            ).eq("id", kb_id).execute()
+    except Exception:  # noqa: BLE001, S110
         pass

@@ -709,8 +709,11 @@ def run_agentic_planner(
         from ...db import supabase_admin  # noqa: PLC0415
 
         sb_pub = supabase_admin()
-        check_id = (issue.get("source_vuln_id") or issue.get("cve_id")
-                    or (issue.get("source_raw") or {}).get("check_id"))
+        check_id = (
+            issue.get("source_vuln_id")
+            or issue.get("cve_id")
+            or (issue.get("source_raw") or {}).get("check_id")
+        )
         kb_examples = retrieve_examples(sb_pub, check_id=check_id, family=family)
         if kb_examples:
             kb_text = format_examples_for_agentic_prompt(kb_examples)
