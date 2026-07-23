@@ -19,7 +19,7 @@ const assetsColumns = [
 ]
 
 export default function Assets() {
-  const { assets, loading } = useAssetsData()
+  const { assets } = useAssetsData()
   const [assetIssues, setAssetIssues] = useState([])
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFilter, setSelectedFilter] = useState('All')
