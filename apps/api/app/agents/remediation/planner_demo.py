@@ -257,6 +257,62 @@ def _plan_and_enrich(
     agent_result = None  # tuple (LLMRemediationOutput, VerificationReport) | None
     llm_output: LLMRemediationOutput | None = None
 
+    # --- Try KB DIRECT REPLAY first (fastest path — no web search) ---
+    # If the knowledge base has a verified successful recipe for this exact
+    # check_id + resource_type, adapt it via a single constrained LLM call
+    # and return immediately. ~3 seconds, deterministic, no Tavily usage.
+    try:
+        from .kb_replay import try_kb_replay  # noqa: PLC0415
+
+        kb_replay_output, kb_replay_id = try_kb_replay(
+            issue=issue,
+            family=family,
+            raw=raw,
+            sb=sb_pub,
+            run_id=run_id,
+            emit_fn=emit_trace_demo,
+        )
+
+        if kb_replay_output is not None:
+            from ...models import RemediationPathway  # noqa: PLC0415
+
+            enriched_pathways: list[RemediationPathway] = []
+            for pathway in kb_replay_output.pathways:
+                pathway.confidence_score = 95
+                pathway.confidence_components = {
+                    "source": "kb_replay",
+                    "kb_id": kb_replay_id,
+                    "reason": "Proven fix replayed from knowledge base",
+                }
+                enriched_pathways.append(pathway)
+
+            emit_trace_demo(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                f"📚 KB replay path complete — returning package from KB #{kb_replay_id} "
+                f"(confidence=95, family={family}). Skipping agentic/hybrid.",
+            )
+
+            return RemediationPackage(
+                issue_id=int(issue["id"]),
+                family=family,
+                finding=kb_replay_output.finding,
+                root_cause=kb_replay_output.root_cause,
+                impact=kb_replay_output.impact,
+                pathways=enriched_pathways,
+                recommended_pathway_index=0,
+                approval_required="auto",
+            )
+    except Exception as e:  # noqa: BLE001
+        emit_trace_demo(
+            run_id,
+            "sub-agent-3",
+            "ERROR",
+            f"KB replay module raised: {type(e).__name__}: {str(e)[:200]} "
+            "— continuing with agentic/hybrid path.",
+        )
+
     # --- AGENTIC path (Phase-2 default) ---
     if settings.tavily_api_key:
         from .agent_v2 import run_agentic_planner  # noqa: PLC0415
