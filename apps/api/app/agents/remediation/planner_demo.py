@@ -274,7 +274,7 @@ def _plan_and_enrich(
         )
 
         if kb_replay_output is not None:
-            from ...models import RemediationPathway  # noqa: PLC0415
+            from ...models import RemediationPathway  # noqa: PLC0415, F401
 
             enriched_pathways: list[RemediationPathway] = []
             for pathway in kb_replay_output.pathways:

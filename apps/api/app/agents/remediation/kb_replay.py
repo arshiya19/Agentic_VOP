@@ -282,6 +282,13 @@ def try_kb_replay(
             )
             return None, None
 
+        # 4. Ensure validation_tests include the re-scan from the KB entry.
+        # The adaptation LLM sometimes drops or truncates validation_tests.
+        # The KB entry's validation_results contain the proven tests (including
+        # the mandatory re-scan). Inject any missing re-scan test directly
+        # from the KB rather than trusting the LLM to reproduce it.
+        output = _ensure_rescan_in_validation(output, candidate)
+
         emit_fn(
             run_id,
             "sub-agent-3",
@@ -301,6 +308,89 @@ def try_kb_replay(
             f"— falling through to agentic path.",
         )
         return None, None
+
+
+# =============================================================================
+# Ensure re-scan is present in validation_tests
+# =============================================================================
+# Scanner CLI verbs used to detect re-scan tests (same list as iac_strategy.py)
+_SCANNER_CLI_VERBS = (
+    "checkov",
+    "trivy",
+    "semgrep",
+    "bandit",
+    "tfsec",
+    "kics",
+    "terrascan",
+    "snyk",
+    "grype",
+    "sonar-scanner",
+)
+
+
+def _ensure_rescan_in_validation(
+    output: LLMRemediationOutput,
+    kb_row: dict,
+) -> LLMRemediationOutput:
+    """Inject the KB entry's re-scan test into the output's validation_tests
+    if the LLM dropped it during adaptation.
+
+    The KB entry's `validation_results` contains the proven tests from the
+    original successful run — including the mandatory scanner re-scan. The
+    adaptation LLM sometimes drops or truncates validation_tests. This
+    function checks each pathway: if no validation_test looks like a scanner
+    re-scan, inject the one from the KB entry.
+
+    Mutates the output in place and returns it.
+    """
+    # Parse KB validation_results
+    kb_validations = kb_row.get("validation_results") or []
+    if isinstance(kb_validations, str):
+        kb_validations = json.loads(kb_validations)
+
+    # Find the re-scan test in KB validations
+    kb_rescan = None
+    for v in kb_validations:
+        cmd = (v.get("command") or "").strip()
+        if not cmd:
+            continue
+        first_token = cmd.split(maxsplit=1)[0].rsplit("/", 1)[-1]
+        if first_token in _SCANNER_CLI_VERBS:
+            kb_rescan = v
+            break
+
+    if kb_rescan is None:
+        # KB entry itself has no re-scan — nothing to inject
+        return output
+
+    # Check each pathway's validation_tests for a re-scan
+    for pathway in output.pathways:
+        has_rescan = False
+        for test in pathway.validation_tests:
+            cmd = (test.command or "").strip()
+            if not cmd:
+                continue
+            first_token = cmd.split(maxsplit=1)[0].rsplit("/", 1)[-1]
+            if first_token in _SCANNER_CLI_VERBS:
+                has_rescan = True
+                break
+
+        if not has_rescan:
+            # Inject the KB's re-scan as an additional validation_test
+            from ...models import ValidationTest  # noqa: PLC0415
+
+            rescan_test = ValidationTest(
+                name=kb_rescan.get("test_name")
+                or kb_rescan.get("name")
+                or "Re-scan with original scanner",
+                method="cli",
+                command=kb_rescan.get("command") or "",
+                expected=kb_rescan.get("expected") or '"failed_checks": []',
+                source=kb_rescan.get("source") or "Knowledge Base",
+            )
+            pathway.validation_tests.append(rescan_test)
+
+    return output
 
 
 # =============================================================================
