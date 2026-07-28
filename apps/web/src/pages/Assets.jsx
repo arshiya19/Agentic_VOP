@@ -36,7 +36,7 @@ export default function Assets() {
   useEffect(() => {
     if (selectedAsset) {
       setSortByRisk(true)
-      fetchIssuesForAsset(selectedAsset.asset_id).then(setAssetIssues)
+      fetchIssuesForAsset(selectedAsset).then(setAssetIssues)
     } else {
       setAssetIssues([])
     }
@@ -493,7 +493,14 @@ export default function Assets() {
                     View in Issues Page
                   </button>
 
-                  <button className="issue-drawer-btn secondary">
+                  <button
+                    className="issue-drawer-btn secondary"
+                    onClick={() => {
+                      navigate(`/remediation?issue_id=${selectedIssue.issue_id}`, {
+                        state: { issue: selectedIssue }
+                      })
+                    }}
+                  >
                     View Remediation
                   </button>
                 </div>

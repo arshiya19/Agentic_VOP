@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import ColumnToggle from '../components/ColumnToggle'
@@ -37,7 +38,9 @@ const ISSUE_COLUMNS = [
 ]
 
 export default function Issues() {
-  const [searchTerm, setSearchTerm] = useState('')
+  const [searchParams] = useSearchParams()
+  const issueIdParam = searchParams.get('issue_id') || ''
+  const [searchTerm, setSearchTerm] = useState(issueIdParam)
   const [selectedSeverity, setSelectedSeverity] = useState([])
   const [currentPage, setCurrentPage] = useState(1)
   const { issues } = useIssuesData()
@@ -45,6 +48,14 @@ export default function Issues() {
   // Items-per-page adapts to viewport height — zoom out or use a tall screen
   // and you'll see more rows automatically instead of empty space.
   const [itemsPerPage, setItemsPerPage] = useState(() => computeItemsPerPage())
+
+  // Sync search term if navigated with a new issue_id param
+  useEffect(() => {
+    if (issueIdParam) {
+      setSearchTerm(issueIdParam)
+      setCurrentPage(1)
+    }
+  }, [issueIdParam])
 
   useEffect(() => {
     const onResize = () => setItemsPerPage(computeItemsPerPage())
