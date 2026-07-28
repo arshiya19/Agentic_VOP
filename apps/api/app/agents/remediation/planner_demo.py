@@ -386,6 +386,51 @@ def _plan_and_enrich(
             "pattern": _pattern_payload(pattern),
         }
 
+        # Execution context — same injection as the agentic path. Tells the
+        # generic prompt whether this is a container-image fix, host fix, or IaC.
+        source = (issue.get("source") or "").lower()
+        if "trivy-image" in source or "snyk-container" in source or "grype-image" in source:
+            payload["execution_context"] = {
+                "target_type": "container_image",
+                "fix_approach": (
+                    "Edit the Dockerfile to REMOVE the vulnerable package version pin entirely "
+                    "(e.g. change 'openssl=1.1.1f-1ubuntu2' to just 'openssl'). "
+                    "This lets apt-get install the latest available patched version at build time. "
+                    "Do NOT specify a target version — just remove the =X.Y.Z pin. "
+                    "Then rebuild with docker build --no-cache."
+                ),
+                "dockerfile_path": "/opt/vuln-labs/infra-lab/Dockerfile",
+                "build_directory": "/opt/vuln-labs/infra-lab",
+                "image_ref": "vuln-lab-image:latest",
+                "rebuild_command": "cd /opt/vuln-labs/infra-lab && docker build --no-cache -t vuln-lab-image:latest .",
+                "sed_pattern_example": "sed -i 's/<pkg>=<any_version>/<pkg>/' /opt/vuln-labs/infra-lab/Dockerfile",
+                "rescan_command": "trivy image vuln-lab-image:latest --scanners vuln --severity HIGH,CRITICAL --format json",
+                "rescan_target": "vuln-lab-image:latest (the rebuilt image, NOT ubuntu:20.04)",
+                "validation_guidance": (
+                    "IMPORTANT: The re-scan validation must check for the ABSENCE of the SPECIFIC CVE being fixed, "
+                    "NOT for zero total vulnerabilities. The image has OTHER packages with their own CVEs — "
+                    "fixing one CVE does not make the entire image vuln-free. "
+                    "Use a command like: trivy image vuln-lab-image:latest --format json | grep -c '<CVE_ID>' "
+                    "with expected='0' (zero occurrences of that specific CVE). "
+                    "Do NOT use expected='\"Vulnerabilities\": []' — that will always fail on a multi-package image."
+                ),
+                "prohibited_commands": [
+                    "sudo reboot",
+                    "apt-get install on host",
+                    "edits to /etc/ or /usr/ on host",
+                    "specifying a fixed version number in sed (just remove the pin)",
+                    "expecting zero total vulnerabilities in validation (check only the specific CVE)",
+                ],
+            }
+        elif "trivy-os" in source or "tenable" in source or "qualys" in source:
+            payload["execution_context"] = {
+                "target_type": "host_os",
+                "fix_approach": "Run apt-get update && apt-get install <pkg>=<fixed_version> directly on the host.",
+                "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
+                "rescan_target": "/ (host root filesystem)",
+                "prohibited_commands": ["sudo reboot", "docker build"],
+            }
+
         llm_output = invoke_structured_with_retry(
             run_id=run_id,
             agent="sub-agent-3",
