@@ -667,14 +667,27 @@ def run_agentic_planner(
         LLMRemediationOutput on success. None when agent fails and caller
         should fall back to hybrid pattern-based planner.
     """
+    # Route through the SA-3 master prompt router — picks a specialized
+    # prompt for (issue.source, family) when one exists, otherwise falls
+    # back to the generic sub-agent-3 v2.0 agentic prompt. This is what
+    # enables per-tool + per-family prompt specialization without touching
+    # the agent's execution logic (tools, budget, verification).
+    from .prompt_router import load_sa3_prompt, describe_selected_prompt  # noqa: PLC0415
+
+    issue_source = (issue.get("source") or "").strip() if isinstance(issue, dict) else ""
     try:
-        prompt_row = _load_prompt_v2(sb_pub)
+        prompt_row = load_sa3_prompt(
+            sb_pub,
+            source=issue_source,
+            family=family,
+            default_version="v2.0",
+        )
     except Exception as e:  # noqa: BLE001
         emit_fn(
             run_id,
             "sub-agent-3",
             "ERROR",
-            f"Failed to load agent prompt v2: {type(e).__name__}: {str(e)[:200]}",
+            f"Failed to load agent prompt via router: {type(e).__name__}: {str(e)[:200]}",
         )
         return None
 
@@ -686,6 +699,16 @@ def run_agentic_planner(
 
     budget = AgentBudget()
     tools = _make_tools(budget, run_id, emit_fn)
+
+    # Trace shows which prompt actually ran — makes it obvious in the UI
+    # when a specialized prompt kicks in vs the generic fallback.
+    selection_desc = describe_selected_prompt(prompt_row, issue_source, family)
+    emit_fn(
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
+        f"🧭 SA-3 router selected prompt: {selection_desc}",
+    )
 
     emit_fn(
         run_id,

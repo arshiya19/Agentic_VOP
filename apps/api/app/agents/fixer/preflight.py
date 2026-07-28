@@ -587,6 +587,23 @@ def run_preflight_rewrite(
         )
         return original_pathway, []
 
+    # Gate: the rewriter's snapshot logic queries `terraform state list` and
+    # `terraform state show <resource>`. That's meaningful only for IaC-shaped
+    # fixes. For container-image and host-OS categories, the snapshot would
+    # produce noise (or crash on `working_directory` not being a terraform
+    # module) and the rewrites it proposes would target the wrong resource
+    # shape. Skip cleanly for non-IaC scanner_types.
+    non_iac_scanner_types = {"container_image", "os_pkg", "os", "image"}
+    if ctx.scanner_type in non_iac_scanner_types:
+        emit_fn(
+            ctx.agent_run_id,
+            "sub-agent-4",
+            "MESSAGE",
+            f"🧠 Pre-flight rewriter: scanner_type={ctx.scanner_type!r} is non-IaC — "
+            "skipping (rewriter is Terraform-specific).",
+        )
+        return original_pathway, []
+
     cfg = config or FixerConfig()
     executor = RemoteExecutor(
         instance_id=ctx.target_instance_id,

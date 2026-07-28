@@ -229,7 +229,10 @@ _SOURCE_HINT: dict[str, Family] = {
     "dependabot": "vulnerable_dependency",
     "osv": "vulnerable_dependency",
     "trivy-fs": "vulnerable_dependency",
-    "trivy-image": "vulnerable_dependency",
+    # trivy-image findings are OS packages inside a container image. Fix
+    # shape is "rebuild image with updated base pkgs", which aligns with
+    # os_vulnerability strategy per SA-4 design doc (not manifest-edit).
+    "trivy-image": "os_vulnerability",
     "trivy-cloud": "vulnerable_dependency",
     "trivy-config": "vulnerable_dependency",
     # Host/VM scanners — hint = os_vulnerability
@@ -280,6 +283,27 @@ def classify_finding(issue: dict, raw: dict | None = None) -> Family:
     identity = issue.get("asset_identity") or {}
     package = issue.get("package")
     cve_id = issue.get("cve_id")
+
+    # =========================================================================
+    # 0. Source-hint override for OS-package scanners
+    # =========================================================================
+    # OS-level scanners (Trivy Image/OS, host scanners) emit findings with a
+    # `package` field. Without this override, data-shape rule 4a below would
+    # see the package field and misroute them to vulnerable_dependency (which
+    # points at the wrong SA-4 strategy — dependency-manifest edits, not
+    # apt/docker rebuild). The fix shape for these is always os_vulnerability:
+    #   - trivy-image → rebuild container with updated base pkgs
+    #   - trivy-os / tenable / qualys → apt/yum upgrade on host
+    if source in (
+        "trivy-image",
+        "trivy-os",
+        "snyk-container",
+        "grype-image",
+        "tenable-nessus-vuln",
+        "qualys-vmdr-vuln",
+        "rapid7",
+    ):
+        return "os_vulnerability"
 
     # =========================================================================
     # 1. Purl ecosystem — deterministic when present

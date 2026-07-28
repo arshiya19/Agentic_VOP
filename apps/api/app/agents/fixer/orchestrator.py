@@ -34,6 +34,7 @@ from .persistence import (
 )
 from .strategies.base import BaseFixStrategy
 from .strategies.iac_strategy import IaCStrategy
+from .strategies.image_strategy import ImageStrategy
 
 
 # =============================================================================
@@ -42,10 +43,12 @@ from .strategies.iac_strategy import IaCStrategy
 # =============================================================================
 _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
     "iac": IaCStrategy,
+    "image": ImageStrategy,  # trivy-image (container image OS pkgs)
     # Phase-2 additions land here:
-    # "dependency": DependencyStrategy,
-    # "code_edit":  CodeEditStrategy,
-    # "cli":        CliStrategy,
+    # "os":         OSStrategy,           # trivy-os / tenable (host apt/yum)
+    # "dependency": DependencyStrategy,   # trivy-fs / snyk-appsec (app pkgs)
+    # "code_edit":  CodeEditStrategy,     # semgrep / bandit (source edits)
+    # "cli":        CliStrategy,          # aws-cli direct cloud fixes
 }
 
 
@@ -61,31 +64,68 @@ def _select_strategy_key(
     *,
     family: str,
     scanner_type: str | None,
+    source: str | None = None,
 ) -> str:
-    """Pick the fix strategy key based on scanner_type + family.
+    """Pick the fix strategy key based on source + scanner_type + family.
 
-    Priority: scanner_type wins when known (SA3 v2.4 decided the shape of
-    the package based on this). Family is a fallback for cases where
-    scanner_type wasn't extractable.
+    Priority order (most specific → least specific):
+      1. Source name — deterministic when we know the scanner. Container
+         image scanners → image; host OS scanners → os.
+      2. scanner_type from SA-3's extractor (iac / sast / sca / os_pkg).
+      3. Family as a final fallback.
+
+    Returns an unregistered key when no strategy is wired for the shape;
+    run_fixer's dispatch check will surface a clean "no strategy registered"
+    error rather than routing the fix to the wrong executor and corrupting
+    env2.
     """
+    src = (source or "").lower()
+
+    # ---- Source-first routing ----
+    # Container image scanners → ImageStrategy (docker rebuild + retag)
+    if "trivy-image" in src or "snyk-container" in src or "grype-image" in src:
+        return "image"
+    # Host OS scanners → OSStrategy (apt/yum upgrade) — not yet registered
+    if (
+        "trivy-os" in src
+        or "tenable-nessus" in src
+        or "qualys-vmdr" in src
+        or "rapid7" in src
+    ):
+        return "os"
+    # App-dep scanners → DependencyStrategy — not yet registered
+    if "trivy-fs" in src or "snyk-appsec" in src or "dependabot" in src or src == "osv":
+        return "dependency"
+    # SAST scanners → CodeEditStrategy — not yet registered
+    if "semgrep" in src or "bandit" in src or "sonarqube" in src:
+        return "code_edit"
+
+    # ---- Family-based routing when source didn't decide ----
+    if family == "os_vulnerability":
+        # Family-only signal is ambiguous (image vs host). Prefer image
+        # for MVP since trivy-image is the primary demo path; the source
+        # branch above handles the disambiguation cleanly.
+        return "image"
+    if family == "vulnerable_dependency":
+        return "dependency"  # not yet registered
+    if family == "injection":
+        return "code_edit"  # not yet registered
+
+    # ---- scanner_type from IaC extractor ----
     if scanner_type in ("iac", "sca"):
         # SCA findings often ship with an IaC-shaped fix (edit manifest → install)
         # so they're handled by IaCStrategy in MVP too. Phase-2 introduces a
         # dedicated DependencyStrategy that reuses tools/ but adds pip/npm logic.
         return "iac"
     if scanner_type == "sast":
-        # No CodeEditStrategy yet — MVP doesn't handle injection findings.
-        # Return 'iac' as a best-effort; execution will likely fail on files
-        # that aren't valid HCL, which is what we want (fail fast).
-        return "iac"
+        return "code_edit"
     if scanner_type == "os_pkg":
-        # DependencyStrategy will handle these post-MVP.
-        return "iac"
+        return "os"
 
     # Fallback: family-based dispatch when scanner_type wasn't extracted
     if family in ("public_exposure", "network_exposure"):
         return "iac"
-    return "iac"  # MVP has only IaC; other cases will be added Phase-2+
+    return "iac"  # Default to IaC for unknown shapes (matches historical behavior)
 
 
 # =============================================================================
@@ -200,13 +240,20 @@ def run_fixer(
     raw = _load_raw_finding(sb, issue_row.get("raw_finding_id"))
     iac_ctx = _extract_iac_context(issue_row, raw)
 
-    # 4. Decide strategy
-    strategy_key = _select_strategy_key(family=family, scanner_type=iac_ctx.get("scanner_type"))
+    # 4. Decide strategy — source name is the strongest signal for
+    #    disambiguating trivy-image (ImageStrategy) vs trivy-os (OSStrategy)
+    #    when both classify as family='os_vulnerability'.
+    strategy_key = _select_strategy_key(
+        family=family,
+        scanner_type=iac_ctx.get("scanner_type"),
+        source=issue_row.get("source"),
+    )
     strategy_cls = _STRATEGY_BY_KEY.get(strategy_key)
     if strategy_cls is None:
         raise RuntimeError(
             f"No fix strategy registered for key {strategy_key!r} "
-            f"(family={family}, scanner_type={iac_ctx.get('scanner_type')})"
+            f"(family={family}, scanner_type={iac_ctx.get('scanner_type')}, "
+            f"source={issue_row.get('source')!r})"
         )
 
     # 5. Sanity: strategy needs a target instance to talk to

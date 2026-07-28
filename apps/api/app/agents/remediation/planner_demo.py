@@ -101,22 +101,21 @@ def run_demo_remediation(run_id: str) -> dict:
         )
         patterns_by_family = {r["family"]: r for r in rows}
 
-    # Load Sub-Agent 3 v1.4 (HYBRID fallback) prompt from public.prompt_db.
-    # v2.0 (agentic) is loaded separately by run_agentic_planner when the
-    # agent path is used. This one is only reached on fallback.
-    prompt_rows = (
-        sb_pub.table("prompt_db")
-        .select("agent,version,model,prompt_text,parameters")
-        .eq("agent", "sub-agent-3")
-        .eq("version", "v1.4")
-        .limit(1)
-        .execute()
-        .data
-        or []
+    # Load Sub-Agent 3 (HYBRID fallback) prompt via the master router.
+    # Router picks the most-specific prompt available in prompt_db based on
+    # (source, family) with fallback to the generic sub-agent-3 v1.4 row.
+    # Today only the generic row exists so behavior is identical to the old
+    # hardcoded query. Specialized prompts (e.g. sub-agent-3-trivy-os) will
+    # be picked up automatically once seeded.
+    #
+    # NOTE: source/family are per-issue, but we load a default prompt once
+    # here for the outer loop's trace event. Per-issue routing happens inside
+    # _plan_and_enrich (agent_v2) so each issue gets its own specialized prompt.
+    from .prompt_router import load_sa3_prompt  # noqa: PLC0415
+
+    prompt_row = load_sa3_prompt(
+        sb_pub, source=None, family=None, default_version="v1.4"
     )
-    if not prompt_rows:
-        raise RuntimeError("No sub-agent-3 v1.4 prompt row in prompt_db. Apply migration 0047.")
-    prompt_row = prompt_rows[0]
 
     # Pre-load all demo.assets rows once and build a lookup index by identity.
     all_assets = sb_demo.table("assets").select("*").execute().data or []
@@ -358,16 +357,27 @@ def _plan_and_enrich(
             enriched_pathways.append(pathway)
     else:
         # --- HYBRID fallback (pattern-based v1.4) ---
+        # Per-issue prompt resolution — if a specialized prompt exists for this
+        # finding's source+family, use it in the hybrid path too (not just agentic).
+        # This makes the specialized trivy-image prompt work in BOTH paths.
+        from .prompt_router import load_sa3_prompt as _router_load  # noqa: PLC0415
+
+        issue_source = (issue.get("source") or "").strip()
+        hybrid_prompt = _router_load(
+            sb_pub, source=issue_source, family=family, default_version="v1.4"
+        )
+        hybrid_prompt_desc = f"{hybrid_prompt['agent']}@{hybrid_prompt['version']}"
+
         emit_trace_demo(
             run_id,
             "sub-agent-3",
             "MESSAGE",
-            "Using hybrid pattern-based planner (v1.4)",
+            f"Using hybrid planner with prompt: {hybrid_prompt_desc}",
         )
-        params = prompt_row.get("parameters") or {}
+        params = hybrid_prompt.get("parameters") or {}
         base_temp = float(params.get("temperature", 0.3))
         max_tokens = int(params.get("max_tokens", 2500))
-        primary_model = prompt_row["model"]
+        primary_model = hybrid_prompt["model"]
         fallback_model = params.get("fallback_model", "gpt-4o")
 
         payload = {
@@ -381,7 +391,7 @@ def _plan_and_enrich(
             agent="sub-agent-3",
             schema=LLMRemediationOutput,
             messages=[
-                SystemMessage(content=prompt_row["prompt_text"]),
+                SystemMessage(content=hybrid_prompt["prompt_text"]),
                 HumanMessage(content=str(payload)),
             ],
             attempts=[
