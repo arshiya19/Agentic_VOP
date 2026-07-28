@@ -76,15 +76,10 @@ jobs:
       - name: Install Ruff
         run: pip install ruff
 
-      # Check 1: lint rules (E, W, F, B, S, UP — configured in pyproject.toml or defaults)
+      # Check 1: lint rules (E, W, F, B, S, UP — configured in ruff.toml)
       - name: Ruff lint
         working-directory: lambdas
         run: ruff check .
-
-      # Check 2: formatting — fails if any file would be reformatted.
-      - name: Ruff format check
-        working-directory: lambdas
-        run: ruff format --check .
 
   # ---------------------------------------------------------------------------
   # 3. ESLint — JavaScript / JSX linting

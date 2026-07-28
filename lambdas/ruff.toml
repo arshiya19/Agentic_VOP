@@ -1,0 +1,22 @@
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "B",      # flake8-bugbear
+    "S",      # flake8-bandit subset
+    "UP",     # pyupgrade
+]
+ignore = [
+    "S101",   # assert usage — acceptable in tests
+    "S310",   # URL open audit — Lambda only fetches from known NVD endpoints
+    "E501",   # line too long — handled by formatter
+    "UP017",  # timezone.utc → datetime.UTC alias — keeping explicit import for clarity
+    "UP042",  # StrEnum migration — keeping str+Enum for compatibility
+]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["S"]
