@@ -769,10 +769,19 @@ def run_agentic_planner(
     elif "trivy-os" in source or "tenable" in source or "qualys" in source or "rapid7" in source:
         user_payload["execution_context"] = {
             "target_type": "host_os",
-            "fix_approach": "Run apt-get update && apt-get install <pkg>=<fixed_version> directly on the host. Verify with dpkg -l.",
+            "fix_approach": (
+                "Run apt-get update && apt-get install --only-upgrade <pkg> directly on the host. "
+                "If issue.solution has a FixedVersion, pin to it: apt-get install <pkg>=<fixed_version>. "
+                "If no FixedVersion, just upgrade to latest: apt-get install --only-upgrade <pkg>."
+            ),
             "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
             "rescan_target": "/ (the host root filesystem)",
-            "prohibited_commands": ["sudo reboot", "docker build (this is a host fix, not container)"],
+            "validation_guidance": (
+                "IMPORTANT: The re-scan must check for the ABSENCE of the SPECIFIC CVE being fixed, "
+                "NOT for zero total vulnerabilities. The host has many packages with other CVEs. "
+                "Use: trivy rootfs / --format json | grep -c '<CVE_ID>' with expected='0'."
+            ),
+            "prohibited_commands": ["sudo reboot", "docker build", "terraform"],
         }
 
     # --- Knowledge Base injection (few-shot from proven fixes) ---

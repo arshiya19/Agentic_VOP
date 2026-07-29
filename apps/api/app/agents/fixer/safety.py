@@ -131,6 +131,7 @@ _BLOCKED_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
 _ALLOWED_WORKING_DIRECTORIES: tuple[str, ...] = (
     "/opt/vuln-labs/",
     "/tmp/fixer-scratch/",  # noqa: S108 — intentional scratch dir for fixer strategies
+    "/",  # OS strategy runs apt-get from root (no specific workdir)
 )
 
 

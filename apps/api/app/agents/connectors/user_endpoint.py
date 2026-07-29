@@ -122,7 +122,18 @@ def fetch(
             f"user_endpoint connector: response from {endpoint} was not valid JSON"
         ) from e
 
-    return _extract_with_fallbacks(payload, response_path, registry_entry, run_id)
+    rows = _extract_with_fallbacks(payload, response_path, registry_entry, run_id)
+
+    # Optional cap — limits how many raw findings Sub-Agent 1 will normalize.
+    # Useful for scanners that produce thousands of rows (trivy rootfs can
+    # emit 16K+ on an unpatched host) where only a small sample is needed
+    # for the demo pipeline. Set `metadata.max_findings` on the registry row
+    # to activate.
+    max_findings = metadata.get("max_findings")
+    if max_findings and isinstance(rows, list) and len(rows) > int(max_findings):
+        rows = rows[: int(max_findings)]
+
+    return rows
 
 
 # ----------------------------------------------------------------------------
