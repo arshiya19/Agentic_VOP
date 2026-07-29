@@ -23,8 +23,6 @@ Why route by (source, family) instead of just family?
 
 from __future__ import annotations
 
-from typing import Any
-
 
 # =============================================================================
 # Source slug normalization

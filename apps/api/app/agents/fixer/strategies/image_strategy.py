@@ -197,9 +197,7 @@ class ImageStrategy(BaseFixStrategy):
         # 3. Dockerfile
         df_path = self._dockerfile_path(ctx)
         try:
-            r = executor.run_command(
-                f"test -f '{df_path}' && echo YES || echo NO", timeout_s=30
-            )
+            r = executor.run_command(f"test -f '{df_path}' && echo YES || echo NO", timeout_s=30)
         except (RemoteExecError, CommandTimeoutError) as e:
             return PreFlightResult(
                 ready=False,
@@ -313,7 +311,7 @@ class ImageStrategy(BaseFixStrategy):
         try:
             r = executor.run_command(
                 f"BACKUP='{df_path}'.bak-$(date -u +%Y%m%d-%H%M%SZ) && "
-                f"cp '{df_path}' \"$BACKUP\" && echo \"$BACKUP\"",
+                f'cp \'{df_path}\' "$BACKUP" && echo "$BACKUP"',
                 timeout_s=60,
             )
             if r.exit_code == 0 and (r.stdout or "").strip():
@@ -401,9 +399,7 @@ class ImageStrategy(BaseFixStrategy):
                     "MESSAGE",
                     f"   ⏭ No shell command extractable from step {i} — skipping.",
                 )
-                results.append(
-                    self._skipped_step(i, step_text[:200], "no shell command extracted")
-                )
+                results.append(self._skipped_step(i, step_text[:200], "no shell command extracted"))
                 continue
 
             combined = " && ".join(commands) if len(commands) > 1 else commands[0]
@@ -447,9 +443,7 @@ class ImageStrategy(BaseFixStrategy):
 
             # Dispatch
             try:
-                cmd_result = executor.run_command(
-                    combined, working_directory=wd, timeout_s=timeout
-                )
+                cmd_result = executor.run_command(combined, working_directory=wd, timeout_s=timeout)
             except (RemoteExecError, CommandTimeoutError) as e:
                 ts = utcnow()
                 self._emit(

@@ -166,7 +166,9 @@ class OSStrategy(BaseFixStrategy):
         pathway = ctx.pathway or {}
         raw_steps = pathway.get("remediation_steps") or []
 
-        self._emit(ctx, "MESSAGE", f"▶ Execute phase: {len(raw_steps)} step(s) to run (host OS fix)")
+        self._emit(
+            ctx, "MESSAGE", f"▶ Execute phase: {len(raw_steps)} step(s) to run (host OS fix)"
+        )
 
         results: list[StepResult] = []
         for i, raw_step in enumerate(raw_steps, start=1):
@@ -180,22 +182,34 @@ class OSStrategy(BaseFixStrategy):
             if "docker build" in lower or "terraform" in lower:
                 self._emit(ctx, "ERROR", f"⏭ Step {i} SKIPPED — wrong strategy command detected")
                 ts = utcnow()
-                results.append(StepResult(
-                    step_num=i, action=step_text[:200], command="",
-                    status="skipped", started_at=ts, finished_at=ts,
-                    adaptation_note="docker/terraform in OS strategy — skipped",
-                ))
+                results.append(
+                    StepResult(
+                        step_num=i,
+                        action=step_text[:200],
+                        command="",
+                        status="skipped",
+                        started_at=ts,
+                        finished_at=ts,
+                        adaptation_note="docker/terraform in OS strategy — skipped",
+                    )
+                )
                 continue
 
             commands = _extract_shell_blocks(step_text) if step_text else []
             if not commands:
                 self._emit(ctx, "MESSAGE", f"   ⏭ No shell command in step {i} — skipping")
                 ts = utcnow()
-                results.append(StepResult(
-                    step_num=i, action=step_text[:200], command="",
-                    status="skipped", started_at=ts, finished_at=ts,
-                    adaptation_note="no shell command extracted",
-                ))
+                results.append(
+                    StepResult(
+                        step_num=i,
+                        action=step_text[:200],
+                        command="",
+                        status="skipped",
+                        started_at=ts,
+                        finished_at=ts,
+                        adaptation_note="no shell command extracted",
+                    )
+                )
                 continue
 
             combined = " && ".join(commands) if len(commands) > 1 else commands[0]
@@ -205,11 +219,18 @@ class OSStrategy(BaseFixStrategy):
             if not verdict.allowed:
                 self._emit(ctx, "ERROR", f"🛡 Step {i} BLOCKED: {verdict.reason}")
                 ts = utcnow()
-                results.append(StepResult(
-                    step_num=i, action=step_text[:200], command=combined,
-                    exit_code=-1, status="safety_blocked",
-                    started_at=ts, finished_at=ts, safety_reason=verdict.reason,
-                ))
+                results.append(
+                    StepResult(
+                        step_num=i,
+                        action=step_text[:200],
+                        command=combined,
+                        exit_code=-1,
+                        status="safety_blocked",
+                        started_at=ts,
+                        finished_at=ts,
+                        safety_reason=verdict.reason,
+                    )
+                )
                 return results
             self._emit(ctx, "MESSAGE", "   🛡 Safety check passed")
 
@@ -221,31 +242,52 @@ class OSStrategy(BaseFixStrategy):
             except (RemoteExecError, CommandTimeoutError) as e:
                 ts = utcnow()
                 self._emit(ctx, "ERROR", f"✗ Step {i} crashed: {e}")
-                results.append(StepResult(
-                    step_num=i, action=step_text[:200], command=combined,
-                    stderr=str(e), exit_code=-1, status="failed",
-                    started_at=ts, finished_at=ts,
-                ))
+                results.append(
+                    StepResult(
+                        step_num=i,
+                        action=step_text[:200],
+                        command=combined,
+                        stderr=str(e),
+                        exit_code=-1,
+                        status="failed",
+                        started_at=ts,
+                        finished_at=ts,
+                    )
+                )
                 return results
 
             if cmd_result.exit_code == 0:
                 self._emit(ctx, "MESSAGE", f"✓ Step {i} succeeded ({cmd_result.duration_ms}ms)")
-                results.append(StepResult(
-                    step_num=i, action=step_text[:200], command=combined,
-                    stdout=cmd_result.stdout, stderr=cmd_result.stderr,
-                    exit_code=0, duration_ms=cmd_result.duration_ms,
-                    status="success",
-                    started_at=cmd_result.started_at, finished_at=cmd_result.finished_at,
-                ))
+                results.append(
+                    StepResult(
+                        step_num=i,
+                        action=step_text[:200],
+                        command=combined,
+                        stdout=cmd_result.stdout,
+                        stderr=cmd_result.stderr,
+                        exit_code=0,
+                        duration_ms=cmd_result.duration_ms,
+                        status="success",
+                        started_at=cmd_result.started_at,
+                        finished_at=cmd_result.finished_at,
+                    )
+                )
             else:
                 self._emit(ctx, "ERROR", f"✗ Step {i} exit={cmd_result.exit_code}")
-                results.append(StepResult(
-                    step_num=i, action=step_text[:200], command=combined,
-                    stdout=cmd_result.stdout, stderr=cmd_result.stderr,
-                    exit_code=cmd_result.exit_code, duration_ms=cmd_result.duration_ms,
-                    status="failed",
-                    started_at=cmd_result.started_at, finished_at=cmd_result.finished_at,
-                ))
+                results.append(
+                    StepResult(
+                        step_num=i,
+                        action=step_text[:200],
+                        command=combined,
+                        stdout=cmd_result.stdout,
+                        stderr=cmd_result.stderr,
+                        exit_code=cmd_result.exit_code,
+                        duration_ms=cmd_result.duration_ms,
+                        status="failed",
+                        started_at=cmd_result.started_at,
+                        finished_at=cmd_result.finished_at,
+                    )
+                )
                 return results
 
         return results
@@ -274,11 +316,17 @@ class OSStrategy(BaseFixStrategy):
                 is_rescan = any(m in command.lower() for m in _RESCAN_CLI_MARKERS)
 
             if method == "manual" or not command:
-                results.append(ValidationResult(
-                    test_name=test_name, method=method,
-                    command=command or "(no command)", expected=expected,
-                    actual="skipped", passed=True, is_rescan=is_rescan,
-                ))
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command or "(no command)",
+                        expected=expected,
+                        actual="skipped",
+                        passed=True,
+                        is_rescan=is_rescan,
+                    )
+                )
                 continue
 
             timeout = 300 if "trivy" in command.lower() else 120
@@ -287,25 +335,45 @@ class OSStrategy(BaseFixStrategy):
                 actual = ((cmd_result.stdout or "") + (cmd_result.stderr or ""))[:2000]
                 passed = self._check_expected(expected, actual, cmd_result.exit_code)
                 emoji = "✓" if passed else "✗"
-                self._emit(ctx, "MESSAGE" if passed else "ERROR",
-                           f"   {emoji} {test_name}: {'PASSED' if passed else 'FAILED'}")
-                results.append(ValidationResult(
-                    test_name=test_name, method=method, command=command,
-                    expected=expected, actual=actual, passed=passed,
-                    is_rescan=is_rescan, duration_ms=cmd_result.duration_ms,
-                ))
+                self._emit(
+                    ctx,
+                    "MESSAGE" if passed else "ERROR",
+                    f"   {emoji} {test_name}: {'PASSED' if passed else 'FAILED'}",
+                )
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual=actual,
+                        passed=passed,
+                        is_rescan=is_rescan,
+                        duration_ms=cmd_result.duration_ms,
+                    )
+                )
             except (RemoteExecError, CommandTimeoutError) as e:
                 self._emit(ctx, "ERROR", f"   ✗ {test_name}: {e}")
-                results.append(ValidationResult(
-                    test_name=test_name, method=method, command=command,
-                    expected=expected, actual=str(e), passed=False, is_rescan=is_rescan,
-                ))
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual=str(e),
+                        passed=False,
+                        is_rescan=is_rescan,
+                    )
+                )
 
         passed_count = sum(1 for r in results if r.passed)
         rescan_count = sum(1 for r in results if r.is_rescan)
-        self._emit(ctx, "MESSAGE",
-                   f"🔬 Validate phase complete: {passed_count}/{len(results)} passed "
-                   f"({rescan_count} re-scan)")
+        self._emit(
+            ctx,
+            "MESSAGE",
+            f"🔬 Validate phase complete: {passed_count}/{len(results)} passed "
+            f"({rescan_count} re-scan)",
+        )
         return results
 
     @staticmethod
@@ -328,31 +396,44 @@ class OSStrategy(BaseFixStrategy):
 
         # Best-effort: dpkg --set-selections < backup + apt-get dselect-upgrade
         # This is a rough rollback — for the demo it's sufficient.
-        cmd = (
-            f"dpkg --set-selections < {backup_ref} && "
-            f"apt-get dselect-upgrade -y 2>&1 | tail -5"
-        )
+        cmd = f"dpkg --set-selections < {backup_ref} && apt-get dselect-upgrade -y 2>&1 | tail -5"
         results: list[RollbackResult] = []
         try:
             r = executor.run_command(cmd, timeout_s=300)
             success = r.exit_code == 0
-            self._emit(ctx, "MESSAGE" if success else "ERROR",
-                       f"{'✓' if success else '✗'} Rollback: apt dselect-upgrade "
-                       f"{'succeeded' if success else 'failed'}")
-            results.append(RollbackResult(
-                step_num=1, action="restore dpkg selections + dselect-upgrade",
-                command=cmd, status="success" if success else "failed",
-                stdout=r.stdout, stderr=r.stderr, exit_code=r.exit_code,
-                duration_ms=r.duration_ms,
-                started_at=r.started_at, finished_at=r.finished_at,
-            ))
+            self._emit(
+                ctx,
+                "MESSAGE" if success else "ERROR",
+                f"{'✓' if success else '✗'} Rollback: apt dselect-upgrade "
+                f"{'succeeded' if success else 'failed'}",
+            )
+            results.append(
+                RollbackResult(
+                    step_num=1,
+                    action="restore dpkg selections + dselect-upgrade",
+                    command=cmd,
+                    status="success" if success else "failed",
+                    stdout=r.stdout,
+                    stderr=r.stderr,
+                    exit_code=r.exit_code,
+                    duration_ms=r.duration_ms,
+                    started_at=r.started_at,
+                    finished_at=r.finished_at,
+                )
+            )
         except (RemoteExecError, CommandTimeoutError) as e:
             ts = utcnow()
             self._emit(ctx, "ERROR", f"✗ Rollback crashed: {e}")
-            results.append(RollbackResult(
-                step_num=1, action="restore dpkg selections",
-                command=cmd, status="failed", stderr=str(e),
-                started_at=ts, finished_at=ts,
-            ))
+            results.append(
+                RollbackResult(
+                    step_num=1,
+                    action="restore dpkg selections",
+                    command=cmd,
+                    status="failed",
+                    stderr=str(e),
+                    started_at=ts,
+                    finished_at=ts,
+                )
+            )
 
         return results

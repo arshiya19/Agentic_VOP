@@ -45,7 +45,7 @@ from .strategies.os_strategy import OSStrategy
 _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
     "iac": IaCStrategy,
     "image": ImageStrategy,  # trivy-image (container image OS pkgs)
-    "os": OSStrategy,        # trivy-os / tenable / qualys (host apt/yum)
+    "os": OSStrategy,  # trivy-os / tenable / qualys (host apt/yum)
     # Phase-2 additions land here:
     # "dependency": DependencyStrategy,   # trivy-fs / snyk-appsec (app pkgs)
     # "code_edit":  CodeEditStrategy,     # semgrep / bandit (source edits)
@@ -87,12 +87,7 @@ def _select_strategy_key(
     if "trivy-image" in src or "snyk-container" in src or "grype-image" in src:
         return "image"
     # Host OS scanners → OSStrategy (apt/yum upgrade) — not yet registered
-    if (
-        "trivy-os" in src
-        or "tenable-nessus" in src
-        or "qualys-vmdr" in src
-        or "rapid7" in src
-    ):
+    if "trivy-os" in src or "tenable-nessus" in src or "qualys-vmdr" in src or "rapid7" in src:
         return "os"
     # App-dep scanners → DependencyStrategy — not yet registered
     if "trivy-fs" in src or "snyk-appsec" in src or "dependabot" in src or src == "osv":

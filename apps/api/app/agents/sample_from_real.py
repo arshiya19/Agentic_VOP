@@ -80,7 +80,7 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 # Each entry: source (matches issues.source exactly) → N issues to pick.
 _SOURCE_SCOOPS: dict[str, int] = {
     "trivy-image-ec2": 4,  # container image OS-package CVEs (primary focus)
-    "trivy-os-ec2": 4,     # host-level OS CVEs (same "os" strategy path)
+    "trivy-os-ec2": 4,  # host-level OS CVEs (same "os" strategy path)
     # "trivy-fs-ec2": 4,     # app-level dep CVEs (needs DependencyStrategy)
     # "semgrep-ec2": 4,      # SAST findings (needs CodeEditStrategy)
 }
@@ -228,9 +228,7 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
     # source. Runs AFTER pinned picks so those always land first. Any issue
     # already selected by the pinned pass is skipped (dedup by source_vuln_id
     # + resource_label to match _PINNED lookup semantics).
-    already_picked_keys = {
-        (p.get("source_vuln_id") or "", _resource_label(p)) for p in picks
-    }
+    already_picked_keys = {(p.get("source_vuln_id") or "", _resource_label(p)) for p in picks}
     by_source: dict[str, list[dict]] = {}
     for iss in ec2_issues:
         by_source.setdefault(iss.get("source") or "", []).append(iss)
@@ -265,8 +263,7 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
             run_id,
             "system",
             "MESSAGE",
-            f"Scoop {source_name}: picked {scooped_this_source}/{n} "
-            f"(pool={len(pool)} available)",
+            f"Scoop {source_name}: picked {scooped_this_source}/{n} (pool={len(pool)} available)",
         )
 
     # Fallback: if pinned picks < 2, top up from families that weren't

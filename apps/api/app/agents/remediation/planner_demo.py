@@ -113,9 +113,7 @@ def run_demo_remediation(run_id: str) -> dict:
     # _plan_and_enrich (agent_v2) so each issue gets its own specialized prompt.
     from .prompt_router import load_sa3_prompt  # noqa: PLC0415
 
-    prompt_row = load_sa3_prompt(
-        sb_pub, source=None, family=None, default_version="v1.4"
-    )
+    prompt_row = load_sa3_prompt(sb_pub, source=None, family=None, default_version="v1.4")
 
     # Pre-load all demo.assets rows once and build a lookup index by identity.
     all_assets = sb_demo.table("assets").select("*").execute().data or []
@@ -410,9 +408,24 @@ def _plan_and_enrich(
                     "IMPORTANT: The re-scan validation must check for the ABSENCE of the SPECIFIC CVE being fixed, "
                     "NOT for zero total vulnerabilities. The image has OTHER packages with their own CVEs — "
                     "fixing one CVE does not make the entire image vuln-free. "
-                    "Use a command like: trivy image vuln-lab-image:latest --format json | grep -c '<CVE_ID>' "
+                    "Use a command like: trivy image vuln-lab-image:latest --format json 2>&1 | grep -c '<CVE_ID>' || true "
                     "with expected='0' (zero occurrences of that specific CVE). "
                     "Do NOT use expected='\"Vulnerabilities\": []' — that will always fail on a multi-package image."
+                ),
+                "rescan_exit_code_note": (
+                    "CRITICAL SHELL SEMANTICS: grep -c returns exit code 1 when match count is 0 "
+                    "(i.e. when the CVE is GONE — the desired outcome). This will cause the execution "
+                    "engine to treat a SUCCESSFUL fix as a failure. You MUST append '|| true' to any "
+                    "grep -c command so the exit code is always 0. The validation engine checks the "
+                    "OUTPUT value (expecting '0'), not the exit code. "
+                    "Correct:  trivy image ... --format json 2>&1 | grep -c 'CVE-xxx' || true "
+                    "Wrong:    trivy image ... --format json | grep -c 'CVE-xxx'"
+                ),
+                "remediation_steps_rules": (
+                    "Do NOT put the re-scan/validation command in remediation_steps. "
+                    "remediation_steps should contain ONLY actionable fix commands: "
+                    "backup, sed edit, docker build, verify edit (grep Dockerfile). "
+                    "The re-scan belongs EXCLUSIVELY in validation_tests with is_rescan=true."
                 ),
                 "prohibited_commands": [
                     "sudo reboot",
@@ -420,6 +433,7 @@ def _plan_and_enrich(
                     "edits to /etc/ or /usr/ on host",
                     "specifying a fixed version number in sed (just remove the pin)",
                     "expecting zero total vulnerabilities in validation (check only the specific CVE)",
+                    "grep -c without || true (grep returns exit 1 on zero matches, which breaks execution)",
                 ],
             }
         elif "trivy-os" in source or "tenable" in source or "qualys" in source:
