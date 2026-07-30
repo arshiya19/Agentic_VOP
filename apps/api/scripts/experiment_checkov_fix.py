@@ -129,14 +129,14 @@ def main():
     ]
 
     for i, finding in enumerate(findings, start=1):
-        print(f"\n{'='*60}")
-        print(f"[{i+1}] Finding: {finding['check_id']} — {finding['check_name']}")
+        print(f"\n{'=' * 60}")
+        print(f"[{i + 1}] Finding: {finding['check_id']} — {finding['check_name']}")
         print(f"    Resource: {finding['resource']}")
-        print(f"\n    Calling gpt-4o...")
+        print("\n    Calling gpt-4o...")
 
         response = call_llm(tf_content, tf_path, finding)
 
-        print(f"\n    LLM RESPONSE:")
+        print("\n    LLM RESPONSE:")
         print("    " + "-" * 56)
         for line in response.strip().splitlines():
             print(f"    {line}")
