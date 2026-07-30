@@ -8,11 +8,10 @@ export default defineConfig([
   globalIgnores(['dist']),
   {
     files: ['**/*.{js,jsx}'],
-    extends: [
-      js.configs.recommended,
-      reactHooks.configs['recommended-latest'],
-      reactRefresh.configs.vite,
-    ],
+    extends: [js.configs.recommended, reactRefresh.configs.vite],
+    plugins: {
+      'react-hooks': reactHooks,
+    },
     languageOptions: {
       ecmaVersion: 2020,
       globals: globals.browser,
@@ -24,6 +23,9 @@ export default defineConfig([
     },
     rules: {
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // Keep the same react-hooks rules as before (v5 recommended):
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
     },
   },
 ])

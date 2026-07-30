@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from lambdas.nvd_sync.config import (
     BATCH_SIZE,
@@ -65,7 +65,7 @@ def lambda_handler(event: dict, context) -> dict:
     """
     invocation_id = getattr(context, "aws_request_id", "local")
     logger = EmfLogger(environment=ENVIRONMENT, invocation_id=invocation_id)
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
 
     table_name = get_table_name(ENVIRONMENT)
     checkpoint_mgr = CheckpointManager(table_name=table_name, source="NVD")
@@ -354,7 +354,7 @@ def _normal_sync(
         except TransformError as exc:
             items_skipped += 1
             cve_id = _extract_cve_id_for_logging(item)
-            logger.warn(
+            logger.warning(
                 "SYNC_FAILED",
                 f"Transform failed for {cve_id}: {exc}",
                 cve_id=cve_id,
@@ -371,7 +371,7 @@ def _normal_sync(
         # Check remaining execution time before each batch
         remaining_ms = context.get_remaining_time_in_millis()
         if remaining_ms < TIMEOUT_SAFETY_BUFFER_MS:
-            logger.warn(
+            logger.warning(
                 "SYNC_FAILED",
                 f"Timeout safety triggered: {remaining_ms}ms remaining, "
                 f"need {TIMEOUT_SAFETY_BUFFER_MS}ms buffer",
@@ -604,7 +604,7 @@ def _gap_recovery_sync(
         except TransformError as exc:
             items_skipped += 1
             cve_id = _extract_cve_id_for_logging(item)
-            logger.warn(
+            logger.warning(
                 "GAP_RECOVERY",
                 f"Transform failed for {cve_id}: {exc}",
                 cve_id=cve_id,
@@ -619,7 +619,7 @@ def _gap_recovery_sync(
         # Check remaining execution time before each batch
         remaining_ms = context.get_remaining_time_in_millis()
         if remaining_ms < TIMEOUT_SAFETY_BUFFER_MS:
-            logger.warn(
+            logger.warning(
                 "GAP_RECOVERY",
                 f"Timeout safety triggered: {remaining_ms}ms remaining, "
                 f"need {TIMEOUT_SAFETY_BUFFER_MS}ms buffer",
@@ -783,9 +783,9 @@ def _determine_sync_mode(last_sync_ts: str | None) -> str:
         last_sync_dt = datetime.fromisoformat(last_sync_ts)
         # Ensure timezone-aware comparison
         if last_sync_dt.tzinfo is None:
-            last_sync_dt = last_sync_dt.replace(tzinfo=timezone.utc)
+            last_sync_dt = last_sync_dt.replace(tzinfo=UTC)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         gap_days = (now - last_sync_dt).days
 
         if gap_days >= CRITICAL_GAP_DAYS:

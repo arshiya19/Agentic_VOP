@@ -69,6 +69,11 @@ module "lab" {
   install_scan_server    = false # No scan server — this is the remediation target
   terraform_state_bucket = "sisyfix-terraform-state-486655355038"
   terraform_lock_table   = "sisyfix-terraform-locks"
+
+  # Same Ubuntu 20.04 AMI as env1 — keeps host OS identical so Trivy OS
+  # findings (which carry 20.04-specific package versions) can be fixed
+  # via apt-get on this instance without version mismatch failures.
+  ami_override = "ami-0dba2cb6798deb6d8"
 }
 
 # -----------------------------------------------------------------------------

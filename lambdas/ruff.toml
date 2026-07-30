@@ -1,0 +1,30 @@
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports, undefined names)
+    "B",    # flake8-bugbear (likely bugs and bad practices)
+    "S",    # flake8-bandit subset (security-adjacent patterns)
+    "UP",   # pyupgrade (modern Python idioms)
+    "I",    # isort (import sorting)
+    "G",    # flake8-logging-format
+    "BLE",  # flake8-blind-except
+    "PLE",  # pylint errors
+    "PYI",  # flake8-pyi (type annotation issues)
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "S101",   # assert usage — acceptable in tests
+    "S310",   # URL open audit — intentional for NVD feed downloads
+    "S603",   # subprocess without shell=True — not used
+    "E501",   # line too long — handled by formatter
+    "PLE1205", # too many args for logging — false positive with custom EmfLogger
+    "RUF001", # ambiguous unicode chars in strings — intentional en-dashes
+    "RUF002", # ambiguous unicode chars in docstrings — intentional en-dashes
+]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["S", "BLE001", "RUF012"]
