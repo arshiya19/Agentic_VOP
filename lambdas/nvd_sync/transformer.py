@@ -140,9 +140,7 @@ def transform_nvd_cve(cve_json: dict, timestamp: str) -> dict:
                     references.append(url)
 
     # --- Extract dates ---
-    published_date = (
-        cve.get("published") if isinstance(cve.get("published"), str) else None
-    )
+    published_date = cve.get("published") if isinstance(cve.get("published"), str) else None
     last_modified_date = (
         cve.get("lastModified") if isinstance(cve.get("lastModified"), str) else None
     )

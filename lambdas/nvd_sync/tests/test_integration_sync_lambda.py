@@ -12,7 +12,7 @@ from __future__ import annotations
 import gzip
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -21,7 +21,6 @@ from moto import mock_aws
 
 from lambdas.shared.checkpoint import CHECKPOINT_PK
 from lambdas.shared.dynamo_writer import WriteResult
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures and helpers
@@ -55,9 +54,7 @@ def _make_feed_json(cve_items: list[dict]) -> bytes:
 
 def _make_meta_content(sha256: str) -> str:
     """Create a META file content string."""
-    return (
-        f"lastModifiedDate:2024-01-16T12:00:00-00:00\nsize:12345678\nsha256:{sha256}\n"
-    )
+    return f"lastModifiedDate:2024-01-16T12:00:00-00:00\nsize:12345678\nsha256:{sha256}\n"
 
 
 class FakeWriterBackedByTable:
@@ -144,7 +141,7 @@ class TestNormalSyncEndToEnd:
         self, aws_environment, context, env_vars
     ):
         """Test end-to-end normal sync: feed download → filter → transform → write → checkpoint."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         checkpoint_ts = (now - timedelta(hours=4)).isoformat()
         new_meta_hash = "a" * 64
         old_meta_hash = "b" * 64
@@ -162,9 +159,7 @@ class TestNormalSyncEndToEnd:
 
         # Create feed with 3 CVEs newer than checkpoint
         newer_ts = (now - timedelta(hours=1)).isoformat()
-        cve_items = [
-            _make_nvd_cve_item(f"CVE-2024-{i:04d}", newer_ts) for i in range(1, 4)
-        ]
+        cve_items = [_make_nvd_cve_item(f"CVE-2024-{i:04d}", newer_ts) for i in range(1, 4)]
         feed_data = _make_feed_json(cve_items)
         meta_content = _make_meta_content(new_meta_hash)
 
@@ -214,7 +209,7 @@ class TestNormalSyncEndToEnd:
 
     def test_meta_unchanged_exits_early(self, aws_environment, context, env_vars):
         """Test that identical META hash triggers early exit without feed download."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         checkpoint_ts = (now - timedelta(hours=1)).isoformat()
         same_hash = "c" * 64
 
@@ -253,11 +248,9 @@ class TestNormalSyncEndToEnd:
         # Feed was never downloaded (urlopen called only once for META)
         assert mock_urlopen.call_count == 1
 
-    def test_empty_feed_returns_success_with_zero_items(
-        self, aws_environment, context, env_vars
-    ):
+    def test_empty_feed_returns_success_with_zero_items(self, aws_environment, context, env_vars):
         """Test that a feed with no CVEs newer than checkpoint produces success with 0 items."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Checkpoint is very recent, so all items in feed will be older
         checkpoint_ts = now.isoformat()
         old_hash = "d" * 64
@@ -302,14 +295,12 @@ class TestNormalSyncEndToEnd:
         assert result["items_processed"] == 0
         assert result["items_written"] == 0
 
-    def test_first_sync_no_checkpoint_processes_all_items(
-        self, aws_environment, context, env_vars
-    ):
+    def test_first_sync_no_checkpoint_processes_all_items(self, aws_environment, context, env_vars):
         """Test first sync with no existing checkpoint processes all feed items."""
         new_hash = "f" * 64
 
         # No checkpoint seeded — first sync
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         recent_ts = (now - timedelta(hours=2)).isoformat()
         cve_items = [
             _make_nvd_cve_item("CVE-2024-0001", recent_ts),
@@ -362,7 +353,7 @@ class TestSyncErrorHandling:
         self, aws_environment, context, env_vars
     ):
         """Test that feed download failure aborts run and leaves checkpoint unchanged."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         checkpoint_ts = (now - timedelta(hours=2)).isoformat()
         old_hash = "a" * 64
         new_hash = "b" * 64
@@ -411,7 +402,7 @@ class TestSyncErrorHandling:
 
     def test_timeout_safety_buffer_prevents_processing(self, aws_environment, env_vars):
         """Test that timeout safety buffer stops processing and leaves checkpoint unchanged."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         checkpoint_ts = (now - timedelta(hours=2)).isoformat()
         old_hash = "a" * 64
         new_hash = "b" * 64
@@ -428,9 +419,7 @@ class TestSyncErrorHandling:
 
         # Create feed with items
         newer_ts = (now - timedelta(hours=1)).isoformat()
-        cve_items = [
-            _make_nvd_cve_item(f"CVE-2024-{i:04d}", newer_ts) for i in range(1, 30)
-        ]
+        cve_items = [_make_nvd_cve_item(f"CVE-2024-{i:04d}", newer_ts) for i in range(1, 30)]
         feed_data = _make_feed_json(cve_items)
         meta_content = _make_meta_content(new_hash)
 
@@ -467,11 +456,9 @@ class TestSyncErrorHandling:
         cp_resp = table.get_item(Key={"pk": CHECKPOINT_PK, "sk": "NVD"})
         assert cp_resp["Item"]["last_successful_sync"] == checkpoint_ts
 
-    def test_malformed_cve_item_skipped_others_written(
-        self, aws_environment, context, env_vars
-    ):
+    def test_malformed_cve_item_skipped_others_written(self, aws_environment, context, env_vars):
         """Test that malformed CVE items are skipped while valid items are still written."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         checkpoint_ts = (now - timedelta(hours=4)).isoformat()
         old_hash = "x" * 64
         new_hash = "y" * 64
@@ -537,11 +524,9 @@ class TestSyncErrorHandling:
 class TestGapRecoveryIntegration:
     """Integration tests for gap recovery and critical gap paths."""
 
-    def test_critical_gap_aborts_without_processing(
-        self, aws_environment, context, env_vars
-    ):
+    def test_critical_gap_aborts_without_processing(self, aws_environment, context, env_vars):
         """Test that a gap >120 days triggers critical abort without recovery."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Checkpoint is 150 days old
         old_checkpoint = (now - timedelta(days=150)).isoformat()
 
@@ -576,7 +561,7 @@ class TestGapRecoveryIntegration:
         self, aws_environment, context, env_vars
     ):
         """Test that gap recovery is triggered for gaps between 8 and 120 days."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Checkpoint is 15 days old (between 8 and 120)
         old_checkpoint = (now - timedelta(days=15)).isoformat()
 
@@ -630,7 +615,7 @@ class TestGapRecoveryIntegration:
         self, aws_environment, context, env_vars
     ):
         """Test that failed gap recovery does not update checkpoint."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         old_checkpoint = (now - timedelta(days=15)).isoformat()
 
         table = aws_environment.Table(TABLE_NAME)
@@ -689,7 +674,7 @@ class TestSyncResponseStructure:
 
     def test_success_response_has_all_fields(self, aws_environment, context, env_vars):
         """Verify successful sync response contains all required fields."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         checkpoint_ts = (now - timedelta(hours=2)).isoformat()
         same_hash = "r" * 64
 
@@ -724,7 +709,7 @@ class TestSyncResponseStructure:
 
     def test_failed_response_has_all_fields(self, aws_environment, context, env_vars):
         """Verify failed sync response contains all required fields."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         old_checkpoint = (now - timedelta(days=150)).isoformat()
 
         table = aws_environment.Table(TABLE_NAME)

@@ -166,8 +166,7 @@ class DynamoWriter:
                 source="DynamoDB",
                 operation="batch_update_source",
                 message=(
-                    f"Failed to update {len(result.unprocessed_items)} items "
-                    f"for source '{source}'"
+                    f"Failed to update {len(result.unprocessed_items)} items for source '{source}'"
                 ),
             )
 
@@ -225,7 +224,7 @@ class DynamoWriter:
                 if attempt == self.max_retries:
                     return 0, len(batch), batch
                 continue
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — last-resort catch for unexpected DynamoDB errors
                 logger.error("Unexpected error during batch write: %s", e)
                 if attempt == self.max_retries:
                     return 0, len(batch), batch
@@ -276,9 +275,7 @@ class DynamoWriter:
             ":source_list": [source],
         }
 
-        condition_expression = (
-            "attribute_not_exists(pk) OR metadata.updated_at < :new_ts"
-        )
+        condition_expression = "attribute_not_exists(pk) OR metadata.updated_at < :new_ts"
 
         for attempt in range(self.max_retries + 1):
             if attempt > 0:

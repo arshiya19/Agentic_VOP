@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
 import urllib3
@@ -113,7 +113,7 @@ def _get_nvd_api_key(environment: str) -> str | None:
         response = ssm.get_parameter(Name=param_path, WithDecryption=True)
         _cached_api_key = response["Parameter"]["Value"]
         return _cached_api_key
-    except Exception:
+    except Exception:  # noqa: BLE001 — SSM may raise various SDK/network errors
         return None
 
 
@@ -161,8 +161,7 @@ def recover_gap(
     if api_key is None:
         logger.error(
             "GAP_RECOVERY",
-            "Failed to retrieve NVD API key from SSM Parameter Store. "
-            "Skipping gap recovery.",
+            "Failed to retrieve NVD API key from SSM Parameter Store. Skipping gap recovery.",
             environment=environment,
             ssm_path=get_ssm_api_key_path(environment),
         )
@@ -172,7 +171,7 @@ def recover_gap(
         )
 
     # --- Prepare query parameters ---
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    now_iso = datetime.now(UTC).isoformat(timespec="milliseconds")
     rate_limiter = RateLimiter()
     http = urllib3.PoolManager()
 
@@ -297,7 +296,7 @@ def _fetch_page_with_retry(
     for attempt in range(MAX_RETRIES + 1):
         if attempt > 0:
             delay = BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-            logger.warn(
+            logger.warning(
                 "GAP_RECOVERY",
                 f"Retrying NVD API request (attempt {attempt + 1}/{MAX_RETRIES + 1}, "
                 f"delay {delay}s)",
@@ -319,7 +318,7 @@ def _fetch_page_with_retry(
                 return json.loads(response.data.decode("utf-8"))
 
             # Non-200 status — log and retry
-            logger.warn(
+            logger.warning(
                 "GAP_RECOVERY",
                 f"NVD API returned HTTP {response.status}",
                 http_status=response.status,
@@ -327,8 +326,8 @@ def _fetch_page_with_retry(
                 start_index=start_index,
             )
 
-        except Exception as exc:
-            logger.warn(
+        except Exception as exc:  # noqa: BLE001 — catch-all for network/urllib3 transient errors
+            logger.warning(
                 "GAP_RECOVERY",
                 f"NVD API request failed: {exc}",
                 error=str(exc),
@@ -352,8 +351,8 @@ def _compute_gap_days(checkpoint_timestamp: str) -> int | None:
     try:
         checkpoint_dt = datetime.fromisoformat(checkpoint_timestamp)
         if checkpoint_dt.tzinfo is None:
-            checkpoint_dt = checkpoint_dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+            checkpoint_dt = checkpoint_dt.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
         return (now - checkpoint_dt).days
     except (ValueError, TypeError):
         return None

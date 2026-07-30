@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
-from lambdas.shared.checkpoint import Checkpoint, CheckpointManager, CHECKPOINT_PK
+from lambdas.shared.checkpoint import CHECKPOINT_PK, Checkpoint, CheckpointManager
 from lambdas.shared.exceptions import WriteError
 
 
