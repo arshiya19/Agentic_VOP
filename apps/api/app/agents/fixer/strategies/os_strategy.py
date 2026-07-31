@@ -234,8 +234,15 @@ class OSStrategy(BaseFixStrategy):
                 return results
             self._emit(ctx, "MESSAGE", "   🛡 Safety check passed")
 
-            # Timeout: apt-get update can be slow
-            timeout = 300 if "apt-get update" in combined.lower() else 120
+            # Timeout: apt-get update and trivy scans can be slow
+            # (trivy needs to download its ~100MB vuln DB on first run)
+            lower_cmd = combined.lower()
+            if "apt-get update" in lower_cmd or "apt update" in lower_cmd:
+                timeout = 300
+            elif "trivy" in lower_cmd:
+                timeout = 600
+            else:
+                timeout = 120
 
             try:
                 cmd_result = executor.run_command(combined, timeout_s=timeout)

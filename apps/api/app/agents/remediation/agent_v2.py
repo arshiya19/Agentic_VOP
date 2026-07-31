@@ -786,18 +786,47 @@ def run_agentic_planner(
         user_payload["execution_context"] = {
             "target_type": "host_os",
             "fix_approach": (
-                "Run apt-get update && apt-get install --only-upgrade <pkg> directly on the host. "
-                "If issue.solution has a FixedVersion, pin to it: apt-get install <pkg>=<fixed_version>. "
-                "If no FixedVersion, just upgrade to latest: apt-get install --only-upgrade <pkg>."
+                "Run apt-get update && apt-get install --only-upgrade <pkg> -y directly on the host. "
+                "NEVER pin to a specific version (apt-get install <pkg>=<version>) — public Ubuntu/Debian "
+                "repos only serve the LATEST point release and historical versions are removed. Always use: "
+                "apt-get install --only-upgrade <pkg> -y (upgrades to latest available, which includes all "
+                "prior security fixes). This is how AWS SSM Patch Manager, Ansible, and all enterprise "
+                "patch tools operate."
+            ),
+            "verification_approach": (
+                "After the upgrade, verify the installed version is GREATER than the vulnerable version "
+                "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version — just "
+                "confirm the version number is higher than the one reported in the finding."
             ),
             "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
             "rescan_target": "/ (the host root filesystem)",
             "validation_guidance": (
                 "IMPORTANT: The re-scan must check for the ABSENCE of the SPECIFIC CVE being fixed, "
                 "NOT for zero total vulnerabilities. The host has many packages with other CVEs. "
-                "Use: trivy rootfs / --format json | grep -c '<CVE_ID>' with expected='0'."
+                "Use: trivy rootfs / --format json 2>&1 | grep -c '<CVE_ID>' || true "
+                "with expected='0'. The '|| true' is CRITICAL because grep -c returns exit 1 when "
+                "the count is 0 (the desired outcome), which would otherwise fail the step."
             ),
-            "prohibited_commands": ["sudo reboot", "docker build", "terraform"],
+            "remediation_steps_rules": (
+                "Do NOT put the re-scan/validation command in remediation_steps. "
+                "remediation_steps should contain ONLY actionable fix commands: "
+                "1. apt-get update, 2. apt-get install --only-upgrade <pkg> -y, "
+                "3. dpkg -l <pkg> (version verification). "
+                "The re-scan belongs EXCLUSIVELY in validation_tests with is_rescan=true."
+            ),
+            "reboot_policy": (
+                "Do NOT include 'sudo reboot' unless the CVE is in a KERNEL package "
+                "(linux-image-*, linux-headers-*), libc6, or systemd. Userspace packages "
+                "(apparmor, apport, openssl, curl, etc.) do NOT require a reboot — the fix "
+                "takes effect immediately or on next service restart."
+            ),
+            "prohibited_commands": [
+                "sudo reboot (unless kernel/libc/systemd CVE)",
+                "docker build",
+                "terraform",
+                "apt-get install <pkg>=<specific_version> (never pin versions against public repos)",
+                "grep -c without || true (grep returns exit 1 on zero matches)",
+            ],
         }
 
     # --- Knowledge Base injection (few-shot from proven fixes) ---

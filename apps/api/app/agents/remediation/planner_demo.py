@@ -439,10 +439,30 @@ def _plan_and_enrich(
         elif "trivy-os" in source or "tenable" in source or "qualys" in source:
             payload["execution_context"] = {
                 "target_type": "host_os",
-                "fix_approach": "Run apt-get update && apt-get install <pkg>=<fixed_version> directly on the host.",
+                "fix_approach": (
+                    "Run apt-get update && apt-get install --only-upgrade <pkg> -y directly on the host. "
+                    "NEVER pin to a specific version — public repos only serve the latest point release. "
+                    "Always use: apt-get install --only-upgrade <pkg> -y (no =<version> suffix)."
+                ),
+                "verification_approach": (
+                    "After upgrade, verify installed version is GREATER than the vulnerable version "
+                    "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version."
+                ),
                 "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
                 "rescan_target": "/ (host root filesystem)",
-                "prohibited_commands": ["sudo reboot", "docker build"],
+                "remediation_steps_rules": (
+                    "Do NOT put the re-scan in remediation_steps. Steps should be: "
+                    "1. apt-get update, 2. apt-get install --only-upgrade <pkg> -y, "
+                    "3. dpkg -l <pkg> (verify). Re-scan goes in validation_tests only."
+                ),
+                "reboot_policy": (
+                    "No reboot unless CVE is in kernel (linux-image-*), libc6, or systemd."
+                ),
+                "prohibited_commands": [
+                    "sudo reboot (unless kernel/libc/systemd CVE)",
+                    "docker build",
+                    "apt-get install <pkg>=<specific_version>",
+                ],
             }
 
         llm_output = invoke_structured_with_retry(
