@@ -197,12 +197,14 @@ def run_demo_remediation(run_id: str) -> dict:
 
 def _lookup_demo_asset(all_assets: list[dict], issue: dict) -> dict:
     """Match an issue to a demo asset using the same identity keys as the
-    real issue_with_asset view (project / repo → name/aliases; hostname; ipv4).
+    real issue_with_asset view (project / repo / name / os → name/aliases; hostname; ipv4).
     Returns trimmed dict of fields the LLM needs, or {} if unattributed.
     """
     identity = issue.get("asset_identity") or {}
     project = identity.get("project")
     repo = identity.get("repo")
+    name = identity.get("name")
+    os_id = identity.get("os")
     hostname = identity.get("hostname")
     ipv4 = identity.get("ipv4")
 
@@ -212,7 +214,11 @@ def _lookup_demo_asset(all_assets: list[dict], issue: dict) -> dict:
             return _trim_asset(a)
         if repo and (a.get("name") == repo or repo in aliases):
             return _trim_asset(a)
-        if hostname and a.get("hostname") == hostname:
+        if name and (a.get("name") == name or name in aliases):
+            return _trim_asset(a)
+        if os_id and (a.get("name") == os_id or os_id in aliases):
+            return _trim_asset(a)
+        if hostname and (a.get("hostname") == hostname or hostname in aliases):
             return _trim_asset(a)
         if ipv4 and a.get("ip_address") == ipv4:
             return _trim_asset(a)
