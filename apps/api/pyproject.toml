@@ -38,8 +38,8 @@ dependencies = [
     # do the subscore math reliably, so Sub-Agent 1 calls this post-LLM.
     "cvss>=3.2",
     # AES-256-GCM encryption for sensitive scanner credentials at rest.
-    # Pinned to remediate GHSA-537c-gmf6-5ccf (OpenSSL vulnerability in static wheels).
-    "cryptography>=48.0.1",
+    # Pinned to remediate CVE-2026-69247 (PKCS7 decryption oracle via distinguishable errors).
+    "cryptography>=50.0.0",
     # AWS SDK for DynamoDB-backed vulnerability intelligence lookups.
     "boto3>=1.34.0",
     # Pinned to remediate PYSEC-2026-175/177/178/179 (JWT verification bypass + SSRF).
