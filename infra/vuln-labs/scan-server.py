@@ -7,14 +7,16 @@ Architecture:
   - VOP fetches pre-computed results, never triggers a scan
 
 Endpoints:
-  GET  /health            — liveness check
-  GET  /scan/checkov      — returns cached Checkov CSPM results
-  GET  /scan/semgrep      — returns cached Semgrep SAST results
-  GET  /scan/trivy-fs     — returns cached Trivy FS SCA results
-  GET  /scan/trivy-image  — returns cached Trivy image results
-  GET  /scan/trivy-os     — returns cached Trivy OS results
-  POST /trigger-scan      — re-runs all scanners and updates cache
-  GET  /scan-status       — shows when each scan was last run
+  GET  /health                  — liveness check
+  GET  /scan/checkov            — returns cached Checkov CSPM results
+  GET  /scan/semgrep            — returns cached Semgrep SAST results
+  GET  /scan/trivy-fs           — returns cached Trivy FS SCA results
+  GET  /scan/trivy-image/infra  — returns cached Trivy image results (Ubuntu/OpenSSL)
+  GET  /scan/trivy-image/java   — returns cached Trivy image results (Tomcat/JDK)
+  GET  /scan/trivy-image/python — returns cached Trivy image results (Python/pip)
+  GET  /scan/trivy-os           — returns cached Trivy OS results (host rootfs)
+  POST /trigger-scan            — re-runs all scanners and updates cache
+  GET  /scan-status             — shows when each scan was last run
 """
 
 import json
@@ -29,6 +31,8 @@ CSPM_PATH = os.environ.get("VULN_LABS_CSPM_PATH", "/opt/vuln-labs/cspm-lab/")
 SAST_PATH = os.environ.get("VULN_LABS_SAST_PATH", "/opt/vuln-labs/sast-lab/")
 SCA_PATH = os.environ.get("VULN_LABS_SCA_PATH", "/opt/vuln-labs/sca-lab/")
 INFRA_IMAGE = os.environ.get("VULN_LABS_INFRA_IMAGE", "vuln-lab-image:latest")
+JAVA_IMAGE = os.environ.get("VULN_LABS_JAVA_IMAGE", "vuln-java-image:latest")
+PYTHON_IMAGE = os.environ.get("VULN_LABS_PYTHON_IMAGE", "vuln-python-image:latest")
 RESULTS_DIR = os.environ.get("VULN_LABS_RESULTS_DIR", "/opt/vuln-labs/results/")
 
 # Track when each scan was last run
@@ -261,6 +265,70 @@ def run_trivy_image():
         print(f"[scan] Trivy Image failed: {e}")
 
 
+def run_trivy_image_java():
+    """Run Trivy image scan on the Java/Tomcat image and cache results."""
+    try:
+        result = subprocess.run(
+            ["trivy", "image", JAVA_IMAGE, "--format", "json", "--scanners", "vuln"],
+            capture_output=True, text=True, timeout=180
+        )
+        data = json.loads(result.stdout) if result.stdout else {}
+        findings = []
+        for target_result in data.get("Results", []):
+            for vuln in target_result.get("Vulnerabilities", []):
+                findings.append({
+                    "vuln_id": vuln.get("VulnerabilityID"),
+                    "pkg_name": vuln.get("PkgName"),
+                    "installed_version": vuln.get("InstalledVersion"),
+                    "fixed_version": vuln.get("FixedVersion"),
+                    "severity": vuln.get("Severity"),
+                    "title": vuln.get("Title"),
+                    "description": vuln.get("Description"),
+                    "target": target_result.get("Target"),
+                    "type": target_result.get("Type"),
+                })
+
+        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        with open(os.path.join(RESULTS_DIR, "trivy-image-java.json"), "w") as f:
+            json.dump(result_data, f)
+        scan_timestamps["trivy-image-java"] = datetime.utcnow().isoformat()
+        print(f"[scan] Trivy Image Java complete: {len(findings)} findings")
+    except Exception as e:
+        print(f"[scan] Trivy Image Java failed: {e}")
+
+
+def run_trivy_image_python():
+    """Run Trivy image scan on the Python image and cache results."""
+    try:
+        result = subprocess.run(
+            ["trivy", "image", PYTHON_IMAGE, "--format", "json", "--scanners", "vuln"],
+            capture_output=True, text=True, timeout=180
+        )
+        data = json.loads(result.stdout) if result.stdout else {}
+        findings = []
+        for target_result in data.get("Results", []):
+            for vuln in target_result.get("Vulnerabilities", []):
+                findings.append({
+                    "vuln_id": vuln.get("VulnerabilityID"),
+                    "pkg_name": vuln.get("PkgName"),
+                    "installed_version": vuln.get("InstalledVersion"),
+                    "fixed_version": vuln.get("FixedVersion"),
+                    "severity": vuln.get("Severity"),
+                    "title": vuln.get("Title"),
+                    "description": vuln.get("Description"),
+                    "target": target_result.get("Target"),
+                    "type": target_result.get("Type"),
+                })
+
+        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        with open(os.path.join(RESULTS_DIR, "trivy-image-python.json"), "w") as f:
+            json.dump(result_data, f)
+        scan_timestamps["trivy-image-python"] = datetime.utcnow().isoformat()
+        print(f"[scan] Trivy Image Python complete: {len(findings)} findings")
+    except Exception as e:
+        print(f"[scan] Trivy Image Python failed: {e}")
+
+
 def run_trivy_os():
     """Scan the host OS (Ubuntu 20.04) for OS-level CVEs using trivy rootfs."""
     try:
@@ -317,6 +385,8 @@ def run_all_scans():
     run_semgrep()
     run_trivy_fs()
     run_trivy_image()
+    run_trivy_image_java()
+    run_trivy_image_python()
     run_trivy_os()
     print("[scan] All scans complete.")
 
@@ -331,7 +401,14 @@ class ScanHandler(BaseHTTPRequestHandler):
             self._serve_cached("semgrep.json")
         elif self.path == "/scan/trivy-fs":
             self._serve_cached("trivy-fs.json")
+        elif self.path == "/scan/trivy-image/infra":
+            self._serve_cached("trivy-image.json")
+        elif self.path == "/scan/trivy-image/java":
+            self._serve_cached("trivy-image-java.json")
+        elif self.path == "/scan/trivy-image/python":
+            self._serve_cached("trivy-image-python.json")
         elif self.path == "/scan/trivy-image":
+            # Backward compatible — serves infra image results
             self._serve_cached("trivy-image.json")
         elif self.path == "/scan/trivy-os":
             self._serve_cached("trivy-os.json")
@@ -340,8 +417,9 @@ class ScanHandler(BaseHTTPRequestHandler):
         else:
             self._respond(404, {"error": "unknown endpoint", "available": [
                 "/health", "/scan/checkov", "/scan/semgrep",
-                "/scan/trivy-fs", "/scan/trivy-image", "/scan/trivy-os",
-                "/scan-status", "POST /trigger-scan"
+                "/scan/trivy-fs", "/scan/trivy-image/infra",
+                "/scan/trivy-image/java", "/scan/trivy-image/python",
+                "/scan/trivy-os", "/scan-status", "POST /trigger-scan"
             ]})
 
     def do_POST(self):
@@ -368,7 +446,15 @@ class ScanHandler(BaseHTTPRequestHandler):
         elif self.path == "/trigger-scan/trivy-image":
             thread = threading.Thread(target=run_trivy_image, daemon=True)
             thread.start()
-            self._respond(202, {"status": "trivy-image scan triggered"})
+            self._respond(202, {"status": "trivy-image (infra) scan triggered"})
+        elif self.path == "/trigger-scan/trivy-image-java":
+            thread = threading.Thread(target=run_trivy_image_java, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-image-java scan triggered"})
+        elif self.path == "/trigger-scan/trivy-image-python":
+            thread = threading.Thread(target=run_trivy_image_python, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-image-python scan triggered"})
         else:
             self._respond(404, {"error": "unknown endpoint"})
 

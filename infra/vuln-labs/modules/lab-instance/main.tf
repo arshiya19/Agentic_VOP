@@ -119,10 +119,19 @@ resource "aws_iam_role_policy" "ssm" {
         Effect = "Allow"
         Action = [
           "ssm:UpdateInstanceInformation",
+          "ssm:ListAssociations",
+          "ssm:ListInstanceAssociations",
+          "ssm:GetDeployablePatchSnapshotForInstance",
           "ssmmessages:CreateControlChannel",
           "ssmmessages:CreateDataChannel",
           "ssmmessages:OpenControlChannel",
-          "ssmmessages:OpenDataChannel"
+          "ssmmessages:OpenDataChannel",
+          "ec2messages:AcknowledgeMessage",
+          "ec2messages:DeleteMessage",
+          "ec2messages:FailMessage",
+          "ec2messages:GetEndpoint",
+          "ec2messages:GetMessages",
+          "ec2messages:SendReply"
         ]
         Resource = "*"
       }
