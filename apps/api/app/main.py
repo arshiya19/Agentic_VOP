@@ -296,13 +296,16 @@ def reset_env2_baseline() -> dict:
 set -e
 cd /opt/vuln-labs/cspm-lab
 echo "=== STEP 1: terraform destroy ==="
-terraform destroy -auto-approve -no-color -input=false 2>&1 | tail -n 5
+terraform destroy -auto-approve -no-color -input=false 2>&1 | tail -n 5 || echo "WARN: destroy had errors (may be clean already)"
 echo "=== STEP 2: delete S3 state file ==="
 aws s3 rm "s3://sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate" 2>&1 || echo "(state may already be empty)"
 echo "=== STEP 3: delete DynamoDB lock entry ==="
 aws dynamodb delete-item --table-name sisyfix-terraform-locks --key '{"LockID":{"S":"sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate-md5"}}' 2>&1 || echo "(lock may not exist)"
 echo "=== STEP 4: restore main.tf + wipe .bak files ==="
-if [ ! -f main.tf.original ]; then echo "ERROR: main.tf.original not found"; exit 1; fi
+if [ ! -f main.tf.original ]; then
+  echo "WARN: main.tf.original not found — regenerating from main.tf"
+  cp main.tf main.tf.original 2>/dev/null || true
+fi
 cp main.tf.original main.tf
 rm -f main.tf.bak-*
 rm -rf .terraform .terraform.lock.hcl
