@@ -9,9 +9,18 @@ set -e
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Update system packages
-apt-get update -y
-apt-get install -y git curl unzip python3 python3-pip python3-venv nodejs npm docker.io
+# Update system packages (retry up to 3 times on transient mirror failures)
+for i in 1 2 3; do
+  apt-get update -y && break
+  echo "apt-get update failed (attempt $i/3), retrying in 10s..."
+  sleep 10
+done
+for i in 1 2 3; do
+  apt-get install -y --fix-missing git curl unzip python3 python3-pip python3-venv nodejs npm docker.io && break
+  echo "apt-get install failed (attempt $i/3), retrying in 10s..."
+  apt-get update -y
+  sleep 10
+done
 
 # Enable and start Docker
 systemctl enable docker
