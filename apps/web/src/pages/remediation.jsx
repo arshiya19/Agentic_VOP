@@ -75,6 +75,7 @@ export default function Remediation() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [toast, setToast] = useState(null)
+  const [ticketStates, setTicketStates] = useState({}) // { [pkg_id]: { loading, status, url, id, error } }
   // Contextual switch: 'real' or 'demo'. Set by Integrations page buttons,
   // overridable via the pill at the top of the page.
   const [pipelineMode, setPipelineMode] = useState(
@@ -511,6 +512,8 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
   const pw = recommendedPathway(pkg)
   const vm = pw?.validation_metadata
   const isTerminal = pkg?.status === 'ready_for_execution' || pkg?.status === 'rejected'
+  const [ticketLoading, setTicketLoading] = useState(false)
+  const [ticket, setTicket] = useState(null)
 
   return (
     <div className="rmp-drawer-overlay" onClick={onClose}>
@@ -715,7 +718,55 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
             <footer className="rmp-drawer-footer">
               {isTerminal ? (
                 <div className="rmp-terminal-state">
-                  {pkg.status === 'ready_for_execution' ? '✓ Approved — Ready for Execution' : '✗ Rejected'}
+                  {pkg.status === 'ready_for_execution' ? (
+                    <>
+                      <span>✓ Approved — Ready for Execution</span>
+                      {ticket ? (
+                        <div className="rmp-ticket-info">
+                          {ticket.status === 'created' ? (
+                            <a
+                              href={ticket.external_ticket_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="rmp-ticket-link"
+                            >
+                              🎫 {ticket.external_ticket_id || 'Ticket'} ↗
+                            </a>
+                          ) : ticket.status === 'failed' ? (
+                            <span className="rmp-ticket-error">⚠ Ticket creation failed: {ticket.error_message}</span>
+                          ) : (
+                            <span className="rmp-ticket-pending">⏳ Creating ticket…</span>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          className="rmp-btn rmp-btn-ticket"
+                          disabled={ticketLoading}
+                          onClick={async () => {
+                            setTicketLoading(true)
+                            try {
+                              const res = await fetch(
+                                `${API_URL}/admin/remediation-packages/${pkg.id}/create-ticket`,
+                                { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+                              )
+                              if (!res.ok) {
+                                const err = await res.json().catch(() => ({}))
+                                throw new Error(err.detail || `HTTP ${res.status}`)
+                              }
+                              const data = await res.json()
+                              setTicket(data)
+                            } catch (e) {
+                              setTicket({ status: 'failed', error_message: e.message })
+                            } finally {
+                              setTicketLoading(false)
+                            }
+                          }}
+                        >
+                          {ticketLoading ? '⏳ Creating…' : '🎫 Create ServiceNow Ticket'}
+                        </button>
+                      )}
+                    </>
+                  ) : '✗ Rejected'}
                 </div>
               ) : (
                 <>
