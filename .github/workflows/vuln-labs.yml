@@ -29,6 +29,8 @@ on:
           - env1-scan-source
           - env2-remediation
           - env3-manual-remediation
+          - env4-os-scan-source
+          - env5-os-remediation
       action:
         description: "Action to perform"
         required: true
@@ -75,6 +77,14 @@ jobs:
             "env3-manual-remediation")
               echo "env_dir=env3" >> "$GITHUB_OUTPUT"
               echo "env_name=env3" >> "$GITHUB_OUTPUT"
+              ;;
+            "env4-os-scan-source")
+              echo "env_dir=env4" >> "$GITHUB_OUTPUT"
+              echo "env_name=env4" >> "$GITHUB_OUTPUT"
+              ;;
+            "env5-os-remediation")
+              echo "env_dir=env5" >> "$GITHUB_OUTPUT"
+              echo "env_name=env5" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "::error::Unknown environment: ${{ github.event.inputs.environment }}"
