@@ -236,6 +236,29 @@ def run_fixer(
     raw = _load_raw_finding(sb, issue_row.get("raw_finding_id"))
     iac_ctx = _extract_iac_context(issue_row, raw)
 
+    # 3b. For container-image scanners, resolve dockerfile_path dynamically
+    #     from connection_registry metadata. Avoids hardcoding per-image paths
+    #     in ImageStrategy — any new scanner just needs metadata filled in Supabase.
+    source = issue_row.get("source") or ""
+    if not iac_ctx.get("file_path") and "trivy-image" in source.lower():
+        try:
+            from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
+            sb_pub = _sb_pub()
+            reg_row = sb_pub.table("connection_registry").select("metadata").eq("tool", source).single().execute().data
+            reg_meta = (reg_row or {}).get("metadata") or {}
+            if reg_meta.get("dockerfile_path"):
+                iac_ctx["file_path"] = reg_meta["dockerfile_path"]
+                iac_ctx["working_directory"] = reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+        except Exception:  # noqa: BLE001
+            pass  # Fall through to hardcoded default in ImageStrategy
+        # Also set resource_name to the image ref from raw target (e.g. "vuln-java-image:latest")
+        if not iac_ctx.get("resource_name") and raw:
+            target = raw.get("target") or raw.get("Target") or ""
+            # Extract image:tag from "vuln-java-image:latest (debian 10.2)"
+            image_ref = target.split("(")[0].strip() if "(" in target else target
+            if image_ref:
+                iac_ctx["resource_name"] = image_ref
+
     # 4. Decide strategy — source name is the strongest signal for
     #    disambiguating trivy-image (ImageStrategy) vs trivy-os (OSStrategy)
     #    when both classify as family='os_vulnerability'.
@@ -727,6 +750,19 @@ def _load_issue(sb: Any, issue_id: int) -> dict | None:
 def _load_raw_finding(sb: Any, raw_finding_id: int | None) -> dict | None:
     if raw_finding_id is None:
         return None
+    # Try the passed sb first (works for real pipeline where sb=public).
+    # If not found, fall back to public schema (handles demo pipeline where
+    # sb=demo but raw_finding_id points at public.raw_findings).
     resp = sb.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
     rows = resp.data or []
-    return (rows[0] or {}).get("raw") if rows else None
+    if rows:
+        return (rows[0] or {}).get("raw")
+    # Fallback: try public schema
+    try:
+        from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
+        sb_pub = _sb_pub()
+        resp = sb_pub.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
+        rows = resp.data or []
+        return (rows[0] or {}).get("raw") if rows else None
+    except Exception:  # noqa: BLE001
+        return None

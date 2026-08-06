@@ -325,6 +325,30 @@ def _plan_and_enrich(
             # working_directory, resource_name, scanner_type. Preserves original
             # issue for downstream persistence.
             agent_issue = {**issue, **_extract_iac_context(issue, raw)}
+
+            # For container-image scanners, resolve dockerfile_path dynamically
+            # from connection_registry metadata (same lookup SA4 does). This gives
+            # SA3's LLM the correct paths to generate commands against.
+            source = (issue.get("source") or "").lower()
+            if not agent_issue.get("file_path") and "trivy-image" in source:
+                try:
+                    reg_row = sb_pub.table("connection_registry").select("metadata").eq("tool", issue.get("source")).single().execute().data
+                    reg_meta = (reg_row or {}).get("metadata") or {}
+                    if reg_meta.get("dockerfile_path"):
+                        agent_issue["file_path"] = reg_meta["dockerfile_path"]
+                        agent_issue["working_directory"] = reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+                    # Also set resource_name to image ref from raw target
+                    if not agent_issue.get("resource_name") and raw:
+                        target = raw.get("target") or raw.get("Target") or ""
+                        image_ref = target.split("(")[0].strip() if "(" in target else target
+                        if image_ref:
+                            agent_issue["resource_name"] = image_ref
+                    # Inject fix_pattern so SA3 knows the correct fix shape for this image type
+                    if reg_meta.get("fix_pattern"):
+                        agent_issue["fix_pattern"] = reg_meta["fix_pattern"]
+                except Exception:  # noqa: BLE001
+                    pass
+
             agent_result = run_agentic_planner(
                 issue=agent_issue,
                 asset=asset,
