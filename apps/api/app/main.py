@@ -2134,9 +2134,7 @@ def approve_remediation_package(pkg_id: int, body: ApprovePackageRequest | None 
     ticket_info: dict | None = None
     if settings.ticketing_auto_create_on_approve:
         try:
-            ticket_resp = create_ticket_endpoint(
-                CreateTicketRequest(remediation_package_id=pkg_id)
-            )
+            ticket_resp = create_ticket_endpoint(CreateTicketRequest(remediation_package_id=pkg_id))
             ticket_info = {
                 "ticket_id": ticket_resp.id,
                 "external_ticket_id": ticket_resp.external_ticket_id,

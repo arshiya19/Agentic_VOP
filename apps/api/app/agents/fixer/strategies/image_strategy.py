@@ -199,8 +199,12 @@ class ImageStrategy(BaseFixStrategy):
         if "|" in c and "grep" in c_lower:
             # Check if it's a version verification pattern
             version_indicators = (
-                "--version", "version", "dpkg -l", "apt-cache policy",
-                "curl --version", "openssl version",
+                "--version",
+                "version",
+                "dpkg -l",
+                "apt-cache policy",
+                "curl --version",
+                "openssl version",
             )
             for indicator in version_indicators:
                 if indicator in c_lower:
@@ -223,9 +227,23 @@ class ImageStrategy(BaseFixStrategy):
         while i < len(parts):
             token = parts[i]
             if token.startswith("-"):
-                value_flags = ("-e", "--env", "-v", "--volume", "-p", "--publish",
-                               "--name", "-w", "--workdir", "--entrypoint",
-                               "--network", "--user", "-u", "--memory", "-m")
+                value_flags = (
+                    "-e",
+                    "--env",
+                    "-v",
+                    "--volume",
+                    "-p",
+                    "--publish",
+                    "--name",
+                    "-w",
+                    "--workdir",
+                    "--entrypoint",
+                    "--network",
+                    "--user",
+                    "-u",
+                    "--memory",
+                    "-m",
+                )
                 if token in value_flags or any(token.startswith(f + "=") for f in value_flags):
                     if "=" not in token:
                         i += 1
@@ -238,7 +256,7 @@ class ImageStrategy(BaseFixStrategy):
             return False
 
         # Everything after image_idx is the trailing command
-        trailing = " ".join(parts[image_idx + 1:]).strip().lower()
+        trailing = " ".join(parts[image_idx + 1 :]).strip().lower()
 
         if not trailing:
             # No trailing command → will use image's CMD → likely hangs
@@ -437,9 +455,7 @@ class ImageStrategy(BaseFixStrategy):
     # ==================================================================
     # "Already fixed" detection helper
     # ==================================================================
-    def _check_already_fixed(
-        self, executor: RemoteExecutor, command: str, ctx: FixContext
-    ) -> bool:
+    def _check_already_fixed(self, executor: RemoteExecutor, command: str, ctx: FixContext) -> bool:
         """Detect if a sed/grep step targets a file that's already in the
         desired state. Returns True if we can safely skip this command.
 

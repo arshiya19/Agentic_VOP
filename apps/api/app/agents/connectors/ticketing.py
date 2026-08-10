@@ -147,17 +147,15 @@ def _resolve_servicenow_config(config: dict) -> dict:
     Priority: connection_config > env vars > empty string.
     """
     return {
-        "instance_url": (
-            config.get("instance_url")
-            or settings.servicenow_instance_url
-        ).rstrip("/"),
+        "instance_url": (config.get("instance_url") or settings.servicenow_instance_url).rstrip(
+            "/"
+        ),
         "username": config.get("username") or settings.servicenow_username,
         "password": config.get("password") or settings.servicenow_password,
         "client_id": config.get("client_id") or settings.servicenow_client_id,
         "client_secret": config.get("client_secret") or settings.servicenow_client_secret,
         "assignment_group": (
-            config.get("assignment_group")
-            or settings.servicenow_assignment_group
+            config.get("assignment_group") or settings.servicenow_assignment_group
         ),
         "caller_id": config.get("caller_id", ""),
         "category": config.get("category", "Security"),
@@ -272,7 +270,9 @@ def _create_servicenow_ticket(
 
                 access_token = token_resp.json().get("access_token")
                 if not access_token:
-                    return TicketCreationResult(success=False, error="No access_token in OAuth response")
+                    return TicketCreationResult(
+                        success=False, error="No access_token in OAuth response"
+                    )
 
                 # Retry with Bearer token
                 response = client.post(
@@ -295,7 +295,11 @@ def _create_servicenow_ticket(
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             resp_text = exc.response.text[:500] if exc.response else "no response body"
-            logger.error("ServiceNow API error %s: %s", exc.response.status_code if exc.response else "?", resp_text)
+            logger.error(
+                "ServiceNow API error %s: %s",
+                exc.response.status_code if exc.response else "?",
+                resp_text,
+            )
             return TicketCreationResult(
                 success=False,
                 error=f"ServiceNow returned {exc.response.status_code}: {resp_text[:200]}",

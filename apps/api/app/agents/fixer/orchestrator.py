@@ -243,12 +243,22 @@ def run_fixer(
     if not iac_ctx.get("file_path") and "trivy-image" in source.lower():
         try:
             from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
+
             sb_pub = _sb_pub()
-            reg_row = sb_pub.table("connection_registry").select("metadata").eq("tool", source).single().execute().data
+            reg_row = (
+                sb_pub.table("connection_registry")
+                .select("metadata")
+                .eq("tool", source)
+                .single()
+                .execute()
+                .data
+            )
             reg_meta = (reg_row or {}).get("metadata") or {}
             if reg_meta.get("dockerfile_path"):
                 iac_ctx["file_path"] = reg_meta["dockerfile_path"]
-                iac_ctx["working_directory"] = reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+                iac_ctx["working_directory"] = (
+                    reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+                )
         except Exception:  # noqa: BLE001, S110
             pass  # Fall through to hardcoded default in ImageStrategy
         # Also set resource_name to the image ref from raw target (e.g. "vuln-java-image:latest")
@@ -760,8 +770,11 @@ def _load_raw_finding(sb: Any, raw_finding_id: int | None) -> dict | None:
     # Fallback: try public schema
     try:
         from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
+
         sb_pub = _sb_pub()
-        resp = sb_pub.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
+        resp = (
+            sb_pub.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
+        )
         rows = resp.data or []
         return (rows[0] or {}).get("raw") if rows else None
     except Exception:  # noqa: BLE001

@@ -126,17 +126,17 @@ class Settings(BaseSettings):
     # --- Jira settings (used when provider = "jira") ---
     # These can alternatively live in ticketing_connections.config per-row,
     # but env vars are convenient for single-instance setups.
-    jira_base_url: str = ""          # e.g. https://yourcompany.atlassian.net
-    jira_user_email: str = ""        # API token owner email
-    jira_api_token: str = ""         # Atlassian API token
-    jira_project_key: str = ""       # e.g. "SEC" or "VULN"
+    jira_base_url: str = ""  # e.g. https://yourcompany.atlassian.net
+    jira_user_email: str = ""  # API token owner email
+    jira_api_token: str = ""  # Atlassian API token
+    jira_project_key: str = ""  # e.g. "SEC" or "VULN"
 
     # --- ServiceNow OAuth2 credentials (password grant) ---
     servicenow_client_id: str = ""
     servicenow_client_secret: str = ""
 
     # --- ServiceNow settings (used when provider = "servicenow") ---
-    servicenow_instance_url: str = ""   # e.g. https://yourcompany.service-now.com
+    servicenow_instance_url: str = ""  # e.g. https://yourcompany.service-now.com
     servicenow_username: str = ""
     servicenow_password: str = ""
     servicenow_assignment_group: str = ""

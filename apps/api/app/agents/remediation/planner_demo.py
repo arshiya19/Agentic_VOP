@@ -332,11 +332,21 @@ def _plan_and_enrich(
             source = (issue.get("source") or "").lower()
             if not agent_issue.get("file_path") and "trivy-image" in source:
                 try:
-                    reg_row = sb_pub.table("connection_registry").select("metadata").eq("tool", issue.get("source")).single().execute().data
+                    reg_row = (
+                        sb_pub.table("connection_registry")
+                        .select("metadata")
+                        .eq("tool", issue.get("source"))
+                        .single()
+                        .execute()
+                        .data
+                    )
                     reg_meta = (reg_row or {}).get("metadata") or {}
                     if reg_meta.get("dockerfile_path"):
                         agent_issue["file_path"] = reg_meta["dockerfile_path"]
-                        agent_issue["working_directory"] = reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+                        agent_issue["working_directory"] = (
+                            reg_meta.get("build_directory")
+                            or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+                        )
                     # Also set resource_name to image ref from raw target
                     if not agent_issue.get("resource_name") and raw:
                         target = raw.get("target") or raw.get("Target") or ""

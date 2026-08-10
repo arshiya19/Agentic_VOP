@@ -458,9 +458,7 @@ class TicketingConnectionCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal[
-        "servicenow", "jira", "azure_devops", "monday", "slack", "teams", "webhook"
-    ]
+    provider: Literal["servicenow", "jira", "azure_devops", "monday", "slack", "teams", "webhook"]
     display_name: str = Field(..., min_length=1, max_length=200)
     enabled: bool = True
     config: dict[str, Any] = Field(default_factory=dict)
