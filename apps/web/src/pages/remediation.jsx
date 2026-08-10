@@ -186,7 +186,7 @@ export default function Remediation() {
 
   const handleApprove = useCallback(async (id) => {
     try {
-      const res = await fetch(`${API_URL}/admin/remediation-packages/${id}/approve`, {
+      const res = await fetch(`${apiBase}/${id}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approved_by: 'demo-user@acmecorp.com' }),
@@ -195,13 +195,13 @@ export default function Remediation() {
       showToast('success', `Package ${id} approved → ready for execution`)
       await refreshList()
       if (selectedId === id) {
-        const refreshed = await fetch(`${API_URL}/admin/remediation-packages/${id}`).then(r => r.json())
+        const refreshed = await fetch(`${apiBase}/${id}`).then(r => r.json())
         setDetail(refreshed)
       }
     } catch (e) {
       showToast('error', `Approve failed: ${e.message}`)
     }
-  }, [refreshList, selectedId, showToast])
+  }, [refreshList, selectedId, showToast, apiBase])
 
   const handleReject = useCallback(async (id) => {
     const reason = window.prompt('Reject reason (will be saved on the package):')
@@ -210,7 +210,7 @@ export default function Remediation() {
       return
     }
     try {
-      const res = await fetch(`${API_URL}/admin/remediation-packages/${id}/reject`, {
+      const res = await fetch(`${apiBase}/${id}/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: reason.trim(), rejected_by: 'demo-user@acmecorp.com' }),
@@ -219,13 +219,13 @@ export default function Remediation() {
       showToast('success', `Package ${id} rejected`)
       await refreshList()
       if (selectedId === id) {
-        const refreshed = await fetch(`${API_URL}/admin/remediation-packages/${id}`).then(r => r.json())
+        const refreshed = await fetch(`${apiBase}/${id}`).then(r => r.json())
         setDetail(refreshed)
       }
     } catch (e) {
       showToast('error', `Reject failed: ${e.message}`)
     }
-  }, [refreshList, selectedId, showToast])
+  }, [refreshList, selectedId, showToast, apiBase])
 
   const statusCounts = useMemo(() => {
     const out = { all: packages.length, awaiting_approval: 0, ready_for_execution: 0, rejected: 0 }
@@ -505,7 +505,7 @@ function StatusPill({ status }) {
 
 
 // =============================================================================
-// Detail drawer — the demo's hero view
+// Horizontal Detail Card — replaces the old right-side drawer
 // =============================================================================
 
 function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
@@ -514,269 +514,528 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
   const isTerminal = pkg?.status === 'ready_for_execution' || pkg?.status === 'rejected'
   const [ticketLoading, setTicketLoading] = useState(false)
   const [ticket, setTicket] = useState(null)
+  const [copied, setCopied] = useState(false)
+  const [activePath, setActivePath] = useState(0)
+  const [localApproved, setLocalApproved] = useState(false)
+
+  // Effective status: if locally approved, treat as ready_for_execution
+  const effectiveStatus = localApproved ? 'ready_for_execution' : pkg?.status
+  const effectiveTerminal = effectiveStatus === 'ready_for_execution' || effectiveStatus === 'rejected'
+
+  const handleCopy = (text) => {
+    navigator.clipboard.writeText(text).catch(() => {})
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  // Build upgrade steps from pathway remediation_steps
+  const steps = pw?.remediation_steps?.map((s, i) => ({
+    version: `${i + 1}.0.0`,
+    action: s.step,
+    source: s.source,
+    source_url: s.source_url,
+    time: '—',
+    complexity: i === 0 ? 'Medium' : 'Easy',
+    validated: vm?.status === 'validated',
+  })) || []
+
+  // Build evidence text from validation tests or confidence info
+  const evidenceText = pw?.validation_tests?.length
+    ? pw.validation_tests.map(t => `# ${t.name}\n${t.command}\n# Expected: ${t.expected}`).join('\n\n')
+    : `# Remediation Package #${pkg?.id}\n# Family: ${pkg?.family || '—'}\n# Status: ${pkg?.status || '—'}\n# Confidence: ${pw?.confidence_score || '—'}/100\n# Coverage: ${pw?.security_coverage || '—'}`
+
+  if (loading || !pkg) {
+    return (
+      <div className="remediation-detail-overlay" onClick={onClose}>
+        <div className="remediation-detail-card horizontal" onClick={(e) => e.stopPropagation()}>
+          <div className="detail-card-left" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div className="rmp-empty">Loading…</div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div className="rmp-drawer-overlay" onClick={onClose}>
-      <div className="rmp-drawer" onClick={(e) => e.stopPropagation()}>
-        <button className="rmp-drawer-close" onClick={onClose}>×</button>
+    <div className="remediation-detail-overlay" onClick={onClose}>
+      <div className="remediation-detail-card horizontal" onClick={(e) => e.stopPropagation()}>
+        {/* Left Section */}
+        <div className="detail-card-left">
+          <div className="detail-card-header">
+            <div className="detail-issue-info">
+              <span className="detail-issue-id">#{pkg.id}</span>
+              <span className={`detail-severity ${(pkg.family || '').includes('vuln') ? 'high' : 'medium'}`}>
+                {FAMILY_LABEL[pkg.family] || pkg.family}
+              </span>
+            </div>
+            <StatusPill status={pkg.status} />
+          </div>
 
-        {loading || !pkg ? (
-          <div className="rmp-drawer-body"><div className="rmp-empty">Loading…</div></div>
-        ) : (
-          <>
-            <header className="rmp-drawer-header">
-              <div className="rmp-drawer-title">
-                <span className="rmp-drawer-id">#{pkg.id}</span>
-                <span className="rmp-family-chip">{FAMILY_LABEL[pkg.family] || pkg.family}</span>
-                <StatusPill status={pkg.status} />
+          <div className="detail-meta-grid">
+            <div className="detail-meta-item">
+              <span className="meta-label">Finding</span>
+              <span className="meta-value">{pkg.finding}</span>
+            </div>
+            <div className="detail-meta-item">
+              <span className="meta-label">Root Cause</span>
+              <span className="meta-value">{pkg.root_cause}</span>
+            </div>
+            <div className="detail-meta-row">
+              <div className="detail-meta-item">
+                <span className="meta-label">Impact</span>
+                <span className="meta-value">{pkg.impact}</span>
               </div>
-              <div className="rmp-drawer-meta">
-                Issue {pkg.issue_id}  •  Created {formatDate(pkg.created_at)}
-                {pkg.approved_by && <>  •  by {pkg.approved_by}</>}
+              <div className="detail-meta-item">
+                <span className="meta-label">Issue ID</span>
+                <span className="meta-value">{pkg.issue_id}</span>
               </div>
-            </header>
+            </div>
+            <div className="detail-meta-row">
+              <div className="detail-meta-item">
+                <span className="meta-label">Change Type</span>
+                <span className="meta-value change-type">{pkg.family === 'vulnerable_dependency' ? 'UPGRADE' : pkg.family === 'public_exposure' || pkg.family === 'network_exposure' ? 'CONFIG' : pkg.family === 'injection' ? 'CODE_CHANGE' : 'UPGRADE'}</span>
+              </div>
+              <div className="detail-meta-item">
+                <span className="meta-label">Asset Name</span>
+                <span className="meta-value change-type">{pkg.asset_name || `asset-${pkg.issue_id}`}</span>
+              </div>
+            </div>
+            <div className="detail-meta-row">
+              <div className="detail-meta-item">
+                <span className="meta-label">Date Found</span>
+                <span className="meta-value">{formatDate(pkg.created_at)}</span>
+              </div>
+              <div className="detail-meta-item">
+                <span className="meta-label">First Detected</span>
+                <span className="meta-value">{formatDate(pkg.first_detected || pkg.created_at)}</span>
+              </div>
+            </div>
+            <div className="detail-meta-row">
+              <div className="detail-meta-item">
+                <span className="meta-label">Created</span>
+                <span className="meta-value">{formatDate(pkg.created_at)}</span>
+              </div>
+              <div className="detail-meta-item">
+                <span className="meta-label">Approval</span>
+                <span className="meta-value">{APPROVAL_LABEL[pkg.approval_required] || pkg.approval_required}</span>
+              </div>
+            </div>
+          </div>
 
-            <div className="rmp-drawer-body">
-              <section className="rmp-section">
-                <h3>Finding</h3>
-                <p>{pkg.finding}</p>
-              </section>
-              <section className="rmp-section">
-                <h3>Root Cause</h3>
-                <p>{pkg.root_cause}</p>
-              </section>
-              <section className="rmp-section">
-                <h3>Impact</h3>
-                <p>{pkg.impact}</p>
-              </section>
+          {/* Change Detail Table — Before/After format */}
+          {pw && (
+            <div className="code-diff-container">
+              <div className="code-diff-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="17 1 21 5 17 9"></polyline>
+                  <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                  <polyline points="7 23 3 19 7 15"></polyline>
+                  <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                </svg>
+                <span>Remediation Details</span>
+              </div>
+              <div className="change-detail-body">
+                <table className="change-detail-table">
+                  <thead>
+                    <tr>
+                      <th>Setting</th>
+                      <th>Before</th>
+                      <th>After</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="change-label">Security Coverage</td>
+                      <td className="change-before">Vulnerable</td>
+                      <td className="change-after">{pw.security_coverage || 'Complete'}</td>
+                    </tr>
+                    <tr>
+                      <td className="change-label">Confidence Score</td>
+                      <td className="change-before">—</td>
+                      <td className="change-after">{pw.confidence_score || '—'}/100</td>
+                    </tr>
+                    <tr>
+                      <td className="change-label">Rollback</td>
+                      <td className="change-before">N/A</td>
+                      <td className="change-after">{pw.rollback_plan?.supported ? 'Supported' : 'Not Supported'}</td>
+                    </tr>
+                    {pw.execution_strategy && (
+                      <tr>
+                        <td className="change-label">Strategy</td>
+                        <td className="change-before">Unresolved</td>
+                        <td className="change-after">{pw.execution_strategy.slice(0, 60)}…</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
-              {pw && (
-                <section className="rmp-section">
-                  <div className="rmp-section-titlebar">
-                    <h3>Recommended Pathway</h3>
-                    <span className={`rmp-coverage-chip cov-${pw.security_coverage}`}>
-                      {pw.security_coverage} coverage
-                    </span>
+          {/* Rollback Plan */}
+          {pw?.rollback_plan && (
+            <div className="code-diff-container">
+              <div className="code-diff-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="1 4 1 10 7 10"></polyline>
+                  <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                </svg>
+                <span>Rollback Plan</span>
+                <span className={`step-validated-tag ${pw.rollback_plan.supported ? 'validated' : 'not-validated'}`} style={{ marginLeft: 'auto' }}>
+                  {pw.rollback_plan.supported ? 'supported' : 'not supported'}
+                </span>
+              </div>
+              <div className="change-detail-body" style={{ maxHeight: 180 }}>
+                {pw.rollback_plan.objective && <p style={{ margin: '0 8px 8px', fontSize: 11, color: '#94A3B8', fontStyle: 'italic' }}>{pw.rollback_plan.objective}</p>}
+                {pw.rollback_plan.steps?.length > 0 && (
+                  <ol style={{ margin: '0 8px', paddingLeft: 18, fontSize: 11, color: '#E2E8F0', lineHeight: 1.7 }}>
+                    {pw.rollback_plan.steps.map((s, i) => (
+                      <li key={i}>{s.step}</li>
+                    ))}
+                  </ol>
+                )}
+                {pw.rollback_plan.limitations?.length > 0 && (
+                  <ul style={{ margin: '8px 8px 0', paddingLeft: 18, fontSize: 10, color: '#F59E0B', lineHeight: 1.6 }}>
+                    {pw.rollback_plan.limitations.map((x, i) => <li key={i}>{x}</li>)}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Validation Tests */}
+          {pw?.validation_tests?.length > 0 && (
+            <div className="code-diff-container">
+              <div className="code-diff-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="9 11 12 14 22 4"></polyline>
+                  <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                </svg>
+                <span>Validation Tests ({pw.validation_tests.length})</span>
+              </div>
+              <div className="change-detail-body" style={{ maxHeight: 160 }}>
+                {pw.validation_tests.map((t, i) => (
+                  <div key={i} style={{ padding: '6px 8px', borderBottom: i < pw.validation_tests.length - 1 ? '1px solid #1E293B' : 'none' }}>
+                    <div style={{ fontSize: 11, color: '#E2E8F0', fontWeight: 600, marginBottom: 3 }}>{t.name}</div>
+                    <pre style={{ margin: 0, fontSize: 10, color: '#6EE7B7', background: '#0B0F19', padding: '4px 6px', borderRadius: 3, whiteSpace: 'pre-wrap' }}>{t.command}</pre>
+                    <div style={{ fontSize: 10, color: '#64748B', marginTop: 2 }}>Expected: {t.expected}</div>
                   </div>
-                  <p className="rmp-objective">{pw.objective}</p>
+                ))}
+              </div>
+            </div>
+          )}
 
-                  {/* Remediation steps — collapsible, open by default (headline content) */}
-                  <details className="rmp-collapsible" open>
-                    <summary>Remediation Steps ({pw.remediation_steps?.length || 0})</summary>
-                    <ol className="rmp-steps">
-                      {pw.remediation_steps?.map((s, i) => (
-                        <li key={i}>
-                          <div className="rmp-step-text">{s.step}</div>
-                          <SourceLink source={s.source} url={s.source_url} />
-                        </li>
-                      ))}
-                    </ol>
-                  </details>
+          {/* Test Scripts */}
+          {pw?.test_scripts?.length > 0 && (
+            <div className="code-diff-container">
+              <div className="code-diff-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="16 18 22 12 16 6"></polyline>
+                  <polyline points="8 6 2 12 8 18"></polyline>
+                </svg>
+                <span>Test Scripts ({pw.test_scripts.length})</span>
+              </div>
+              <div className="change-detail-body" style={{ maxHeight: 200 }}>
+                {pw.test_scripts.map((ts, i) => (
+                  <div key={i} style={{ padding: '6px 8px', borderBottom: i < pw.test_scripts.length - 1 ? '1px solid #1E293B' : 'none' }}>
+                    <div style={{ fontSize: 10, color: '#94A3B8', marginBottom: 3 }}>{ts.language} — {ts.description}</div>
+                    <pre style={{ margin: 0, fontSize: 10, color: '#6EE7B7', background: '#0B0F19', padding: '6px 8px', borderRadius: 3, whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto' }}>{ts.code}</pre>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
-                  {/* Rollback plan — collapsible, closed by default (secondary content) */}
-                  {pw.rollback_plan && (
-                    <details className="rmp-collapsible">
-                      <summary>
-                        Rollback Plan
-                        <span className={`rmp-supported-chip ${pw.rollback_plan.supported ? 'good' : 'bad'}`}>
-                          {pw.rollback_plan.supported ? 'supported' : 'not supported'}
-                        </span>
-                      </summary>
-                      <div className="rmp-rollback">
-                        <p className="rmp-objective">{pw.rollback_plan.objective}</p>
-                        {pw.rollback_plan.preconditions?.length > 0 && (
-                          <>
-                            <h5>Preconditions</h5>
-                            <ul>{pw.rollback_plan.preconditions.map((x, i) => <li key={i}>{x}</li>)}</ul>
-                          </>
-                        )}
-                        {pw.rollback_plan.steps?.length > 0 && (
-                          <>
-                            <h5>Steps</h5>
-                            <ol className="rmp-steps">
-                              {pw.rollback_plan.steps.map((s, i) => (
-                                <li key={i}>
-                                  <div className="rmp-step-text">{s.step}</div>
-                                  <SourceLink source={s.source} url={s.source_url} />
-                                </li>
-                              ))}
-                            </ol>
-                          </>
-                        )}
-                        {pw.rollback_plan.limitations?.length > 0 && (
-                          <>
-                            <h5>Limitations</h5>
-                            <ul>{pw.rollback_plan.limitations.map((x, i) => <li key={i}>{x}</li>)}</ul>
-                          </>
-                        )}
-                        {pw.rollback_plan.explanation && (
-                          <>
-                            <h5>Explanation</h5>
-                            <p className="rmp-explanation">{pw.rollback_plan.explanation}</p>
-                          </>
-                        )}
+          {/* Confidence Breakdown */}
+          {pw?.confidence_components && (
+            <div className="code-diff-container">
+              <div className="code-diff-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M12 20V10"></path>
+                  <path d="M18 20V4"></path>
+                  <path d="M6 20v-4"></path>
+                </svg>
+                <span>Confidence: {pw.confidence_score}/100</span>
+              </div>
+              <div className="change-detail-body" style={{ maxHeight: 180 }}>
+                <table className="change-detail-table">
+                  <thead>
+                    <tr>
+                      <th>Component</th>
+                      <th>Score</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(pw.confidence_components).map(([name, comp]) => (
+                      <tr key={name}>
+                        <td className="change-label">{name.replace(/_/g, ' ')}</td>
+                        <td className="change-after">{comp.score}/{comp.max_score}</td>
+                        <td style={{ fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>{comp.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Execution Strategy + Advantages/Considerations */}
+          {pw?.execution_strategy && (
+            <div className="code-diff-container">
+              <div className="code-diff-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <polyline points="12 6 12 12 16 14"></polyline>
+                </svg>
+                <span>Execution Strategy</span>
+              </div>
+              <div style={{ padding: '12px 14px' }}>
+                <p style={{ margin: 0, fontSize: 12, color: '#E2E8F0', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{pw.execution_strategy}</p>
+
+                {(pw.advantages?.length > 0 || pw.considerations?.length > 0) && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 14, paddingTop: 12, borderTop: '1px solid #1E293B' }}>
+                    {pw.advantages?.length > 0 && (
+                      <div style={{ background: 'rgba(16,185,129,0.06)', borderRadius: 6, padding: '10px 12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: '#10B981', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Advantages</span>
+                        </div>
+                        <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, color: '#6EE7B7', lineHeight: 1.8, listStyleType: 'none' }}>
+                          {pw.advantages.map((x, i) => <li key={i} style={{ position: 'relative', paddingLeft: 10 }}><span style={{ position: 'absolute', left: 0, color: '#10B981' }}>+</span>{x}</li>)}
+                        </ul>
                       </div>
-                    </details>
-                  )}
-
-                  {/* Validation tests + test scripts */}
-                  {pw.validation_tests?.length > 0 && (
-                    <details className="rmp-collapsible">
-                      <summary>Validation Tests ({pw.validation_tests.length})</summary>
-                      <ul className="rmp-tests">
-                        {pw.validation_tests.map((t, i) => (
-                          <li key={i}>
-                            <div className="rmp-test-name">{t.name}</div>
-                            <pre className="rmp-test-cmd">{t.command}</pre>
-                            <div className="rmp-test-exp">Expected: {t.expected}</div>
-                            <SourceLink source={t.source} />
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
-
-                  {pw.test_scripts?.length > 0 && (
-                    <details className="rmp-collapsible">
-                      <summary>Test Scripts ({pw.test_scripts.length})</summary>
-                      {pw.test_scripts.map((ts, i) => (
-                        <div key={i} className="rmp-script">
-                          <div className="rmp-script-meta">{ts.language} — {ts.description}</div>
-                          <pre className="rmp-script-code">{ts.code}</pre>
+                    )}
+                    {pw.considerations?.length > 0 && (
+                      <div style={{ background: 'rgba(245,158,11,0.06)', borderRadius: 6, padding: '10px 12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: '#F59E0B', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Considerations</span>
                         </div>
-                      ))}
-                    </details>
-                  )}
-
-                  {/* Confidence breakdown */}
-                  {pw.confidence_components && (
-                    <div className="rmp-confidence-block">
-                      <h4>Confidence: {pw.confidence_score}/100</h4>
-                      <div className="rmp-conf-grid">
-                        {Object.entries(pw.confidence_components).map(([name, comp]) => (
-                          <div key={name} className="rmp-conf-row">
-                            <div className="rmp-conf-name">{name.replace(/_/g, ' ')}</div>
-                            <div className="rmp-conf-bar wide">
-                              <div className="rmp-conf-fill" style={{ width: `${(comp.score / comp.max_score) * 100}%` }} />
-                            </div>
-                            <div className="rmp-conf-val">{comp.score}/{comp.max_score}</div>
-                            <div className="rmp-conf-reason">{comp.reason}</div>
-                          </div>
-                        ))}
+                        <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, color: '#FCD34D', lineHeight: 1.8, listStyleType: 'none' }}>
+                          {pw.considerations.map((x, i) => <li key={i} style={{ position: 'relative', paddingLeft: 10 }}><span style={{ position: 'absolute', left: 0, color: '#F59E0B' }}>–</span>{x}</li>)}
+                        </ul>
                       </div>
-                    </div>
-                  )}
-
-                  {/* Execution strategy + advantages/considerations */}
-                  <h4>Execution Strategy</h4>
-                  <p>{pw.execution_strategy}</p>
-
-                  {(pw.advantages?.length > 0 || pw.considerations?.length > 0) && (
-                    <div className="rmp-adv-grid">
-                      {pw.advantages?.length > 0 && (
-                        <div>
-                          <h5 className="good">Advantages</h5>
-                          <ul>{pw.advantages.map((x, i) => <li key={i}>+ {x}</li>)}</ul>
-                        </div>
-                      )}
-                      {pw.considerations?.length > 0 && (
-                        <div>
-                          <h5 className="warn">Considerations</h5>
-                          <ul>{pw.considerations.map((x, i) => <li key={i}>– {x}</li>)}</ul>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {/* Validation metadata footer */}
-              {vm && (
-                <section className="rmp-section rmp-validation-footer">
-                  <div className="rmp-vm-line">
-                    <span className={`rmp-validation-pill ${VALIDATION_TONE[vm.status] || 'warn'}`}>
-                      Validation: {vm.status}
-                    </span>
-                    <span className="rmp-vm-conf">Confidence: {vm.confidence}</span>
-                    <span className="rmp-vm-when">{formatDate(vm.timestamp)}</span>
+                    )}
                   </div>
-                  <div className="rmp-vm-sources">
-                    📖 {vm.sources?.join(' · ')}
-                  </div>
-                </section>
-              )}
+                )}
+              </div>
+            </div>
+          )}
 
-              {pkg.rejected_reason && (
-                <section className="rmp-section rejected-section">
-                  <h4 className="bad">Rejection Reason</h4>
-                  <p>{pkg.rejected_reason}</p>
-                </section>
+          {/* Validation Metadata Footer */}
+          {vm && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '8px 0', borderTop: '1px solid #1E293B', marginTop: 8 }}>
+              <span className={`step-validated-tag ${vm.status === 'validated' ? 'validated' : 'not-validated'}`}>
+                Validation: {vm.status}
+              </span>
+              <span style={{ fontSize: 10, color: '#64748B' }}>Confidence: {vm.confidence}</span>
+              <span style={{ fontSize: 10, color: '#64748B' }}>{formatDate(vm.timestamp)}</span>
+              {vm.sources?.length > 0 && (
+                <div style={{ flex: '1 0 100%', fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
+                  📖 {vm.sources.join(' · ')}
+                </div>
               )}
             </div>
+          )}
 
-            {/* Footer actions */}
-            <footer className="rmp-drawer-footer">
-              {isTerminal ? (
-                <div className="rmp-terminal-state">
-                  {pkg.status === 'ready_for_execution' ? (
-                    <>
-                      <span>✓ Approved — Ready for Execution</span>
-                      {ticket ? (
-                        <div className="rmp-ticket-info">
-                          {ticket.status === 'created' ? (
-                            <a
-                              href={ticket.external_ticket_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="rmp-ticket-link"
-                            >
-                              🎫 {ticket.external_ticket_id || 'Ticket'} ↗
-                            </a>
-                          ) : ticket.status === 'failed' ? (
-                            <span className="rmp-ticket-error">⚠ Ticket creation failed: {ticket.error_message}</span>
-                          ) : (
-                            <span className="rmp-ticket-pending">⏳ Creating ticket…</span>
-                          )}
-                        </div>
-                      ) : (
-                        <button
-                          className="rmp-btn rmp-btn-ticket"
-                          disabled={ticketLoading}
-                          onClick={async () => {
-                            setTicketLoading(true)
-                            try {
-                              const res = await fetch(
-                                `${API_URL}/admin/remediation-packages/${pkg.id}/create-ticket`,
-                                { method: 'POST', headers: { 'Content-Type': 'application/json' } }
-                              )
-                              if (!res.ok) {
-                                const err = await res.json().catch(() => ({}))
-                                throw new Error(err.detail || `HTTP ${res.status}`)
-                              }
-                              const data = await res.json()
-                              setTicket(data)
-                            } catch (e) {
-                              setTicket({ status: 'failed', error_message: e.message })
-                            } finally {
-                              setTicketLoading(false)
-                            }
-                          }}
-                        >
-                          {ticketLoading ? '⏳ Creating…' : '🎫 Create ServiceNow Ticket'}
-                        </button>
-                      )}
-                    </>
-                  ) : '✗ Rejected'}
+          {/* Evidence Section */}
+          <div className="detail-evidence-section">
+            <div className="evidence-header">
+              <div className="evidence-header-row">
+                <div className="evidence-header-left">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                  </svg>
+                  <span>Evidence</span>
                 </div>
-              ) : (
-                <>
-                  <button className="rmp-btn rmp-btn-reject" onClick={onReject}>Reject</button>
-                  <button className="rmp-btn rmp-btn-approve" onClick={onApprove}>✓ Approve</button>
-                </>
+                <button
+                  className={`evidence-copy-btn ${copied ? 'copied' : ''}`}
+                  onClick={() => handleCopy(evidenceText)}
+                  title="Copy to clipboard"
+                >
+                  {copied ? (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+            <div className="evidence-content">
+              <pre className="evidence-code">{evidenceText}</pre>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Section — Upgrade Steps */}
+        <div className="detail-card-right">
+          {/* Close button — top right of card */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', flexShrink: 0 }}>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#64748B', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+
+          {/* Path Tabs: Direct Fix, Stepped Fix, Workaround */}
+          <div className="path-tabs-container">
+            <div className="path-tabs-row">
+              {[
+                { name: 'Direct Fix', coverage: '100%', description: 'Full remediation in one step' },
+                { name: 'Stepped Fix', coverage: '100%', description: 'Incremental remediation' },
+                { name: 'Workaround', coverage: '60%', description: 'Mitigates risk without full fix' },
+              ].map((path, idx) => (
+                <button
+                  key={path.name}
+                  className={`path-tab ${activePath === idx ? 'active' : ''}`}
+                  onClick={() => setActivePath(idx)}
+                >
+                  {path.name}
+                </button>
+              ))}
+            </div>
+            <div className={`path-coverage ${activePath === 2 ? 'partial' : 'full'}`}>
+              {activePath === 0 && 'Fixes 100% — Full remediation in one step'}
+              {activePath === 1 && 'Fixes 100% — Incremental remediation'}
+              {activePath === 2 && 'Mitigates 60% — Mitigates risk without full fix'}
+            </div>
+          </div>
+
+          <div className="upgrade-steps-section">
+            <h4>
+              {activePath === 0 ? 'Direct Fix Steps' : activePath === 1 ? 'Stepped Fix' : 'Workaround Steps'}
+            </h4>
+            <div className="upgrade-steps-list">
+              {steps.length > 0 ? steps.map((step, index) => (
+                <div key={index} className="upgrade-step-item">
+                  <div className="step-number">{index + 1}</div>
+                  <div className="step-content">
+                    <div className="step-version-row">
+                      <span className="version-tag">Step {index + 1}</span>
+                      {step.source && (
+                        <span className="step-time-inline">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                          </svg>
+                          {step.source}
+                        </span>
+                      )}
+                    </div>
+                    <div className="step-action">{step.action}</div>
+                    <div className="step-meta-row-inline">
+                      <div className="step-meta-inline-item">
+                        <span className="step-meta-label">Complexity</span>
+                        <span className="step-complexity-tag" style={{
+                          background: step.complexity === 'Medium' ? 'rgba(245,158,11,0.2)' : 'rgba(16,185,129,0.2)',
+                          color: step.complexity === 'Medium' ? '#F59E0B' : '#10B981',
+                          borderColor: step.complexity === 'Medium' ? 'rgba(245,158,11,0.4)' : 'rgba(16,185,129,0.4)',
+                        }}>
+                          {step.complexity}
+                        </span>
+                      </div>
+                      <div className="step-meta-inline-item">
+                        <span className="step-meta-label">Status</span>
+                        <span className={`step-validated-tag ${step.validated ? 'validated' : 'not-validated'}`}>
+                          {step.validated ? (
+                            <><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Validated</>
+                          ) : (
+                            <><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg> Pending</>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )) : (
+                <div className="rmp-empty" style={{ padding: '24px 12px' }}>No remediation steps available</div>
               )}
-            </footer>
-          </>
-        )}
+            </div>
+          </div>
+
+          {/* Confidence score */}
+          {pw?.confidence_score && (
+            <div style={{ padding: '12px 0', borderTop: '1px solid #2D3748', marginTop: '12px' }}>
+              <div className={`rmp-conf-cell ${confidenceTone(pw.confidence_score)}`}>
+                <span style={{ fontSize: 11, color: '#64748B', marginRight: 8 }}>Confidence</span>
+                <span className="rmp-conf-num">{pw.confidence_score}</span>
+                <div className="rmp-conf-bar" style={{ flex: 1 }}><div className="rmp-conf-fill" style={{ width: `${pw.confidence_score}%` }} /></div>
+              </div>
+            </div>
+          )}
+
+          {/* Footer actions */}
+          <div className="detail-card-actions">
+            {effectiveTerminal ? (
+              <>
+                {effectiveStatus === 'ready_for_execution' ? (
+                  ticket ? (
+                    ticket.status === 'created' ? (
+                      <a href={ticket.external_ticket_url} target="_blank" rel="noopener noreferrer" className="action-btn primary create-pr-btn" style={{ textDecoration: 'none', textAlign: 'center' }}>
+                        🎫 {ticket.external_ticket_id || 'Ticket'} ↗
+                      </a>
+                    ) : ticket.status === 'failed' ? (
+                      <span className="rmp-ticket-error" style={{ flex: 1, textAlign: 'center' }}>⚠ {ticket.error_message}</span>
+                    ) : null
+                  ) : (
+                    <button
+                      className="action-btn primary create-pr-btn"
+                      disabled={ticketLoading}
+                      onClick={async () => {
+                        setTicketLoading(true)
+                        try {
+                          const res = await fetch(
+                            `${API_URL}/admin/remediation-packages/${pkg.id}/create-ticket`,
+                            { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+                          )
+                          if (!res.ok) {
+                            const err = await res.json().catch(() => ({}))
+                            throw new Error(err.detail || `HTTP ${res.status}`)
+                          }
+                          const data = await res.json()
+                          setTicket(data)
+                        } catch (e) {
+                          setTicket({ status: 'failed', error_message: e.message })
+                        } finally {
+                          setTicketLoading(false)
+                        }
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+                        <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
+                      </svg>
+                      {ticketLoading ? 'Creating…' : 'Create Ticket'}
+                    </button>
+                  )
+                ) : (
+                  <span style={{ flex: 1, textAlign: 'center', color: '#e2876f', fontWeight: 600 }}>✗ Rejected</span>
+                )}
+              </>
+            ) : (
+              <>
+                <button className="action-btn secondary" onClick={onReject}>Reject</button>
+                <button className="action-btn primary create-pr-btn" onClick={() => { setLocalApproved(true); onApprove(); }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  Approve
+                </button>
+              </>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )

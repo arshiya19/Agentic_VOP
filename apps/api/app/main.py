@@ -480,6 +480,57 @@ def get_demo_remediation_package(pkg_id: int) -> dict:
     return resp.data[0]
 
 
+@app.post("/admin/remediation-packages/demo/{pkg_id}/approve")
+def approve_demo_remediation_package(pkg_id: int, body: dict | None = None) -> dict:
+    """Approve a demo package — same logic as the real endpoint but hits the demo DB."""
+    sb = supabase_admin_demo()
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
+    current = resp.data[0]["status"]
+    if current in ("approved", "ready_for_execution"):
+        return {"id": pkg_id, "status": current, "message": "already approved"}
+    if current == "rejected":
+        raise HTTPException(status_code=409, detail="package was rejected; cannot approve")
+
+    approved_by = (body or {}).get("approved_by", "system")
+    sb.table("remediation_packages").update(
+        {
+            "status": "ready_for_execution",
+            "approved_by": approved_by,
+            "approved_at": datetime.now(UTC).isoformat(),
+            "rejected_reason": None,
+        }
+    ).eq("id", pkg_id).execute()
+    return {"id": pkg_id, "status": "ready_for_execution", "approved_by": approved_by}
+
+
+@app.post("/admin/remediation-packages/demo/{pkg_id}/reject")
+def reject_demo_remediation_package(pkg_id: int, body: dict | None = None) -> dict:
+    """Reject a demo package — same logic as the real endpoint but hits the demo DB."""
+    sb = supabase_admin_demo()
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
+    current = resp.data[0]["status"]
+    if current in ("approved", "ready_for_execution"):
+        raise HTTPException(status_code=409, detail=f"package is already {current}; cannot reject")
+    if current == "rejected":
+        return {"id": pkg_id, "status": "rejected", "message": "already rejected"}
+
+    reason = (body or {}).get("reason", "No reason provided")
+    rejected_by = (body or {}).get("rejected_by", "system")
+    sb.table("remediation_packages").update(
+        {
+            "status": "rejected",
+            "rejected_reason": reason,
+            "approved_by": rejected_by,
+            "approved_at": datetime.now(UTC).isoformat(),
+        }
+    ).eq("id", pkg_id).execute()
+    return {"id": pkg_id, "status": "rejected", "reason": reason, "rejected_by": rejected_by}
+
+
 class CancelRunResponse(BaseModel):
     """Summary returned by the cancel-run endpoint."""
 
