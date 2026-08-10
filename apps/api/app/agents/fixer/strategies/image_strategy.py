@@ -548,6 +548,26 @@ class ImageStrategy(BaseFixStrategy):
                 if old_count == 0:
                     # OLD is gone, NEW is present → already fixed
                     return True
+            # Case-insensitive check: if OLD pattern doesn't exist in ANY case,
+            # the sed will no-op regardless. Check if the file has the old
+            # pattern case-insensitively — if not, the fix was already applied
+            # (possibly with different casing). Also check new pattern case-insensitively.
+            escaped_old = old_pattern.replace("'", "'\\''")
+            escaped_new_ci = new_pattern.replace("'", "'\\''")
+            check_old_ci = f"grep -icF '{escaped_old}' '{df_path}' 2>/dev/null || echo 0"
+            r3 = executor.run_command(check_old_ci, timeout_s=30)
+            old_ci_str = (r3.stdout or "").strip().split("\n")[-1]
+            old_ci_count = int(old_ci_str) if old_ci_str.isdigit() else 0
+
+            if old_ci_count == 0:
+                # OLD not present in ANY case — nothing to sed. Check if
+                # new is present (any case) indicating prior fix.
+                check_new_ci = f"grep -icF '{escaped_new_ci}' '{df_path}' 2>/dev/null || echo 0"
+                r4 = executor.run_command(check_new_ci, timeout_s=30)
+                new_ci_str = (r4.stdout or "").strip().split("\n")[-1]
+                new_ci_count = int(new_ci_str) if new_ci_str.isdigit() else 0
+                if new_ci_count > 0:
+                    return True  # NEW present (case-insensitive), OLD gone → fixed
         except Exception:  # noqa: BLE001, S110
             pass  # On any error, don't skip — let the command run normally
 
