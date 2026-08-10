@@ -75,7 +75,6 @@ export default function Remediation() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [toast, setToast] = useState(null)
-  const [ticketStates, setTicketStates] = useState({}) // { [pkg_id]: { loading, status, url, id, error } }
   // Contextual switch: 'real' or 'demo'. Set by Integrations page buttons,
   // overridable via the pill at the top of the page.
   const [pipelineMode, setPipelineMode] = useState(
@@ -511,7 +510,6 @@ function StatusPill({ status }) {
 function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
   const pw = recommendedPathway(pkg)
   const vm = pw?.validation_metadata
-  const isTerminal = pkg?.status === 'ready_for_execution' || pkg?.status === 'rejected'
   const [ticketLoading, setTicketLoading] = useState(false)
   const [ticket, setTicket] = useState(null)
   const [copied, setCopied] = useState(false)

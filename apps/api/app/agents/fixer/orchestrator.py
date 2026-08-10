@@ -249,7 +249,7 @@ def run_fixer(
             if reg_meta.get("dockerfile_path"):
                 iac_ctx["file_path"] = reg_meta["dockerfile_path"]
                 iac_ctx["working_directory"] = reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass  # Fall through to hardcoded default in ImageStrategy
         # Also set resource_name to the image ref from raw target (e.g. "vuln-java-image:latest")
         if not iac_ctx.get("resource_name") and raw:

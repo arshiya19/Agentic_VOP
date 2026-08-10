@@ -179,8 +179,6 @@ class ImageStrategy(BaseFixStrategy):
 
         Returns True if the command should be skipped.
         """
-        import re as _re  # noqa: PLC0415
-
         c = (command or "").strip()
         c_lower = c.lower()
 
@@ -498,7 +496,7 @@ class ImageStrategy(BaseFixStrategy):
                                     # File has a FROM line but not the one grep expects
                                     # → prior fix changed it to something else → already fixed
                                     return True
-                        except Exception:  # noqa: BLE001
+                        except Exception:  # noqa: BLE001, S110
                             pass
             return False
 
@@ -534,7 +532,7 @@ class ImageStrategy(BaseFixStrategy):
                 if old_count == 0:
                     # OLD is gone, NEW is present → already fixed
                     return True
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass  # On any error, don't skip — let the command run normally
 
         return False

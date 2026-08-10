@@ -346,7 +346,7 @@ def _plan_and_enrich(
                     # Inject fix_pattern so SA3 knows the correct fix shape for this image type
                     if reg_meta.get("fix_pattern"):
                         agent_issue["fix_pattern"] = reg_meta["fix_pattern"]
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, S110
                     pass
 
             agent_result = run_agentic_planner(
