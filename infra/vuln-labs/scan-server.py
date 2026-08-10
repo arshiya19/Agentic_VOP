@@ -298,7 +298,13 @@ def run_trivy_image_java():
 
 
 def run_trivy_image_python():
-    """Run Trivy image scan on the Python image and cache results."""
+    """Run Trivy image scan on the Python image and cache results.
+
+    Only includes python-pkg (pip) findings — OS-level Debian packages from the
+    base image are excluded because they're unfixable (Debian Buster is EOL,
+    repos are dead, apt-get update fails). The pip packages are explicitly pinned
+    in the Dockerfile and fixable by removing the version pin + rebuild.
+    """
     try:
         result = subprocess.run(
             ["trivy", "image", PYTHON_IMAGE, "--format", "json", "--scanners", "vuln"],
@@ -307,6 +313,10 @@ def run_trivy_image_python():
         data = json.loads(result.stdout) if result.stdout else {}
         findings = []
         for target_result in data.get("Results", []):
+            # Only include python-pkg (pip) findings — skip OS-level debian packages
+            result_type = (target_result.get("Type") or "").lower()
+            if result_type in ("debian", "ubuntu", "alpine", "redhat", "oracle", "amazon"):
+                continue
             for vuln in target_result.get("Vulnerabilities", []):
                 findings.append({
                     "vuln_id": vuln.get("VulnerabilityID"),
