@@ -285,12 +285,28 @@ def run_fixer(
             f"source={issue_row.get('source')!r})"
         )
 
-    # 5. Sanity: strategy needs a target instance to talk to
+    # 5. Sanity: strategy needs a target instance to talk to.
+    #    For scanners with a dedicated fix target (e.g. trivy-os-al2-ec2 → AL2
+    #    instance), look up target_instance_id from connection_registry.metadata.
+    #    Falls back to the default FIXER_ENV2_INSTANCE_ID for scanners without
+    #    a dedicated target (most cases).
     target_instance_id = cfg.env2_instance_id or ""
+    source = issue_row.get("source") or ""
+    if source:
+        try:
+            from ...db import supabase_admin as _sb_pub_fn  # noqa: PLC0415
+            _sb_pub = _sb_pub_fn()
+            reg_row = _sb_pub.table("connection_registry").select("metadata").eq("tool", source).single().execute().data
+            reg_meta = (reg_row or {}).get("metadata") or {}
+            if reg_meta.get("target_instance_id"):
+                target_instance_id = reg_meta["target_instance_id"]
+        except Exception:  # noqa: BLE001
+            pass  # Fall through to default
+
     if not target_instance_id:
         raise RuntimeError(
-            "FixerConfig.env2_instance_id is not set. Configure "
-            "FIXER_ENV2_INSTANCE_ID in the app's environment before running SA4."
+            "No target instance configured. Set FIXER_ENV2_INSTANCE_ID in env "
+            "or add target_instance_id to the scanner's connection_registry metadata."
         )
 
     # 6. Create the fix_run row (status='pending')

@@ -477,33 +477,96 @@ def _plan_and_enrich(
                 ],
             }
         elif "trivy-os" in source or "tenable" in source or "qualys" in source:
-            payload["execution_context"] = {
-                "target_type": "host_os",
-                "fix_approach": (
-                    "Run apt-get update && apt-get install --only-upgrade <pkg> -y directly on the host. "
-                    "NEVER pin to a specific version — public repos only serve the latest point release. "
-                    "Always use: apt-get install --only-upgrade <pkg> -y (no =<version> suffix)."
-                ),
-                "verification_approach": (
-                    "After upgrade, verify installed version is GREATER than the vulnerable version "
-                    "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version."
-                ),
-                "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
-                "rescan_target": "/ (host root filesystem)",
-                "remediation_steps_rules": (
-                    "Do NOT put the re-scan in remediation_steps. Steps should be: "
-                    "1. apt-get update, 2. apt-get install --only-upgrade <pkg> -y, "
-                    "3. dpkg -l <pkg> (verify). Re-scan goes in validation_tests only."
-                ),
-                "reboot_policy": (
-                    "No reboot unless CVE is in kernel (linux-image-*), libc6, or systemd."
-                ),
-                "prohibited_commands": [
-                    "sudo reboot (unless kernel/libc/systemd CVE)",
-                    "docker build",
-                    "apt-get install <pkg>=<specific_version>",
-                ],
-            }
+            # Detect OS family: AL2/RHEL use yum, Ubuntu/Debian use apt.
+            # Signal comes from the source name (trivy-os-al2 → yum) or
+            # could come from connection_registry metadata in the future.
+            is_yum = "al2" in source or "rhel" in source or "centos" in source or "amazon" in source
+            if is_yum:
+                payload["execution_context"] = {
+                    "target_type": "host_os",
+                    "os_family": "amazon_linux",
+                    "package_manager": "yum",
+                    "fix_approach": (
+                        "Run yum update <pkg> -y directly on the host. "
+                        "NEVER pin to a specific version — yum repos serve the latest available. "
+                        "NEVER use 'yum install <pkg>-<version>' — the exact version likely doesn't exist in AL2 repos. "
+                        "Always use: yum update <pkg> -y (no version suffix, no dash-version). "
+                        "If the package name in the CVE is like 'python3-requests', the yum command is: "
+                        "yum update python3-requests -y (NOT yum install python3-requests-2.32.4 -y)."
+                    ),
+                    "verification_approach": (
+                        "After upgrade, verify installed version using: "
+                        "rpm -q <pkg>. Do NOT check for an exact target version — just confirm the "
+                        "package is installed and the version changed."
+                    ),
+                    "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
+                    "rescan_target": "/ (host root filesystem)",
+                    "rescan_validation_note": (
+                        "CRITICAL SHELL SEMANTICS: grep -c returns exit code 1 when match count is 0 "
+                        "(i.e. when the CVE is GONE — the desired outcome). You MUST append '|| true' to any "
+                        "grep -c command so the exit code is always 0. The validation engine checks the "
+                        "OUTPUT value (expecting '0'), not the exit code. "
+                        "Correct:  trivy rootfs / --format json 2>&1 | grep -c 'CVE-xxx' || true "
+                        "Wrong:    trivy rootfs / --format json | grep -c 'CVE-xxx'"
+                    ),
+                    "remediation_steps_rules": (
+                        "Do NOT put the re-scan in remediation_steps. "
+                        "Steps should be EXACTLY: "
+                        "1. Back up package state (rpm -qa > /tmp/backup.txt), "
+                        "2. yum update <pkg> -y, "
+                        "3. rpm -q <pkg> (verify installed version). "
+                        "That's it — 3 core steps. You may add a 4th step for 'yum clean all' or "
+                        "'yum makecache' BEFORE the update if useful. "
+                        "Do NOT add 'yum versionlock' steps — that plugin is not installed. "
+                        "Do NOT add 'yum update -y' (full system update) — only update the specific package. "
+                        "Do NOT add 'yum update --security' — only update the specific package. "
+                        "Re-scan goes EXCLUSIVELY in validation_tests with is_rescan=true."
+                    ),
+                    "reboot_policy": (
+                        "NEVER reboot. OS package fixes do not require a reboot unless the CVE "
+                        "is in kernel or glibc, and even then the reboot should be in validation_tests "
+                        "not remediation_steps."
+                    ),
+                    "prohibited_commands": [
+                        "sudo reboot / reboot / shutdown / halt / poweroff (severs SSM connection)",
+                        "yum versionlock (plugin not installed on this host — will fail)",
+                        "yum install <pkg>-<specific_version> (exact versions don't exist in AL2 repos — use yum update <pkg> -y instead)",
+                        "yum update -y (full system update — only update the specific vulnerable package)",
+                        "yum update --security (too broad — only update the specific package)",
+                        "docker build (wrong strategy for host OS fix)",
+                        "apt-get / dpkg (wrong package manager for Amazon Linux)",
+                    ],
+                }
+            else:
+                payload["execution_context"] = {
+                    "target_type": "host_os",
+                    "os_family": "debian_ubuntu",
+                    "package_manager": "apt",
+                    "fix_approach": (
+                        "Run apt-get update && apt-get install --only-upgrade <pkg> -y directly on the host. "
+                        "NEVER pin to a specific version — public repos only serve the latest point release. "
+                        "Always use: apt-get install --only-upgrade <pkg> -y (no =<version> suffix)."
+                    ),
+                    "verification_approach": (
+                        "After upgrade, verify installed version is GREATER than the vulnerable version "
+                        "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version."
+                    ),
+                    "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
+                    "rescan_target": "/ (host root filesystem)",
+                    "remediation_steps_rules": (
+                        "Do NOT put the re-scan in remediation_steps. Steps should be: "
+                        "1. apt-get update, 2. apt-get install --only-upgrade <pkg> -y, "
+                        "3. dpkg -l <pkg> (verify). Re-scan goes in validation_tests only."
+                    ),
+                    "reboot_policy": (
+                        "No reboot unless CVE is in kernel (linux-image-*), libc6, or systemd."
+                    ),
+                    "prohibited_commands": [
+                        "sudo reboot (unless kernel/libc/systemd CVE)",
+                        "docker build",
+                        "apt-get install <pkg>=<specific_version>",
+                    ],
+                }
 
         llm_output = invoke_structured_with_retry(
             run_id=run_id,

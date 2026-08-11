@@ -122,6 +122,88 @@ _BLOCKED_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         "Interactive tool (editor/pager) — SSM runs non-interactively and will hang until timeout. "
         "Use `cat >> file << 'EOF' ... EOF` for appends or `sed -i` for in-place edits instead.",
     ),
+    # =========================================================================
+    # Host-level dangerous commands — can sever the SSM connection, render the
+    # instance unreachable, or destroy state that makes the sandbox unrecoverable.
+    # These apply to ALL strategies (OS, image, IaC) generically.
+    # =========================================================================
+    (
+        "reboot-or-shutdown",
+        # Catches: reboot, sudo reboot, shutdown, sudo shutdown, init 6, init 0,
+        # systemctl reboot, systemctl poweroff, halt, poweroff.
+        # Does NOT match strings like "reboot_required" in grep output.
+        re.compile(
+            r"(^|[;&|]\s*)(sudo\s+)?(reboot|shutdown|halt|poweroff)\b"
+            r"|"
+            r"\b(init|telinit)\s+[06]\b"
+            r"|"
+            r"\bsystemctl\s+(reboot|poweroff|halt)\b",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        "Reboot/shutdown severs SSM connection and makes the instance unreachable. "
+        "OS package fixes do NOT require a reboot unless the CVE is in kernel or glibc. "
+        "Remove this step — the fix takes effect immediately for userspace packages.",
+    ),
+    (
+        "stop-ssm-agent",
+        # Stopping the SSM agent kills the communication channel — all
+        # subsequent commands (including rollback) become impossible.
+        re.compile(
+            r"\b(systemctl|service)\s+(stop|disable|mask)\s+(amazon-ssm-agent|ssm-agent|sshd)\b",
+            re.IGNORECASE,
+        ),
+        "Stopping SSM agent or SSHD severs remote access — instance becomes unreachable. "
+        "Never stop the management agent during an automated fix.",
+    ),
+    (
+        "kill-all-or-killall",
+        # `killall` or `kill -9 -1` (kill all processes) would nuke the SSM
+        # session along with everything else.
+        re.compile(
+            r"\bkillall\b|\bkill\s+-9\s+-1\b|\bpkill\s+-9\s+",
+            re.IGNORECASE,
+        ),
+        "Mass process kill (killall / kill -9 -1 / pkill -9) would terminate the SSM session. "
+        "Never appropriate in an automated remediation context.",
+    ),
+    (
+        "network-interface-down",
+        # Taking down the network interface severs connectivity.
+        re.compile(
+            r"\b(ifdown|ip\s+link\s+set\s+\S+\s+down|nmcli\s+.*\s+down)\b",
+            re.IGNORECASE,
+        ),
+        "Taking a network interface down severs connectivity — instance becomes unreachable.",
+    ),
+    (
+        "iptables-drop-all",
+        # Flushing iptables to DROP or adding a blanket DROP rule kills connectivity.
+        re.compile(
+            r"\biptables\s+.*(-P\s+(INPUT|OUTPUT|FORWARD)\s+DROP|-A\s+INPUT\s+-j\s+DROP)",
+            re.IGNORECASE,
+        ),
+        "Blanket iptables DROP policy severs all network connectivity including SSM.",
+    ),
+    (
+        "package-manager-remove-critical",
+        # Removing critical system packages (systemd, glibc, kernel, bash, coreutils)
+        # can brick the instance. Upgrading is fine; removal is not.
+        re.compile(
+            r"\b(apt-get|apt|yum|dnf|rpm)\s+(remove|purge|erase)\s+.*(systemd|glibc|libc6|bash|coreutils|kernel|linux-image|openssh)\b",
+            re.IGNORECASE,
+        ),
+        "Removing critical system packages (systemd, glibc, bash, kernel, openssh) can "
+        "brick the instance. Use upgrade/update instead of remove/purge.",
+    ),
+    (
+        "userdel-root-or-ec2-user",
+        # Deleting the root user or the ec2-user / ssm-user locks out access.
+        re.compile(
+            r"\buserdel\s+.*(root|ec2-user|ssm-user|admin|ubuntu)\b",
+            re.IGNORECASE,
+        ),
+        "Deleting root, ec2-user, ssm-user, or admin user locks out all access.",
+    ),
 ]
 
 

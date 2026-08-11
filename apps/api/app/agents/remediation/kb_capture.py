@@ -164,11 +164,23 @@ def capture_successful_fix(
     if outcome.status != "success":
         return None
 
-    # Guard: all validations must have passed
+    # Guard: at minimum the scanner re-scan must have passed.
+    # The orchestrator marks runs as 'success' when the re-scan passes
+    # even if ancillary CLI checks failed (e.g. yum versionlock, rpm -q
+    # showing same version because AL2 repos are pinned). Match that policy
+    # here — a successful re-scan is authoritative proof the fix worked.
     if outcome.validation_results:
-        all_passed = all(v.passed for v in outcome.validation_results)
-        if not all_passed:
-            return None
+        rescan_results = [v for v in outcome.validation_results if v.is_rescan]
+        if rescan_results:
+            # Re-scan exists — it must have passed (orchestrator guarantees this
+            # for status='success' but belt-and-suspenders)
+            if not all(v.passed for v in rescan_results):
+                return None
+        else:
+            # No re-scan — fall back to strict "all must pass"
+            all_passed = all(v.passed for v in outcome.validation_results)
+            if not all_passed:
+                return None
 
     try:
         row = _build_kb_row(ctx, outcome, confidence_score)

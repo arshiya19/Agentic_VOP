@@ -293,16 +293,17 @@ def classify_finding(issue: dict, raw: dict | None = None) -> Family:
     # points at the wrong SA-4 strategy — dependency-manifest edits, not
     # apt/docker rebuild). The fix shape for these is always os_vulnerability:
     #   - trivy-image → rebuild container with updated base pkgs
-    #   - trivy-os / tenable / qualys → apt/yum upgrade on host
+    #   - trivy-os / trivy-os-al2 / tenable / qualys → apt/yum upgrade on host
     if source in (
         "trivy-image",
         "trivy-os",
+        "trivy-os-al2",
         "snyk-container",
         "grype-image",
         "tenable-nessus-vuln",
         "qualys-vmdr-vuln",
         "rapid7",
-    ):
+    ) or source.startswith("trivy-os"):
         return "os_vulnerability"
 
     # =========================================================================
