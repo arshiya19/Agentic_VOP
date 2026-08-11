@@ -300,7 +300,7 @@ def run_fixer(
             reg_meta = (reg_row or {}).get("metadata") or {}
             if reg_meta.get("target_instance_id"):
                 target_instance_id = reg_meta["target_instance_id"]
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass  # Fall through to default
 
     if not target_instance_id:
