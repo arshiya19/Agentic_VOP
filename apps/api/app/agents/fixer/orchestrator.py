@@ -295,8 +295,16 @@ def run_fixer(
     if source:
         try:
             from ...db import supabase_admin as _sb_pub_fn  # noqa: PLC0415
+
             _sb_pub = _sb_pub_fn()
-            reg_row = _sb_pub.table("connection_registry").select("metadata").eq("tool", source).single().execute().data
+            reg_row = (
+                _sb_pub.table("connection_registry")
+                .select("metadata")
+                .eq("tool", source)
+                .single()
+                .execute()
+                .data
+            )
             reg_meta = (reg_row or {}).get("metadata") or {}
             if reg_meta.get("target_instance_id"):
                 target_instance_id = reg_meta["target_instance_id"]

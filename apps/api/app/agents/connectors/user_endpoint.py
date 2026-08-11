@@ -143,7 +143,9 @@ def fetch(
             for row in rows:
                 pkg = ""
                 if isinstance(row, dict):
-                    pkg = (row.get("PkgName") or row.get("pkg_name") or row.get("pkgName") or "").lower()
+                    pkg = (
+                        row.get("PkgName") or row.get("pkg_name") or row.get("pkgName") or ""
+                    ).lower()
                 if any(f in pkg for f in filters):
                     filtered.append(row)
             rows = filtered

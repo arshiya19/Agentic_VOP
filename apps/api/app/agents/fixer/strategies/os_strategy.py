@@ -118,25 +118,37 @@ class OSStrategy(BaseFixStrategy):
         # because SSM wraps the command. Check stdout content for actual availability.
         try:
             r = executor.run_command("apt-get --version 2>&1 | head -1", timeout_s=30)
-            apt_available = r.exit_code == 0 and "apt" in (r.stdout or "").lower() and "not found" not in (r.stdout or "").lower()
+            apt_available = (
+                r.exit_code == 0
+                and "apt" in (r.stdout or "").lower()
+                and "not found" not in (r.stdout or "").lower()
+            )
 
             if apt_available:
                 self._pkg_mgr = "apt"
-                self._emit(ctx, "MESSAGE", f"✓ Pre-flight: apt available ({(r.stdout or '').strip()[:60]})")
+                self._emit(
+                    ctx, "MESSAGE", f"✓ Pre-flight: apt available ({(r.stdout or '').strip()[:60]})"
+                )
             else:
                 # Try yum
                 r2 = executor.run_command("yum --version 2>&1 | head -1", timeout_s=30)
                 yum_available = r2.exit_code == 0 and "not found" not in (r2.stdout or "").lower()
                 if yum_available:
                     self._pkg_mgr = "yum"
-                    self._emit(ctx, "MESSAGE", f"✓ Pre-flight: yum available ({(r2.stdout or '').strip()[:60]})")
+                    self._emit(
+                        ctx,
+                        "MESSAGE",
+                        f"✓ Pre-flight: yum available ({(r2.stdout or '').strip()[:60]})",
+                    )
                 else:
                     return PreFlightResult(
                         ready=False,
                         blocking_reason="Neither apt-get nor yum available on target",
                     )
         except (RemoteExecError, CommandTimeoutError) as e:
-            return PreFlightResult(ready=False, blocking_reason=f"Package manager probe crashed: {e}")
+            return PreFlightResult(
+                ready=False, blocking_reason=f"Package manager probe crashed: {e}"
+            )
 
         # trivy available
         try:
@@ -223,12 +235,16 @@ class OSStrategy(BaseFixStrategy):
             # These are LLM hallucinations that would fail and trigger rollback
             # unnecessarily — better to skip and let the real fix steps proceed.
             _SKIP_PATTERNS = (
-                "yum versionlock",   # plugin not installed on AL2
-                "apt-mark hold",     # wrong OS family if we're on yum
+                "yum versionlock",  # plugin not installed on AL2
+                "apt-mark hold",  # wrong OS family if we're on yum
                 "dpkg --configure",  # wrong OS family if we're on yum
             )
             if any(pat in lower for pat in _SKIP_PATTERNS):
-                self._emit(ctx, "MESSAGE", f"⏭ Step {i} SKIPPED — command uses unavailable tool ({[p for p in _SKIP_PATTERNS if p in lower][0]})")
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"⏭ Step {i} SKIPPED — command uses unavailable tool ({[p for p in _SKIP_PATTERNS if p in lower][0]})",
+                )
                 ts = utcnow()
                 results.append(
                     StepResult(
@@ -266,11 +282,18 @@ class OSStrategy(BaseFixStrategy):
             # fixing the specific CVE. The LLM sometimes adds "sudo yum update -y"
             # (full update) or "yum update --security" as a blanket step.
             import re as _re  # noqa: PLC0415
+
             lower_combined = combined.lower().strip()
             # Strip sudo prefix for matching
             _cmd_for_match = _re.sub(r"^sudo\s+", "", lower_combined)
-            if _re.search(r"^yum\s+update\s+(-y|--security)\s*$", _cmd_for_match) or _re.search(r"^yum\s+update\s*$", _cmd_for_match):
-                self._emit(ctx, "MESSAGE", f"⏭ Step {i} SKIPPED — broad system update (not targeted to specific package)")
+            if _re.search(r"^yum\s+update\s+(-y|--security)\s*$", _cmd_for_match) or _re.search(
+                r"^yum\s+update\s*$", _cmd_for_match
+            ):
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"⏭ Step {i} SKIPPED — broad system update (not targeted to specific package)",
+                )
                 ts = utcnow()
                 results.append(
                     StepResult(
@@ -312,7 +335,13 @@ class OSStrategy(BaseFixStrategy):
 
             # Timeout: apt-get update / yum update and trivy scans can be slow
             lower_cmd = combined.lower()
-            if "apt-get update" in lower_cmd or "apt update" in lower_cmd or "yum update" in lower_cmd or "yum makecache" in lower_cmd or "yum install" in lower_cmd:
+            if (
+                "apt-get update" in lower_cmd
+                or "apt update" in lower_cmd
+                or "yum update" in lower_cmd
+                or "yum makecache" in lower_cmd
+                or "yum install" in lower_cmd
+            ):
                 timeout = 300
             elif "trivy" in lower_cmd:
                 timeout = 600
@@ -324,7 +353,10 @@ class OSStrategy(BaseFixStrategy):
             except (RemoteExecError, CommandTimeoutError) as e:
                 # For OS strategy: only halt on timeout if it's a core fix command.
                 # Non-critical commands timing out shouldn't kill the whole run.
-                is_core_fix = any(kw in lower_cmd for kw in ("yum update", "yum install", "apt-get install", "apt-get upgrade"))
+                is_core_fix = any(
+                    kw in lower_cmd
+                    for kw in ("yum update", "yum install", "apt-get install", "apt-get upgrade")
+                )
                 ts = utcnow()
                 if is_core_fix:
                     self._emit(ctx, "ERROR", f"✗ Step {i} crashed (core command): {e}")
@@ -342,7 +374,11 @@ class OSStrategy(BaseFixStrategy):
                     )
                     return results
                 else:
-                    self._emit(ctx, "MESSAGE", f"⚠ Step {i} crashed (non-critical, continuing): {str(e)[:100]}")
+                    self._emit(
+                        ctx,
+                        "MESSAGE",
+                        f"⚠ Step {i} crashed (non-critical, continuing): {str(e)[:100]}",
+                    )
                     results.append(
                         StepResult(
                             step_num=i,
@@ -379,9 +415,16 @@ class OSStrategy(BaseFixStrategy):
                 # is critical. Auxiliary steps (lsof, yum check-update, rpm --rebuilddb,
                 # echo to log) failing should NOT halt the run — they're nice-to-have
                 # but the real fix already happened. Continue to let validation decide.
-                is_core_fix = any(kw in lower_cmd for kw in ("yum update", "yum install", "apt-get install", "apt-get upgrade"))
+                is_core_fix = any(
+                    kw in lower_cmd
+                    for kw in ("yum update", "yum install", "apt-get install", "apt-get upgrade")
+                )
                 if is_core_fix:
-                    self._emit(ctx, "ERROR", f"✗ Step {i} FAILED (core fix command) exit={cmd_result.exit_code}")
+                    self._emit(
+                        ctx,
+                        "ERROR",
+                        f"✗ Step {i} FAILED (core fix command) exit={cmd_result.exit_code}",
+                    )
                     results.append(
                         StepResult(
                             step_num=i,
@@ -398,7 +441,11 @@ class OSStrategy(BaseFixStrategy):
                     )
                     return results
                 else:
-                    self._emit(ctx, "MESSAGE", f"⚠ Step {i} exit={cmd_result.exit_code} (non-critical, continuing)")
+                    self._emit(
+                        ctx,
+                        "MESSAGE",
+                        f"⚠ Step {i} exit={cmd_result.exit_code} (non-critical, continuing)",
+                    )
                     results.append(
                         StepResult(
                             step_num=i,
@@ -526,7 +573,9 @@ class OSStrategy(BaseFixStrategy):
             cmd = "yum history undo last -y 2>&1 | tail -10"
             action_desc = "yum history undo last"
         else:
-            cmd = f"dpkg --set-selections < {backup_ref} && apt-get dselect-upgrade -y 2>&1 | tail -5"
+            cmd = (
+                f"dpkg --set-selections < {backup_ref} && apt-get dselect-upgrade -y 2>&1 | tail -5"
+            )
             action_desc = "restore dpkg selections + dselect-upgrade"
 
         results: list[RollbackResult] = []
