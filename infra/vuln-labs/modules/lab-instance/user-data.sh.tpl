@@ -9,9 +9,18 @@ set -e
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Update system packages
-apt-get update -y
-apt-get install -y git curl unzip python3 python3-pip python3-venv nodejs npm docker.io
+# Update system packages (retry up to 3 times on transient mirror failures)
+for i in 1 2 3; do
+  apt-get update -y && break
+  echo "apt-get update failed (attempt $i/3), retrying in 10s..."
+  sleep 10
+done
+for i in 1 2 3; do
+  apt-get install -y --fix-missing git curl unzip python3 python3-pip python3-venv nodejs npm docker.io && break
+  echo "apt-get install failed (attempt $i/3), retrying in 10s..."
+  apt-get update -y
+  sleep 10
+done
 
 # Enable and start Docker
 systemctl enable docker
@@ -198,9 +207,72 @@ cat > /opt/vuln-labs/infra-lab/app.py << 'PYEOF'
 print("placeholder app")
 PYEOF
 
-# Build the vulnerable image
+# Build the vulnerable image (timeout after 5 minutes)
 cd /opt/vuln-labs/infra-lab
-docker build -t vuln-lab-image:latest . 2>/dev/null || true
+timeout 300 docker build -t vuln-lab-image:latest . || echo "WARNING: infra-lab docker build timed out or failed"
+
+# =============================================================================
+# 3b. Java Lab — Old Tomcat + JDK 8 on Debian (for Trivy Image)
+#     Produces JDK CVEs, Tomcat CVEs, and OS-level Debian CVEs.
+#     These do NOT overlap with the SCA lab (which scans pom.xml manifests).
+# =============================================================================
+mkdir -p /opt/vuln-labs/java-image-lab
+cat > /opt/vuln-labs/java-image-lab/Dockerfile << 'JDKREOF'
+# Intentionally outdated Java runtime environment
+# Tomcat 9.0.30 + OpenJDK 8 on Debian Buster — has JDK CVEs, Tomcat CVEs,
+# and Debian OS-level CVEs baked into the base image layers.
+# No apt-get needed — Debian Buster repos are EOL and unavailable.
+FROM tomcat:9.0.30-jdk8-openjdk
+
+# Deploy a placeholder webapp
+RUN mkdir -p /usr/local/tomcat/webapps/ROOT
+RUN echo '<html><body><h1>Vulnerable Java App</h1></body></html>' > /usr/local/tomcat/webapps/ROOT/index.html
+
+# VULN: Running as root (no USER instruction)
+# VULN: No HEALTHCHECK defined
+EXPOSE 8080
+CMD ["catalina.sh", "run"]
+JDKREOF
+
+cd /opt/vuln-labs/java-image-lab
+timeout 300 docker build -t vuln-java-image:latest . || echo "WARNING: java-image-lab docker build timed out or failed"
+
+# =============================================================================
+# 3c. Python Lab — Old Python 3.8 with vulnerable pip packages (for Trivy Image)
+#     Produces OS CVEs (Debian buster) + installed pip package CVEs.
+#     Remediation: update base image or pin newer package versions in Dockerfile.
+# =============================================================================
+mkdir -p /opt/vuln-labs/python-image-lab
+cat > /opt/vuln-labs/python-image-lab/Dockerfile << 'PYDKREOF'
+# Intentionally outdated Python runtime with vulnerable dependencies
+FROM python:3.8-slim-buster
+
+# Install vulnerable pip packages directly into the image
+RUN pip install --no-cache-dir \
+    flask==2.0.0 \
+    jinja2==3.0.0 \
+    requests==2.25.0 \
+    cryptography==3.3.2 \
+    pyyaml==5.3.1 \
+    urllib3==1.26.4 \
+    werkzeug==2.0.0 \
+    setuptools==58.0.0 \
+    pillow==8.1.0 \
+    certifi==2020.12.5
+
+# Add a placeholder app
+RUN mkdir -p /app
+RUN echo 'from flask import Flask; app = Flask(__name__)' > /app/main.py
+
+# VULN: Running as root (no USER instruction)
+# VULN: No HEALTHCHECK defined
+WORKDIR /app
+EXPOSE 5000
+CMD ["python", "main.py"]
+PYDKREOF
+
+cd /opt/vuln-labs/python-image-lab
+timeout 300 docker build -t vuln-python-image:latest . || echo "WARNING: python-image-lab docker build timed out or failed"
 
 # =============================================================================
 # 4. CSPM Lab — Vulnerable Terraform (applied as real AWS resources)
@@ -321,6 +393,8 @@ curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/inst
 pip3 install semgrep --break-system-packages 2>/dev/null || pip3 install semgrep
 
 # Install Checkov
+# Pin argcomplete<3.6 to avoid Python 3.8 incompatibility with argcomplete 3.7+
+pip3 install "argcomplete<3.6" --break-system-packages 2>/dev/null || pip3 install "argcomplete<3.6"
 pip3 install checkov --break-system-packages 2>/dev/null || pip3 install checkov
 %{ endif ~}
 

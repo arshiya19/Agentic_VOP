@@ -1,9 +1,9 @@
 # =============================================================================
-# Vuln Labs — env3 (Remediation Playground)
+# Vuln Labs — env5 (OS Remediation — Amazon Linux 2)
 # =============================================================================
-# This environment runs the same vulnerable applications as env1 but WITHOUT
-# the scan server. Used for applying and validating remediation steps.
-# Scanners are installed for ad-hoc validation (re-run after fix).
+# Replica of env4 for remediation testing.
+# Same OS, Trivy installed for ad-hoc validation, no scan server.
+# SA4 applies fixes here (yum update, etc.) and re-scans to confirm.
 # =============================================================================
 
 terraform {
@@ -32,7 +32,7 @@ provider "aws" {
     tags = {
       Project     = "sisyfix"
       Component   = "vuln-labs"
-      Environment = "env3-remediation"
+      Environment = "env5-os-remediation"
       ManagedBy   = "terraform"
     }
   }
@@ -51,29 +51,26 @@ variable "aws_region" {
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t4g.micro"
+  default     = "t3.small"
 }
 
 # -----------------------------------------------------------------------------
 # Module Instantiation
 # -----------------------------------------------------------------------------
 
-module "lab" {
-  source = "../modules/lab-instance"
+module "os_target" {
+  source = "../modules/os-scan-target"
 
   role                   = "remediation"
-  name_prefix            = "vop-vuln-lab-env3"
+  name_prefix            = "vop-vuln-lab-env5"
   aws_region             = var.aws_region
   instance_type          = var.instance_type
-  install_scanners       = true  # Installed for ad-hoc validation after fixes
-  install_scan_server    = false # No scan server — this is the remediation target
+  install_scan_server    = false # No scan server — ad-hoc only
   terraform_state_bucket = "sisyfix-terraform-state-486655355038"
   terraform_lock_table   = "sisyfix-terraform-locks"
 
-  # Same Ubuntu 20.04 AMI as env1 — keeps host OS identical so Trivy OS
-  # findings (which carry 20.04-specific package versions) can be fixed
-  # via apt-get on this instance without version mismatch failures.
-  ami_override = "ami-0dba2cb6798deb6d8"
+  # Same AMI as env4 — identical OS for remediation testing
+  ami_id = "ami-0b5eea76982371e91"
 }
 
 # -----------------------------------------------------------------------------
@@ -82,20 +79,20 @@ module "lab" {
 
 output "instance_id" {
   description = "EC2 instance ID"
-  value       = module.lab.instance_id
+  value       = module.os_target.instance_id
 }
 
 output "instance_public_ip" {
-  description = "Public IP of the remediation playground instance"
-  value       = module.lab.instance_public_ip
+  description = "Public IP of the OS remediation instance"
+  value       = module.os_target.instance_public_ip
 }
 
 output "security_group_id" {
   description = "Security group ID"
-  value       = module.lab.security_group_id
+  value       = module.os_target.security_group_id
 }
 
 output "ssh_command" {
   description = "SSH command to connect"
-  value       = module.lab.ssh_command
+  value       = module.os_target.ssh_command
 }

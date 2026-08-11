@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
-from lambdas.shared.dynamo_writer import DynamoWriter, WriteResult, BATCH_SIZE
+from lambdas.shared.dynamo_writer import BATCH_SIZE, DynamoWriter, WriteResult
 from lambdas.shared.exceptions import WriteError
 
 
@@ -45,9 +45,7 @@ class TestWriteResult:
         assert result.unprocessed_items == []
 
     def test_custom_values(self):
-        result = WriteResult(
-            items_written=5, items_failed=2, unprocessed_items=[{"pk": "x"}]
-        )
+        result = WriteResult(items_written=5, items_failed=2, unprocessed_items=[{"pk": "x"}])
         assert result.items_written == 5
         assert result.items_failed == 2
         assert result.unprocessed_items == [{"pk": "x"}]
@@ -105,12 +103,8 @@ class TestBatchPutItems:
                 )
             return MagicMock()
 
-        mock_boto3["table"].batch_writer.return_value.__enter__ = lambda self: (
-            side_effect_enter()
-        )
-        mock_boto3["table"].batch_writer.return_value.__exit__ = lambda self, *args: (
-            None
-        )
+        mock_boto3["table"].batch_writer.return_value.__enter__ = lambda self: side_effect_enter()
+        mock_boto3["table"].batch_writer.return_value.__exit__ = lambda self, *args: None
 
         items = [{"pk": "CVE#CVE-2024-0001", "sk": "INTEL"}]
         result = writer.batch_put_items(items)
@@ -120,9 +114,7 @@ class TestBatchPutItems:
         mock_sleep.assert_called_once_with(1)
 
     @patch("lambdas.shared.dynamo_writer.time.sleep")
-    def test_raises_write_error_when_retries_exhausted(
-        self, mock_sleep, writer, mock_boto3
-    ):
+    def test_raises_write_error_when_retries_exhausted(self, mock_sleep, writer, mock_boto3):
         # All attempts raise ClientError
         mock_boto3["table"].batch_writer.return_value.__enter__ = MagicMock(
             side_effect=ClientError(
@@ -130,9 +122,7 @@ class TestBatchPutItems:
                 "BatchWriteItem",
             )
         )
-        mock_boto3["table"].batch_writer.return_value.__exit__ = lambda self, *args: (
-            None
-        )
+        mock_boto3["table"].batch_writer.return_value.__exit__ = lambda self, *args: None
 
         item = {"pk": "CVE#CVE-2024-0001", "sk": "INTEL"}
         with pytest.raises(WriteError) as exc_info:
@@ -150,9 +140,7 @@ class TestBatchPutItems:
                 "BatchWriteItem",
             )
         )
-        mock_boto3["table"].batch_writer.return_value.__exit__ = lambda self, *args: (
-            None
-        )
+        mock_boto3["table"].batch_writer.return_value.__exit__ = lambda self, *args: None
 
         item = {"pk": "CVE#CVE-2024-0001", "sk": "INTEL"}
         with pytest.raises(WriteError):

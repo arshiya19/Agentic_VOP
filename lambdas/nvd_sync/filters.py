@@ -34,11 +34,7 @@ def filter_cves_by_checkpoint(
     if checkpoint_timestamp is None:
         return [item for item in cve_items if _get_last_modified(item) is not None]
 
-    return [
-        item
-        for item in cve_items
-        if _is_newer_than_checkpoint(item, checkpoint_timestamp)
-    ]
+    return [item for item in cve_items if _is_newer_than_checkpoint(item, checkpoint_timestamp)]
 
 
 def _get_last_modified(item: dict) -> str | None:
