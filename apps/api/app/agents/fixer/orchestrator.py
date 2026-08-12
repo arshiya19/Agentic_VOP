@@ -34,6 +34,8 @@ from .persistence import (
 )
 from .strategies.base import BaseFixStrategy
 from .strategies.iac_strategy import IaCStrategy
+from .strategies.image_strategy import ImageStrategy
+from .strategies.os_strategy import OSStrategy
 
 
 # =============================================================================
@@ -42,10 +44,12 @@ from .strategies.iac_strategy import IaCStrategy
 # =============================================================================
 _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
     "iac": IaCStrategy,
+    "image": ImageStrategy,  # trivy-image (container image OS pkgs)
+    "os": OSStrategy,  # trivy-os / tenable / qualys (host apt/yum)
     # Phase-2 additions land here:
-    # "dependency": DependencyStrategy,
-    # "code_edit":  CodeEditStrategy,
-    # "cli":        CliStrategy,
+    # "dependency": DependencyStrategy,   # trivy-fs / snyk-appsec (app pkgs)
+    # "code_edit":  CodeEditStrategy,     # semgrep / bandit (source edits)
+    # "cli":        CliStrategy,          # aws-cli direct cloud fixes
 }
 
 
@@ -61,31 +65,63 @@ def _select_strategy_key(
     *,
     family: str,
     scanner_type: str | None,
+    source: str | None = None,
 ) -> str:
-    """Pick the fix strategy key based on scanner_type + family.
+    """Pick the fix strategy key based on source + scanner_type + family.
 
-    Priority: scanner_type wins when known (SA3 v2.4 decided the shape of
-    the package based on this). Family is a fallback for cases where
-    scanner_type wasn't extractable.
+    Priority order (most specific → least specific):
+      1. Source name — deterministic when we know the scanner. Container
+         image scanners → image; host OS scanners → os.
+      2. scanner_type from SA-3's extractor (iac / sast / sca / os_pkg).
+      3. Family as a final fallback.
+
+    Returns an unregistered key when no strategy is wired for the shape;
+    run_fixer's dispatch check will surface a clean "no strategy registered"
+    error rather than routing the fix to the wrong executor and corrupting
+    env2.
     """
+    src = (source or "").lower()
+
+    # ---- Source-first routing ----
+    # Container image scanners → ImageStrategy (docker rebuild + retag)
+    if "trivy-image" in src or "snyk-container" in src or "grype-image" in src:
+        return "image"
+    # Host OS scanners → OSStrategy (apt/yum upgrade) — not yet registered
+    if "trivy-os" in src or "tenable-nessus" in src or "qualys-vmdr" in src or "rapid7" in src:
+        return "os"
+    # App-dep scanners → DependencyStrategy — not yet registered
+    if "trivy-fs" in src or "snyk-appsec" in src or "dependabot" in src or src == "osv":
+        return "dependency"
+    # SAST scanners → CodeEditStrategy — not yet registered
+    if "semgrep" in src or "bandit" in src or "sonarqube" in src:
+        return "code_edit"
+
+    # ---- Family-based routing when source didn't decide ----
+    if family == "os_vulnerability":
+        # Family-only signal is ambiguous (image vs host). Prefer image
+        # for MVP since trivy-image is the primary demo path; the source
+        # branch above handles the disambiguation cleanly.
+        return "image"
+    if family == "vulnerable_dependency":
+        return "dependency"  # not yet registered
+    if family == "injection":
+        return "code_edit"  # not yet registered
+
+    # ---- scanner_type from IaC extractor ----
     if scanner_type in ("iac", "sca"):
         # SCA findings often ship with an IaC-shaped fix (edit manifest → install)
         # so they're handled by IaCStrategy in MVP too. Phase-2 introduces a
         # dedicated DependencyStrategy that reuses tools/ but adds pip/npm logic.
         return "iac"
     if scanner_type == "sast":
-        # No CodeEditStrategy yet — MVP doesn't handle injection findings.
-        # Return 'iac' as a best-effort; execution will likely fail on files
-        # that aren't valid HCL, which is what we want (fail fast).
-        return "iac"
+        return "code_edit"
     if scanner_type == "os_pkg":
-        # DependencyStrategy will handle these post-MVP.
-        return "iac"
+        return "os"
 
     # Fallback: family-based dispatch when scanner_type wasn't extracted
     if family in ("public_exposure", "network_exposure"):
         return "iac"
-    return "iac"  # MVP has only IaC; other cases will be added Phase-2+
+    return "iac"  # Default to IaC for unknown shapes (matches historical behavior)
 
 
 # =============================================================================
@@ -200,21 +236,85 @@ def run_fixer(
     raw = _load_raw_finding(sb, issue_row.get("raw_finding_id"))
     iac_ctx = _extract_iac_context(issue_row, raw)
 
-    # 4. Decide strategy
-    strategy_key = _select_strategy_key(family=family, scanner_type=iac_ctx.get("scanner_type"))
+    # 3b. For container-image scanners, resolve dockerfile_path dynamically
+    #     from connection_registry metadata. Avoids hardcoding per-image paths
+    #     in ImageStrategy — any new scanner just needs metadata filled in Supabase.
+    source = issue_row.get("source") or ""
+    if not iac_ctx.get("file_path") and "trivy-image" in source.lower():
+        try:
+            from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
+
+            sb_pub = _sb_pub()
+            reg_row = (
+                sb_pub.table("connection_registry")
+                .select("metadata")
+                .eq("tool", source)
+                .single()
+                .execute()
+                .data
+            )
+            reg_meta = (reg_row or {}).get("metadata") or {}
+            if reg_meta.get("dockerfile_path"):
+                iac_ctx["file_path"] = reg_meta["dockerfile_path"]
+                iac_ctx["working_directory"] = (
+                    reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+                )
+        except Exception:  # noqa: BLE001, S110
+            pass  # Fall through to hardcoded default in ImageStrategy
+        # Also set resource_name to the image ref from raw target (e.g. "vuln-java-image:latest")
+        if not iac_ctx.get("resource_name") and raw:
+            target = raw.get("target") or raw.get("Target") or ""
+            # Extract image:tag from "vuln-java-image:latest (debian 10.2)"
+            image_ref = target.split("(")[0].strip() if "(" in target else target
+            if image_ref:
+                iac_ctx["resource_name"] = image_ref
+
+    # 4. Decide strategy — source name is the strongest signal for
+    #    disambiguating trivy-image (ImageStrategy) vs trivy-os (OSStrategy)
+    #    when both classify as family='os_vulnerability'.
+    strategy_key = _select_strategy_key(
+        family=family,
+        scanner_type=iac_ctx.get("scanner_type"),
+        source=issue_row.get("source"),
+    )
     strategy_cls = _STRATEGY_BY_KEY.get(strategy_key)
     if strategy_cls is None:
         raise RuntimeError(
             f"No fix strategy registered for key {strategy_key!r} "
-            f"(family={family}, scanner_type={iac_ctx.get('scanner_type')})"
+            f"(family={family}, scanner_type={iac_ctx.get('scanner_type')}, "
+            f"source={issue_row.get('source')!r})"
         )
 
-    # 5. Sanity: strategy needs a target instance to talk to
+    # 5. Sanity: strategy needs a target instance to talk to.
+    #    For scanners with a dedicated fix target (e.g. trivy-os-al2-ec2 → AL2
+    #    instance), look up target_instance_id from connection_registry.metadata.
+    #    Falls back to the default FIXER_ENV2_INSTANCE_ID for scanners without
+    #    a dedicated target (most cases).
     target_instance_id = cfg.env2_instance_id or ""
+    source = issue_row.get("source") or ""
+    if source:
+        try:
+            from ...db import supabase_admin as _sb_pub_fn  # noqa: PLC0415
+
+            _sb_pub = _sb_pub_fn()
+            reg_row = (
+                _sb_pub.table("connection_registry")
+                .select("metadata")
+                .eq("tool", source)
+                .single()
+                .execute()
+                .data
+            )
+            reg_meta = (reg_row or {}).get("metadata") or {}
+            if reg_meta.get("target_instance_id"):
+                target_instance_id = reg_meta["target_instance_id"]
+        except Exception:  # noqa: BLE001, S110
+            pass  # Fall through to default
+
     if not target_instance_id:
         raise RuntimeError(
-            "FixerConfig.env2_instance_id is not set. Configure "
-            "FIXER_ENV2_INSTANCE_ID in the app's environment before running SA4."
+            "No target instance configured. Set FIXER_ENV2_INSTANCE_ID in env "
+            "or add target_instance_id to the scanner's connection_registry metadata."
         )
 
     # 6. Create the fix_run row (status='pending')
@@ -311,6 +411,73 @@ def run_fixer(
         except Exception:  # noqa: BLE001, S110
             pass
         raise
+
+    # 10. Knowledge Base capture — store successful fixes for future few-shot reuse.
+    # Best-effort: never blocks the main flow. Only fires on verified success.
+    # NOTE: Always writes to the PUBLIC schema — the KB is a shared knowledge
+    # base that feeds SA-3 across all pipelines (real + demo). The `sb` passed
+    # to run_fixer may be a demo-schema client, so we use a fresh public client.
+    if outcome.status == "success":
+        try:
+            from ..remediation.kb_capture import capture_successful_fix  # noqa: PLC0415
+            from ...db import supabase_admin as _kb_admin  # noqa: PLC0415
+
+            kb_id = capture_successful_fix(
+                _kb_admin(),
+                ctx=ctx,
+                outcome=outcome,
+                confidence_score=(ctx.pathway or {}).get("confidence_score") or 90,
+                emit_fn=emit_fn,
+            )
+            try:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"📚 KB capture result: kb_id={kb_id} (None = skipped/guard)",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+        except Exception as e:  # noqa: BLE001
+            try:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "ERROR",
+                    f"📚 KB capture FAILED: {type(e).__name__}: {str(e)[:300]}",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+    # 11. KB reuse tracking — if this fix used a KB replay recipe, update counters.
+    # Increment times_reused (always after completion) and times_succeeded (on success).
+    # This feeds the success_rate computed column for recipe quality monitoring.
+    try:
+        pathway_conf = (ctx.pathway or {}).get("confidence_components") or {}
+        kb_source_id = (
+            pathway_conf.get("kb_id") if pathway_conf.get("source") == "kb_replay" else None
+        )
+        if kb_source_id:
+            from ..remediation.kb_capture import increment_reuse_count, increment_success_count  # noqa: PLC0415
+            from ...db import supabase_admin as _kb_admin_fn  # noqa: PLC0415
+
+            _kb_sb = _kb_admin_fn()
+            increment_reuse_count(_kb_sb, kb_source_id)
+            if outcome.status == "success":
+                increment_success_count(_kb_sb, kb_source_id)
+            try:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"📚 KB reuse tracked: kb_id={kb_source_id}, "
+                    f"outcome={outcome.status} "
+                    f"(times_reused +1{', times_succeeded +1' if outcome.status == 'success' else ''})",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+    except Exception:  # noqa: BLE001, S110
+        pass  # Best-effort — never block main flow
 
     # Best-effort trace — a crash here doesn't affect persisted state.
     try:
@@ -617,6 +784,22 @@ def _load_issue(sb: Any, issue_id: int) -> dict | None:
 def _load_raw_finding(sb: Any, raw_finding_id: int | None) -> dict | None:
     if raw_finding_id is None:
         return None
+    # Try the passed sb first (works for real pipeline where sb=public).
+    # If not found, fall back to public schema (handles demo pipeline where
+    # sb=demo but raw_finding_id points at public.raw_findings).
     resp = sb.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
     rows = resp.data or []
-    return (rows[0] or {}).get("raw") if rows else None
+    if rows:
+        return (rows[0] or {}).get("raw")
+    # Fallback: try public schema
+    try:
+        from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
+
+        sb_pub = _sb_pub()
+        resp = (
+            sb_pub.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
+        )
+        rows = resp.data or []
+        return (rows[0] or {}).get("raw") if rows else None
+    except Exception:  # noqa: BLE001
+        return None

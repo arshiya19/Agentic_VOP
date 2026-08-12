@@ -534,7 +534,24 @@ class IaCStrategy(BaseFixStrategy):
                 continue
 
             actual = (cmd_result.stdout or "") + (cmd_result.stderr or "")
-            passed = self._compare_expected(expected, actual, exit_code=cmd_result.exit_code)
+
+            # Resource-scoped re-scan comparison: when this is a scanner
+            # re-scan AND we know the target resource, filter the results to
+            # only the target resource AND check_id. This prevents unrelated
+            # findings (introduced by other fixes in the same batch or other
+            # checks on the same resource) from causing rollback of a
+            # successful fix.
+            if is_rescan and ctx.resource_name:
+                check_id = (ctx.issue or {}).get("source_vuln_id") or ""
+                passed = self._compare_rescan_scoped(
+                    expected,
+                    actual,
+                    exit_code=cmd_result.exit_code,
+                    resource_name=ctx.resource_name,
+                    check_id=check_id,
+                )
+            else:
+                passed = self._compare_expected(expected, actual, exit_code=cmd_result.exit_code)
 
             results.append(
                 ValidationResult(
@@ -547,9 +564,20 @@ class IaCStrategy(BaseFixStrategy):
                     duration_ms=cmd_result.duration_ms,
                     is_rescan=is_rescan,
                     comparison_note=(
-                        "string-contains + exit-zero match"
-                        if passed
-                        else "expected not found in actual OR non-zero exit"
+                        (
+                            f"resource-scoped re-scan ({ctx.resource_name}): "
+                            + (
+                                "target resource has no failures"
+                                if passed
+                                else "target resource still failing"
+                            )
+                        )
+                        if is_rescan and ctx.resource_name
+                        else (
+                            "string-contains + exit-zero match"
+                            if passed
+                            else "expected not found in actual OR non-zero exit"
+                        )
                     ),
                 )
             )
@@ -773,6 +801,102 @@ class IaCStrategy(BaseFixStrategy):
         return expected.strip() in actual
 
     @staticmethod
+    def _compare_rescan_scoped(
+        expected: str,
+        actual: str,
+        *,
+        exit_code: int,
+        resource_name: str,
+        check_id: str = "",
+    ) -> bool:
+        """Resource + check-scoped re-scan comparison for Checkov/scanner output.
+
+        When multiple fixes run sequentially against the same file, a later
+        fix may introduce new resources that fail other checks. The re-scan
+        for the CURRENT fix should only care about its own target resource
+        AND its own check_id — failures on other resources OR other checks
+        on the same resource are irrelevant to this fix's success.
+
+        Logic:
+          1. Try to parse `actual` as Checkov JSON output
+          2. If parseable: filter failed_checks to only those matching BOTH
+             `resource_name` AND `check_id` — if none match, the fix passed
+          3. If not parseable (non-JSON output, different scanner format):
+             fall back to the standard string-contains comparison
+
+        This is backward-compatible: non-Checkov scanners or non-JSON output
+        still get the same behavior as before (string match on expected).
+        """
+        import json as _json  # noqa: PLC0415
+
+        # If exit code is 0, the scanner reported no failures at all — pass
+        if exit_code == 0:
+            return True
+
+        # Exit code != 0 means scanner found something. Try to parse and filter.
+        try:
+            # Checkov outputs JSON (possibly with ANSI codes mixed in from stderr)
+            # Try to find and parse the JSON portion from the output
+            json_start = actual.find("{")
+            if json_start == -1:
+                # No JSON in output — fall back to string comparison
+                return expected.strip() in actual if expected else False
+
+            # Find the matching closing brace
+            depth = 0
+            json_end = -1
+            for i, ch in enumerate(actual[json_start:], start=json_start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        json_end = i + 1
+                        break
+
+            if json_end == -1:
+                return expected.strip() in actual if expected else False
+
+            data = _json.loads(actual[json_start:json_end])
+
+            # Navigate Checkov's output structure:
+            # {"check_type": "...", "results": {"failed_checks": [...]}}
+            # or [{"check_type": "...", "results": {...}}] (array form)
+            failed_checks = []
+            if isinstance(data, dict):
+                failed_checks = (data.get("results") or {}).get("failed_checks") or []
+            elif isinstance(data, list):
+                for group in data:
+                    if isinstance(group, dict):
+                        failed_checks.extend(
+                            (group.get("results") or {}).get("failed_checks") or []
+                        )
+
+            # Filter to only the target resource AND check_id
+            target_failures = []
+            for f in failed_checks:
+                resource_match = (f.get("resource") or "") == resource_name
+                # check_id filter: if we know the check_id, also filter by it.
+                # If check_id is empty (unknown), filter by resource only.
+                if check_id:
+                    check_match = (f.get("check_id") or "") == check_id
+                    if resource_match and check_match:
+                        target_failures.append(f)
+                else:
+                    if resource_match:
+                        target_failures.append(f)
+
+            # Pass if the target resource + check has no failures
+            return len(target_failures) == 0
+
+        except Exception:  # noqa: BLE001
+            # JSON parsing failed — fall back to standard comparison
+            # This handles non-Checkov scanners gracefully
+            if expected:
+                return expected.strip() in actual
+            return False
+
+    @staticmethod
     def _step_modified_file(command: str, file_path: str | None) -> bool:
         """Heuristic: did this step modify the target IaC source file?
 
@@ -847,13 +971,23 @@ class IaCStrategy(BaseFixStrategy):
                 "",
             )
 
-        # Parse to confirm the SAME check_id is still failing (not a
-        # different one that happens to share the file).
+        # Parse to confirm the SAME check_id is still failing ON THE
+        # TARGET RESOURCE (not a different resource that happens to fail
+        # the same check — e.g. a logs bucket created by a prior fix).
         still_failing = False
         try:
             parsed = json.loads(result.stdout or "{}")
             fails = (parsed.get("results") or {}).get("failed_checks") or []
-            still_failing = any(f.get("check_id") == check_id for f in fails)
+            target_resource = ctx.resource_name or ""
+            if target_resource:
+                # Resource-scoped: only fail if OUR resource still has the issue
+                still_failing = any(
+                    f.get("check_id") == check_id and f.get("resource") == target_resource
+                    for f in fails
+                )
+            else:
+                # No resource context — fall back to check_id only
+                still_failing = any(f.get("check_id") == check_id for f in fails)
         except (ValueError, TypeError):
             # Malformed output — treat as failure to be safe
             still_failing = True

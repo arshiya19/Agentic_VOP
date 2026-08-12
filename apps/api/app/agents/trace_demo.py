@@ -23,6 +23,11 @@ def emit_trace_demo(
     payload: dict[str, Any] | None = None,
 ) -> None:
     """Insert one row into demo.agent_trace_events. Same shape as emit_trace()."""
+    # Log to file + console (shared logger with real pipeline)
+    from .trace import _trace_logger  # noqa: PLC0415
+
+    _trace_logger.info(f"[DEMO] [{agent}] [{event_type}] {message}")
+
     sb = supabase_admin_demo()
     sb.table("agent_trace_events").insert(
         {

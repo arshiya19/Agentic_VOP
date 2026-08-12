@@ -410,3 +410,78 @@ class MasterPlan(BaseModel):
 
     plan_summary: str = Field(..., min_length=10, max_length=500)
     steps: list[MasterPlanStep] = Field(..., min_length=1)
+
+
+# =============================================================================
+# Ticketing models
+# =============================================================================
+
+
+class CreateTicketRequest(BaseModel):
+    """Request body for POST /admin/tickets/create."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    remediation_package_id: int
+    # Optional: specify which connection_registry tool to use. Defaults to 'servicenow-ticket'.
+    connection_tool: str | None = None
+    # Override auto-generated title/description if desired
+    title_override: str | None = Field(None, max_length=160)
+    description_override: str | None = Field(None, max_length=8000)
+    # Additional ServiceNow fields (e.g. assignment_group, cmdb_ci, u_*)
+    extra_fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class TicketResponse(BaseModel):
+    """Response shape for a single ticket."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    remediation_package_id: int
+    connection_tool: str
+    provider: str
+    external_ticket_id: str | None = None
+    external_ticket_url: str | None = None
+    status: str
+    error_message: str | None = None
+    title: str
+    priority: str | None = None
+    labels: list[str] = []
+    created_at: str | None = None
+    updated_at: str | None = None
+    synced_at: str | None = None
+
+
+class TicketingConnectionCreate(BaseModel):
+    """Request body for registering a new ticketing connection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["servicenow", "jira", "azure_devops", "monday", "slack", "teams", "webhook"]
+    display_name: str = Field(..., min_length=1, max_length=200)
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class TicketingConnectionResponse(BaseModel):
+    """Response shape for a ticketing connection."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    provider: str
+    display_name: str
+    enabled: bool
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class TicketingConnectionUpdate(BaseModel):
+    """PATCH body for updating a ticketing connection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None

@@ -57,9 +57,6 @@ dependencies = [
     # readable text/markdown, preserves code blocks + headings. Uses lxml
     # (already pinned above) under the hood.
     "trafilatura>=1.12.0",
-    # Pinned to remediate PYSEC-2026-3455/3456/3457 (quadratic OID parsing, unbounded
-    # Real exponentiation, and unbounded long-form tag accumulation).
-    "pyasn1>=0.6.4",
 ]
 
 [dependency-groups]

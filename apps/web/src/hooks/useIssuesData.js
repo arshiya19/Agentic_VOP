@@ -43,15 +43,14 @@ export function useIssuesData() {
       const mapped = (data || []).map((row) => ({
         // Pad the bigint id to a 5-digit "ISS-NNNNN" so the column has a stable shape.
         issue_id: row.id != null ? `ISS-${String(row.id).padStart(5, '0')}` : '',
-        // Asset display: prefer the resolved asset name, then fall back to whatever
-        // identifier was in asset_identity (hostname, project, or anything).
-        asset_id:
+        // Asset ID: the actual DB asset_id (numeric or string ID)
+        asset_id: row.asset_id || '',
+        // Asset name: prefer DB asset_name, fall back to asset_identity display values
+        asset_name:
           row.asset_name ||
-          row.asset_id ||
+          row?.asset_identity?.dns ||
+          row?.asset_identity?.name ||
           row?.asset_identity?.hostname ||
-          row?.asset_identity?.project ||
-          row?.asset_identity?.repo ||
-          row?.asset_identity?.target ||
           '',
         asset_type: row.asset_type || '',
         cve_id: row.cve_id || '',

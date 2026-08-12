@@ -111,6 +111,42 @@ class Settings(BaseSettings):
     # Threshold for cache misses before emitting CacheMissesLookupFailed metric.
     max_sync_cache_misses: int = 10
 
+    # --- Ticketing integration ---
+    # When true, approving a remediation package auto-creates a ticket in the
+    # configured default provider. Requires at least one enabled row in
+    # ticketing_connections. When false, tickets are only created via explicit
+    # POST /admin/tickets/create or the per-package endpoint.
+    ticketing_auto_create_on_approve: bool = False
+
+    # Default ticketing provider slug used for auto-creation. Must match a
+    # provider value in ticketing_connections (e.g. "jira", "servicenow",
+    # "webhook"). Ignored when ticketing_auto_create_on_approve is False.
+    ticketing_default_provider: str = ""
+
+    # --- Jira settings (used when provider = "jira") ---
+    # These can alternatively live in ticketing_connections.config per-row,
+    # but env vars are convenient for single-instance setups.
+    jira_base_url: str = ""  # e.g. https://yourcompany.atlassian.net
+    jira_user_email: str = ""  # API token owner email
+    jira_api_token: str = ""  # Atlassian API token
+    jira_project_key: str = ""  # e.g. "SEC" or "VULN"
+
+    # --- ServiceNow OAuth2 credentials (password grant) ---
+    servicenow_client_id: str = ""
+    servicenow_client_secret: str = ""
+
+    # --- ServiceNow settings (used when provider = "servicenow") ---
+    servicenow_instance_url: str = ""  # e.g. https://yourcompany.service-now.com
+    servicenow_username: str = ""
+    servicenow_password: str = ""
+    servicenow_assignment_group: str = ""
+
+    # --- Generic webhook (used when provider = "webhook") ---
+    # Sends a JSON POST with ticket payload to this URL. Use for custom
+    # integrations (Slack, Teams, PagerDuty, n8n, Zapier, etc.)
+    ticketing_webhook_url: str = ""
+    ticketing_webhook_secret: str = ""  # Optional HMAC-SHA256 signing secret
+
     # --- Schema isolation for local development ---
     # Postgres schema that supabase_admin() targets. Defaults to "public"
     # (production behavior). Set to "dev" in your local .env to route all

@@ -562,6 +562,81 @@ def plan_remediation(
 
     asset = _load_asset(sb, issue)
 
+    # --- Try KB DIRECT REPLAY first (fastest path — no web search) ---
+    # If the knowledge base has a verified successful recipe for this exact
+    # check_id + resource_type, adapt it via a single constrained LLM call
+    # and return immediately. This eliminates non-determinism for known fixes.
+    # Falls through to agentic/hybrid if no candidate or adaptation fails.
+    kb_replay_output = None
+    kb_replay_id = None
+    try:
+        from ..trace import emit_trace  # noqa: PLC0415
+        from .kb_replay import try_kb_replay  # noqa: PLC0415
+
+        kb_replay_output, kb_replay_id = try_kb_replay(
+            issue=issue,
+            family=family,
+            raw=raw,
+            sb=sb,
+            run_id=run_id,
+            emit_fn=emit_trace,
+        )
+    except Exception as e:  # noqa: BLE001
+        from ..trace import emit_trace  # noqa: PLC0415
+
+        emit_trace(
+            run_id,
+            "sub-agent-3",
+            "ERROR",
+            f"KB replay module raised: {type(e).__name__}: {str(e)[:200]} "
+            "— continuing with agentic/hybrid path.",
+        )
+
+    if kb_replay_output is not None:
+        # --- KB REPLAY SUCCESS — skip agentic + hybrid entirely ---
+        from ..trace import emit_trace  # noqa: PLC0415
+
+        enriched_pathways: list[RemediationPathway] = []
+        for pathway in kb_replay_output.pathways:
+            # Use the KB recipe's confidence (already proven) — attach validation
+            # metadata indicating this came from the knowledge base.
+            pathway.validation_metadata = ValidationMetadata(
+                status="validated",
+                sources=["Knowledge Base (proven fix from prior successful run)"],
+                timestamp=datetime.now(UTC).isoformat(),
+                confidence="high",
+            )
+            # Carry forward the KB recipe's confidence score
+            pathway.confidence_score = 95  # High — proven recipe
+            pathway.confidence_components = {
+                "source": "kb_replay",
+                "kb_id": kb_replay_id,
+                "reason": "Proven fix replayed from knowledge base",
+            }
+            enriched_pathways.append(pathway)
+
+        recommended_idx = 0
+        recommended_score = enriched_pathways[0].confidence_score or 95
+
+        emit_trace(
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"📚 KB replay path complete — returning package from KB #{kb_replay_id} "
+            f"(confidence={recommended_score}, family={family})",
+        )
+
+        return RemediationPackage(
+            issue_id=int(issue["id"]),
+            family=family,
+            finding=kb_replay_output.finding,
+            root_cause=kb_replay_output.root_cause,
+            impact=kb_replay_output.impact,
+            pathways=enriched_pathways,
+            recommended_pathway_index=recommended_idx,
+            approval_required=_derive_approval(recommended_score, issue.get("priority")),
+        )
+
     # --- Try the AGENTIC path first (Phase-2 default when Tavily key set) ---
     # Agent researches from live authoritative sources (AWS/CIS/NVD/CISA docs).
     # NO pattern loaded on this path — validation_metadata + confidence derive
@@ -636,6 +711,29 @@ def plan_remediation(
             "pattern": _pattern_payload(pattern),
         }
 
+        # --- Knowledge Base injection (few-shot from proven fixes) ---
+        kb_context = ""
+        try:
+            from .kb_retrieval import retrieve_examples, format_examples_for_prompt  # noqa: PLC0415
+
+            check_id = (
+                issue.get("source_vuln_id")
+                or issue.get("cve_id")
+                or (issue.get("source_raw") or {}).get("check_id")
+            )
+            kb_examples = retrieve_examples(sb, check_id=check_id, family=family)
+            if kb_examples:
+                kb_context = format_examples_for_prompt(kb_examples)
+                emit_trace(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"Injected {len(kb_examples)} proven fix(es) from knowledge base "
+                    f"(checks: {[e.check_id for e in kb_examples]})",
+                )
+        except Exception:  # noqa: BLE001, S110
+            pass  # KB retrieval is best-effort — never blocks planner
+
         base_temp = float(params.get("temperature", 0.3))
         max_tokens = int(params.get("max_tokens", 2500))
         primary_model = prompt_row["model"]
@@ -647,6 +745,7 @@ def plan_remediation(
             schema=LLMRemediationOutput,
             messages=[
                 SystemMessage(content=prompt_row["prompt_text"]),
+                *([HumanMessage(content=kb_context)] if kb_context else []),
                 HumanMessage(content=str(payload)),
             ],
             attempts=[

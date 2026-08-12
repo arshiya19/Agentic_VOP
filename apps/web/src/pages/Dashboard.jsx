@@ -34,7 +34,10 @@ export default function Dashboard() {
     {
       title: 'Risk Exposure',
       value: stats.total,
-      details: `${Critical} Critical · ${High} High · ${Medium} Medium`,
+      delta: stats.todayAdded,
+      previousTotal: stats.previousTotal,
+      details: null, // custom render below
+      severityBadges: { Critical, High, Medium },
     },
     {
       title: 'Requiring Action',
@@ -49,12 +52,14 @@ export default function Dashboard() {
     {
       title: 'Validated',
       value: stats.validated ?? '—',
-      details: 'Confidence score: not tracked yet',
+      details: stats.avgConfidence ? `Avg confidence: ${stats.avgConfidence}/100` : 'No confidence data yet',
+      hasConfidence: !!stats.avgConfidence,
     },
     {
       title: 'Remediated',
       value: stats.remediated ?? '—',
-      details: 'MTTR: not tracked yet',
+      details: stats.avgMttr ? `MTTR: ${stats.avgMttr}` : 'MTTR: not enough data',
+      hasMttr: !!stats.avgMttr,
     },
   ]
 
@@ -70,8 +75,21 @@ export default function Dashboard() {
                 <div className="stat-card-title">{card.title}</div>
                 <div className="stat-card-body">
                   <span className="stat-card-value">{card.value}</span>
+                  {card.delta > 0 && (
+                    <span className="stat-delta-badge" title={`Was ${card.previousTotal} before today. +${card.delta} added on ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}>
+                      +{card.delta}
+                    </span>
+                  )}
                 </div>
-                <div className="stat-card-details">{card.details}</div>
+                {card.severityBadges ? (
+                  <div className="stat-card-details severity-badges">
+                    <span className="sev-badge critical">{card.severityBadges.Critical} C</span>
+                    <span className="sev-badge high">{card.severityBadges.High} H</span>
+                    <span className="sev-badge medium">{card.severityBadges.Medium} M</span>
+                  </div>
+                ) : (
+                  <div className={`stat-card-details ${card.hasMttr ? 'mttr-badge' : ''} ${card.hasConfidence ? 'confidence-badge' : ''}`}>{card.details}</div>
+                )}
               </div>
             ))}
           </div>

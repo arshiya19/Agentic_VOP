@@ -101,22 +101,19 @@ def run_demo_remediation(run_id: str) -> dict:
         )
         patterns_by_family = {r["family"]: r for r in rows}
 
-    # Load Sub-Agent 3 v1.4 (HYBRID fallback) prompt from public.prompt_db.
-    # v2.0 (agentic) is loaded separately by run_agentic_planner when the
-    # agent path is used. This one is only reached on fallback.
-    prompt_rows = (
-        sb_pub.table("prompt_db")
-        .select("agent,version,model,prompt_text,parameters")
-        .eq("agent", "sub-agent-3")
-        .eq("version", "v1.4")
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    if not prompt_rows:
-        raise RuntimeError("No sub-agent-3 v1.4 prompt row in prompt_db. Apply migration 0047.")
-    prompt_row = prompt_rows[0]
+    # Load Sub-Agent 3 (HYBRID fallback) prompt via the master router.
+    # Router picks the most-specific prompt available in prompt_db based on
+    # (source, family) with fallback to the generic sub-agent-3 v1.4 row.
+    # Today only the generic row exists so behavior is identical to the old
+    # hardcoded query. Specialized prompts (e.g. sub-agent-3-trivy-os) will
+    # be picked up automatically once seeded.
+    #
+    # NOTE: source/family are per-issue, but we load a default prompt once
+    # here for the outer loop's trace event. Per-issue routing happens inside
+    # _plan_and_enrich (agent_v2) so each issue gets its own specialized prompt.
+    from .prompt_router import load_sa3_prompt  # noqa: PLC0415
+
+    prompt_row = load_sa3_prompt(sb_pub, source=None, family=None, default_version="v1.4")
 
     # Pre-load all demo.assets rows once and build a lookup index by identity.
     all_assets = sb_demo.table("assets").select("*").execute().data or []
@@ -200,12 +197,14 @@ def run_demo_remediation(run_id: str) -> dict:
 
 def _lookup_demo_asset(all_assets: list[dict], issue: dict) -> dict:
     """Match an issue to a demo asset using the same identity keys as the
-    real issue_with_asset view (project / repo → name/aliases; hostname; ipv4).
+    real issue_with_asset view (project / repo / name / os → name/aliases; hostname; ipv4).
     Returns trimmed dict of fields the LLM needs, or {} if unattributed.
     """
     identity = issue.get("asset_identity") or {}
     project = identity.get("project")
     repo = identity.get("repo")
+    name = identity.get("name")
+    os_id = identity.get("os")
     hostname = identity.get("hostname")
     ipv4 = identity.get("ipv4")
 
@@ -215,7 +214,11 @@ def _lookup_demo_asset(all_assets: list[dict], issue: dict) -> dict:
             return _trim_asset(a)
         if repo and (a.get("name") == repo or repo in aliases):
             return _trim_asset(a)
-        if hostname and a.get("hostname") == hostname:
+        if name and (a.get("name") == name or name in aliases):
+            return _trim_asset(a)
+        if os_id and (a.get("name") == os_id or os_id in aliases):
+            return _trim_asset(a)
+        if hostname and (a.get("hostname") == hostname or hostname in aliases):
             return _trim_asset(a)
         if ipv4 and a.get("ip_address") == ipv4:
             return _trim_asset(a)
@@ -257,6 +260,62 @@ def _plan_and_enrich(
     agent_result = None  # tuple (LLMRemediationOutput, VerificationReport) | None
     llm_output: LLMRemediationOutput | None = None
 
+    # --- Try KB DIRECT REPLAY first (fastest path — no web search) ---
+    # If the knowledge base has a verified successful recipe for this exact
+    # check_id + resource_type, adapt it via a single constrained LLM call
+    # and return immediately. ~3 seconds, deterministic, no Tavily usage.
+    try:
+        from .kb_replay import try_kb_replay  # noqa: PLC0415
+
+        kb_replay_output, kb_replay_id = try_kb_replay(
+            issue=issue,
+            family=family,
+            raw=raw,
+            sb=sb_pub,
+            run_id=run_id,
+            emit_fn=emit_trace_demo,
+        )
+
+        if kb_replay_output is not None:
+            from ...models import RemediationPathway  # noqa: PLC0415, F401
+
+            enriched_pathways: list[RemediationPathway] = []
+            for pathway in kb_replay_output.pathways:
+                pathway.confidence_score = 95
+                pathway.confidence_components = {
+                    "source": "kb_replay",
+                    "kb_id": kb_replay_id,
+                    "reason": "Proven fix replayed from knowledge base",
+                }
+                enriched_pathways.append(pathway)
+
+            emit_trace_demo(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                f"📚 KB replay path complete — returning package from KB #{kb_replay_id} "
+                f"(confidence=95, family={family}). Skipping agentic/hybrid.",
+            )
+
+            return RemediationPackage(
+                issue_id=int(issue["id"]),
+                family=family,
+                finding=kb_replay_output.finding,
+                root_cause=kb_replay_output.root_cause,
+                impact=kb_replay_output.impact,
+                pathways=enriched_pathways,
+                recommended_pathway_index=0,
+                approval_required="auto",
+            )
+    except Exception as e:  # noqa: BLE001
+        emit_trace_demo(
+            run_id,
+            "sub-agent-3",
+            "ERROR",
+            f"KB replay module raised: {type(e).__name__}: {str(e)[:200]} "
+            "— continuing with agentic/hybrid path.",
+        )
+
     # --- AGENTIC path (Phase-2 default) ---
     if settings.tavily_api_key:
         from .agent_v2 import run_agentic_planner  # noqa: PLC0415
@@ -266,6 +325,40 @@ def _plan_and_enrich(
             # working_directory, resource_name, scanner_type. Preserves original
             # issue for downstream persistence.
             agent_issue = {**issue, **_extract_iac_context(issue, raw)}
+
+            # For container-image scanners, resolve dockerfile_path dynamically
+            # from connection_registry metadata (same lookup SA4 does). This gives
+            # SA3's LLM the correct paths to generate commands against.
+            source = (issue.get("source") or "").lower()
+            if not agent_issue.get("file_path") and "trivy-image" in source:
+                try:
+                    reg_row = (
+                        sb_pub.table("connection_registry")
+                        .select("metadata")
+                        .eq("tool", issue.get("source"))
+                        .single()
+                        .execute()
+                        .data
+                    )
+                    reg_meta = (reg_row or {}).get("metadata") or {}
+                    if reg_meta.get("dockerfile_path"):
+                        agent_issue["file_path"] = reg_meta["dockerfile_path"]
+                        agent_issue["working_directory"] = (
+                            reg_meta.get("build_directory")
+                            or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
+                        )
+                    # Also set resource_name to image ref from raw target
+                    if not agent_issue.get("resource_name") and raw:
+                        target = raw.get("target") or raw.get("Target") or ""
+                        image_ref = target.split("(")[0].strip() if "(" in target else target
+                        if image_ref:
+                            agent_issue["resource_name"] = image_ref
+                    # Inject fix_pattern so SA3 knows the correct fix shape for this image type
+                    if reg_meta.get("fix_pattern"):
+                        agent_issue["fix_pattern"] = reg_meta["fix_pattern"]
+                except Exception:  # noqa: BLE001, S110
+                    pass
+
             agent_result = run_agentic_planner(
                 issue=agent_issue,
                 asset=asset,
@@ -302,16 +395,27 @@ def _plan_and_enrich(
             enriched_pathways.append(pathway)
     else:
         # --- HYBRID fallback (pattern-based v1.4) ---
+        # Per-issue prompt resolution — if a specialized prompt exists for this
+        # finding's source+family, use it in the hybrid path too (not just agentic).
+        # This makes the specialized trivy-image prompt work in BOTH paths.
+        from .prompt_router import load_sa3_prompt as _router_load  # noqa: PLC0415
+
+        issue_source = (issue.get("source") or "").strip()
+        hybrid_prompt = _router_load(
+            sb_pub, source=issue_source, family=family, default_version="v1.4"
+        )
+        hybrid_prompt_desc = f"{hybrid_prompt['agent']}@{hybrid_prompt['version']}"
+
         emit_trace_demo(
             run_id,
             "sub-agent-3",
             "MESSAGE",
-            "Using hybrid pattern-based planner (v1.4)",
+            f"Using hybrid planner with prompt: {hybrid_prompt_desc}",
         )
-        params = prompt_row.get("parameters") or {}
+        params = hybrid_prompt.get("parameters") or {}
         base_temp = float(params.get("temperature", 0.3))
         max_tokens = int(params.get("max_tokens", 2500))
-        primary_model = prompt_row["model"]
+        primary_model = hybrid_prompt["model"]
         fallback_model = params.get("fallback_model", "gpt-4o")
 
         payload = {
@@ -320,12 +424,171 @@ def _plan_and_enrich(
             "pattern": _pattern_payload(pattern),
         }
 
+        # Execution context — same injection as the agentic path. Tells the
+        # generic prompt whether this is a container-image fix, host fix, or IaC.
+        source = (issue.get("source") or "").lower()
+        if "trivy-image" in source or "snyk-container" in source or "grype-image" in source:
+            payload["execution_context"] = {
+                "target_type": "container_image",
+                "fix_approach": (
+                    "Edit the Dockerfile to REMOVE the vulnerable package version pin entirely "
+                    "(e.g. change 'openssl=1.1.1f-1ubuntu2' to just 'openssl'). "
+                    "This lets apt-get install the latest available patched version at build time. "
+                    "Do NOT specify a target version — just remove the =X.Y.Z pin. "
+                    "Then rebuild with docker build --no-cache."
+                ),
+                "dockerfile_path": "/opt/vuln-labs/infra-lab/Dockerfile",
+                "build_directory": "/opt/vuln-labs/infra-lab",
+                "image_ref": "vuln-lab-image:latest",
+                "rebuild_command": "cd /opt/vuln-labs/infra-lab && docker build --no-cache -t vuln-lab-image:latest .",
+                "sed_pattern_example": "sed -i 's/<pkg>=<any_version>/<pkg>/' /opt/vuln-labs/infra-lab/Dockerfile",
+                "rescan_command": "trivy image vuln-lab-image:latest --scanners vuln --severity HIGH,CRITICAL --format json",
+                "rescan_target": "vuln-lab-image:latest (the rebuilt image, NOT ubuntu:20.04)",
+                "validation_guidance": (
+                    "IMPORTANT: The re-scan validation must check for the ABSENCE of the SPECIFIC CVE being fixed, "
+                    "NOT for zero total vulnerabilities. The image has OTHER packages with their own CVEs — "
+                    "fixing one CVE does not make the entire image vuln-free. "
+                    "Use a command like: trivy image vuln-lab-image:latest --format json 2>&1 | grep -c '<CVE_ID>' || true "
+                    "with expected='0' (zero occurrences of that specific CVE). "
+                    "Do NOT use expected='\"Vulnerabilities\": []' — that will always fail on a multi-package image."
+                ),
+                "rescan_exit_code_note": (
+                    "CRITICAL SHELL SEMANTICS: grep -c returns exit code 1 when match count is 0 "
+                    "(i.e. when the CVE is GONE — the desired outcome). This will cause the execution "
+                    "engine to treat a SUCCESSFUL fix as a failure. You MUST append '|| true' to any "
+                    "grep -c command so the exit code is always 0. The validation engine checks the "
+                    "OUTPUT value (expecting '0'), not the exit code. "
+                    "Correct:  trivy image ... --format json 2>&1 | grep -c 'CVE-xxx' || true "
+                    "Wrong:    trivy image ... --format json | grep -c 'CVE-xxx'"
+                ),
+                "remediation_steps_rules": (
+                    "Do NOT put the re-scan/validation command in remediation_steps. "
+                    "remediation_steps should contain ONLY actionable fix commands: "
+                    "backup, sed edit, docker build, verify edit (grep Dockerfile). "
+                    "The re-scan belongs EXCLUSIVELY in validation_tests with is_rescan=true."
+                ),
+                "prohibited_commands": [
+                    "sudo reboot",
+                    "apt-get install on host",
+                    "edits to /etc/ or /usr/ on host",
+                    "specifying a fixed version number in sed (just remove the pin)",
+                    "expecting zero total vulnerabilities in validation (check only the specific CVE)",
+                    "grep -c without || true (grep returns exit 1 on zero matches, which breaks execution)",
+                ],
+            }
+        elif "trivy-os" in source or "tenable" in source or "qualys" in source:
+            # Detect OS family: AL2/RHEL use yum, Ubuntu/Debian use apt.
+            # Signal comes from the source name (trivy-os-al2 → yum) or
+            # could come from connection_registry metadata in the future.
+            is_yum = "al2" in source or "rhel" in source or "centos" in source or "amazon" in source
+            if is_yum:
+                payload["execution_context"] = {
+                    "target_type": "host_os",
+                    "os_family": "amazon_linux",
+                    "package_manager": "yum",
+                    "fix_approach": (
+                        "Run yum update <pkg> -y directly on the host. "
+                        "NEVER pin to a specific version — yum repos serve the latest available. "
+                        "NEVER use 'yum install <pkg>-<version>' — the exact version likely doesn't exist in AL2 repos. "
+                        "Always use: yum update <pkg> -y (no version suffix, no dash-version). "
+                        "If the package name in the CVE is like 'python3-requests', the yum command is: "
+                        "yum update python3-requests -y (NOT yum install python3-requests-2.32.4 -y)."
+                    ),
+                    "verification_approach": (
+                        "After upgrade, verify installed version using: "
+                        "rpm -q <pkg>. Do NOT check for an exact target version — just confirm the "
+                        "package is installed and the version changed."
+                    ),
+                    "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
+                    "rescan_target": "/ (host root filesystem)",
+                    "rescan_validation_note": (
+                        "CRITICAL SHELL SEMANTICS: grep -c returns exit code 1 when match count is 0 "
+                        "(i.e. when the CVE is GONE — the desired outcome). You MUST append '|| true' to any "
+                        "grep -c command so the exit code is always 0. The validation engine checks the "
+                        "OUTPUT value (expecting '0'), not the exit code. "
+                        "Correct:  trivy rootfs / --format json 2>&1 | grep -c 'CVE-xxx' || true "
+                        "Wrong:    trivy rootfs / --format json | grep -c 'CVE-xxx'"
+                    ),
+                    "remediation_steps_rules": (
+                        "Do NOT put the re-scan in remediation_steps. "
+                        "Steps should be EXACTLY: "
+                        "1. Back up package state (rpm -qa > /tmp/backup.txt), "
+                        "2. yum update <pkg> -y, "
+                        "3. rpm -q <pkg> (verify installed version). "
+                        "That's it — 3 core steps. You may add a 4th step for 'yum clean all' or "
+                        "'yum makecache' BEFORE the update if useful. "
+                        "Do NOT add 'yum versionlock' steps — that plugin is not installed. "
+                        "Do NOT add 'yum update -y' (full system update) — only update the specific package. "
+                        "Do NOT add 'yum update --security' — only update the specific package. "
+                        "Re-scan goes EXCLUSIVELY in validation_tests with is_rescan=true."
+                    ),
+                    "reboot_policy": (
+                        "NEVER reboot. OS package fixes do not require a reboot unless the CVE "
+                        "is in kernel or glibc, and even then the reboot should be in validation_tests "
+                        "not remediation_steps."
+                    ),
+                    "prohibited_commands": [
+                        "sudo reboot / reboot / shutdown / halt / poweroff (severs SSM connection)",
+                        "yum versionlock (plugin not installed on this host — will fail)",
+                        "yum install <pkg>-<specific_version> (exact versions don't exist in AL2 repos — use yum update <pkg> -y instead)",
+                        "yum update -y (full system update — only update the specific vulnerable package)",
+                        "yum update --security (too broad — only update the specific package)",
+                        "docker build (wrong strategy for host OS fix)",
+                        "apt-get / dpkg (wrong package manager for Amazon Linux)",
+                    ],
+                }
+            else:
+                payload["execution_context"] = {
+                    "target_type": "host_os",
+                    "os_family": "debian_ubuntu",
+                    "package_manager": "apt",
+                    "fix_approach": (
+                        "Run apt-get update && apt-get install --only-upgrade <pkg> -y directly on the host. "
+                        "NEVER pin to a specific version — public repos only serve the latest point release. "
+                        "Always use: apt-get install --only-upgrade <pkg> -y (no =<version> suffix)."
+                    ),
+                    "verification_approach": (
+                        "After upgrade, verify installed version is GREATER than the vulnerable version "
+                        "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version — "
+                        "just confirm the package is installed. The version might not change if the "
+                        "package is already at newest."
+                    ),
+                    "rescan_command": "trivy rootfs / --cache-dir /tmp/trivy-cache --scanners vuln --severity HIGH,CRITICAL --format json",
+                    "rescan_target": "/ (host root filesystem)",
+                    "rescan_validation_note": (
+                        "CRITICAL SHELL SEMANTICS: grep -c returns exit code 1 when match count is 0 "
+                        "(i.e. when the CVE is GONE — the desired outcome). You MUST append '|| true' to any "
+                        "grep -c command so the exit code is always 0. The validation engine checks the "
+                        "OUTPUT value (expecting '0'), not the exit code. "
+                        "Correct:  trivy rootfs / --cache-dir /tmp/trivy-cache --format json 2>&1 | grep -c 'CVE-xxx' || true "
+                        "Wrong:    trivy rootfs / --format json | grep -c 'CVE-xxx'"
+                    ),
+                    "remediation_steps_rules": (
+                        "Do NOT put the re-scan in remediation_steps. Steps should be: "
+                        "1. apt-get update, 2. apt-get install --only-upgrade <pkg> -y, "
+                        "3. dpkg -l <pkg> (verify). Re-scan goes in validation_tests only. "
+                        "Do NOT add 'apt list --upgradable' or 'apt autoremove' steps — they waste time. "
+                        "Do NOT add 'systemctl restart <service>' unless the CVE is specifically in that service's daemon."
+                    ),
+                    "reboot_policy": (
+                        "NEVER reboot. OS package fixes do not require a reboot unless the CVE "
+                        "is in kernel (linux-image-*), libc6, or systemd."
+                    ),
+                    "prohibited_commands": [
+                        "sudo reboot (unless kernel/libc/systemd CVE)",
+                        "docker build",
+                        "apt-get install <pkg>=<specific_version>",
+                        "apt list --upgradable (wastes time, not useful for fix)",
+                        "apt autoremove (not needed for single package upgrade)",
+                    ],
+                }
+
         llm_output = invoke_structured_with_retry(
             run_id=run_id,
             agent="sub-agent-3",
             schema=LLMRemediationOutput,
             messages=[
-                SystemMessage(content=prompt_row["prompt_text"]),
+                SystemMessage(content=hybrid_prompt["prompt_text"]),
                 HumanMessage(content=str(payload)),
             ],
             attempts=[

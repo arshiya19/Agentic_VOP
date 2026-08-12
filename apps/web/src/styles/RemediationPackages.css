@@ -27,9 +27,9 @@
   gap: 8px;
   padding: 7px 14px;
   border-radius: 999px;
-  background: #161922;
-  border: 1px solid #2a3145;
-  color: #aebcff;
+  background: #151C2C;
+  border: 1px solid #1E293B;
+  color: #94A3B8;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.03em;
@@ -40,9 +40,9 @@
   margin-top: 4px;
 }
 .rmp-header-btn:not(:disabled):hover {
-  background: #1c2030;
-  border-color: #4a6cee88;
-  color: #c4ceff;
+  background: #1B2336;
+  border-color: #2D3748;
+  color: #E2E8F0;
 }
 .rmp-header-btn:disabled {
   cursor: progress;
@@ -58,16 +58,16 @@
   50%      { opacity: 1; }
 }
 .rmp-stat-card {
-  background: #161922;
-  border: 1px solid #262a36;
+  background: #151C2C;
+  border: 1px solid #1E293B;
   border-radius: 10px;
   padding: 16px 18px;
 }
 .rmp-stat-card.warn  { border-color: #c08a2e44; }
 .rmp-stat-card.good  { border-color: #2ec07b44; }
 .rmp-stat-card.bad   { border-color: #c0432e44; }
-.rmp-stat-num   { font-size: 28px; font-weight: 600; color: #eef1f6; }
-.rmp-stat-label { font-size: 12px; color: #8b94a7; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.rmp-stat-num   { font-size: 28px; font-weight: 600; color: #E2E8F0; }
+.rmp-stat-label { font-size: 12px; color: #64748B; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
 
 /* Remediate action-card (button styled to match stat cards) */
 .rmp-remediate-card {
@@ -121,9 +121,9 @@
 }
 .rmp-filter-group { display: flex; gap: 6px; flex-wrap: wrap; }
 .rmp-filter-pill {
-  background: #1a1d27;
-  border: 1px solid #262a36;
-  color: #cdd3df;
+  background: #151C2C;
+  border: 1px solid #1E293B;
+  color: #94A3B8;
   padding: 6px 12px;
   border-radius: 999px;
   font-size: 13px;
@@ -132,14 +132,14 @@
   align-items: center;
   gap: 6px;
 }
-.rmp-filter-pill:hover { background: #20232d; }
+.rmp-filter-pill:hover { background: #1B2336; }
 .rmp-filter-pill.active {
-  background: #2a3145;
-  border-color: #3b465f;
-  color: #eef1f6;
+  background: #242D42;
+  border-color: #2D3748;
+  color: #E2E8F0;
 }
 .rmp-pill-count {
-  background: #00000033;
+  background: rgba(0,0,0,0.2);
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 11px;
@@ -166,19 +166,19 @@
 
 /* List card */
 .rmp-list-card {
-  background: #161922;
-  border: 1px solid #262a36;
+  background: #151C2C;
+  border: 1px solid #1E293B;
   border-radius: 10px;
   overflow: hidden;
 }
 .rmp-empty {
   padding: 60px 24px;
   text-align: center;
-  color: #8b94a7;
+  color: #64748B;
 }
 .rmp-empty.bad { color: #e2876f; }
-.rmp-empty-title { font-size: 18px; color: #cdd3df; margin-bottom: 6px; }
-.rmp-empty-sub { font-size: 13px; max-width: 540px; margin: 0 auto; line-height: 1.5; }
+.rmp-empty-title { font-size: 18px; color: #E2E8F0; margin-bottom: 6px; }
+.rmp-empty-sub { font-size: 13px; max-width: 540px; margin: 0 auto; line-height: 1.5; color: #94A3B8; }
 
 /* Table */
 .rmp-table {
@@ -189,24 +189,24 @@
 .rmp-table thead th {
   text-align: left;
   font-weight: 600;
-  color: #8b94a7;
+  color: #64748B;
   text-transform: uppercase;
   font-size: 11px;
-  letter-spacing: 0.05em;
-  padding: 12px 14px;
-  background: #1a1d27;
-  border-bottom: 1px solid #262a36;
+  letter-spacing: 0.5px;
+  padding: 12px 16px;
+  background: #1B2336;
+  border-bottom: 1px solid #1E293B;
 }
 .rmp-table tbody tr {
-  border-bottom: 1px solid #1f222d;
+  border-bottom: 1px solid #1E293B;
   cursor: pointer;
-  transition: background 80ms;
+  transition: background 0.15s ease;
 }
-.rmp-table tbody tr:hover { background: #1a1d27; }
-.rmp-table tbody tr.selected { background: #20243a; }
+.rmp-table tbody tr:hover { background: #1B2336; }
+.rmp-table tbody tr.selected { background: rgba(6, 182, 212, 0.08); }
 .rmp-table td {
-  padding: 12px 14px;
-  color: #cdd3df;
+  padding: 14px 16px;
+  color: #E2E8F0;
   vertical-align: middle;
 }
 .rmp-finding-cell {
@@ -215,12 +215,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.rmp-date-cell { color: #8b94a7; font-size: 12px; }
-.rmp-muted { color: #525969; }
+.rmp-date-cell { color: #64748B; font-size: 12px; }
+.rmp-muted { color: #64748B; }
 
 .rmp-family-chip {
-  background: #2a3145;
-  color: #cdd3df;
+  background: #1B2336;
+  color: #94A3B8;
   padding: 3px 8px;
   border-radius: 5px;
   font-size: 11px;
@@ -243,39 +243,39 @@
 /* Validation pill */
 .rmp-validation-pill {
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: 4px;
   font-size: 11px;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
-.rmp-validation-pill.good { background: #1d3a2a; color: #5dc28f; border: 1px solid #2ec07b44; }
-.rmp-validation-pill.warn { background: #3a2f1d; color: #d9a44a; border: 1px solid #c08a2e44; }
-.rmp-validation-pill.bad  { background: #3a1d1d; color: #e2876f; border: 1px solid #c0432e44; }
+.rmp-validation-pill.good { background: #1d3a2a; color: #5dc28f; }
+.rmp-validation-pill.warn { background: #3a2f1d; color: #d9a44a; }
+.rmp-validation-pill.bad  { background: #3a1d1d; color: #e2876f; }
 
 /* Status pill */
 .rmp-status-pill {
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: 4px;
   font-size: 11px;
   font-weight: 500;
 }
 .rmp-status-pill.st-draft               { background: #2a2d38; color: #8b94a7; }
 .rmp-status-pill.st-awaiting_approval   { background: #3a2f1d; color: #d9a44a; }
 .rmp-status-pill.st-approved            { background: #1d3a2a; color: #5dc28f; }
-.rmp-status-pill.st-ready_for_execution { background: #1d3a2a; color: #5dc28f; border: 1px solid #2ec07b44; }
+.rmp-status-pill.st-ready_for_execution { background: #1d3a2a; color: #5dc28f; }
 .rmp-status-pill.st-rejected            { background: #3a1d1d; color: #e2876f; }
 
 .rmp-view-btn {
   background: transparent;
-  border: 1px solid #3b465f;
-  color: #cdd3df;
+  border: 1px solid #2D3748;
+  color: #94A3B8;
   padding: 4px 10px;
   border-radius: 5px;
   font-size: 12px;
   cursor: pointer;
 }
-.rmp-view-btn:hover { background: #20243a; }
+.rmp-view-btn:hover { background: #1B2336; color: #E2E8F0; }
 
 /* =============================================================================
    Detail drawer
@@ -625,4 +625,95 @@
 @keyframes rmp-toast-in {
   from { transform: translateY(10px); opacity: 0; }
   to   { transform: translateY(0); opacity: 1; }
+}
+
+
+/* =============================================================================
+   Ticketing — ServiceNow button + ticket info in drawer footer
+   ============================================================================= */
+
+.rmp-btn-ticket {
+  background: #1e3a5f;
+  border: 1px solid #2563eb;
+  color: #93c5fd;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.rmp-btn-ticket:hover:not(:disabled) {
+  background: #1e40af;
+  border-color: #3b82f6;
+  color: #bfdbfe;
+}
+.rmp-btn-ticket:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.rmp-ticket-info {
+  margin-top: 8px;
+}
+
+.rmp-ticket-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #3b82f6;
+  font-weight: 600;
+  font-size: 13px;
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  transition: background 0.15s;
+}
+.rmp-ticket-link:hover {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.rmp-ticket-error {
+  color: #f87171;
+  font-size: 12px;
+}
+
+.rmp-ticket-pending {
+  color: #fbbf24;
+  font-size: 12px;
+}
+
+.rmp-terminal-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+
+/* Close button — top right corner of the detail card */
+.rmp-card-close-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  background: rgba(100, 116, 139, 0.15);
+  border: 1px solid #2D3748;
+  color: #94A3B8;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.rmp-card-close-btn:hover {
+  background: rgba(100, 116, 139, 0.3);
+  color: #E2E8F0;
+  border-color: #64748B;
 }

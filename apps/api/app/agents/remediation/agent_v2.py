@@ -667,14 +667,27 @@ def run_agentic_planner(
         LLMRemediationOutput on success. None when agent fails and caller
         should fall back to hybrid pattern-based planner.
     """
+    # Route through the SA-3 master prompt router — picks a specialized
+    # prompt for (issue.source, family) when one exists, otherwise falls
+    # back to the generic sub-agent-3 v2.0 agentic prompt. This is what
+    # enables per-tool + per-family prompt specialization without touching
+    # the agent's execution logic (tools, budget, verification).
+    from .prompt_router import load_sa3_prompt, describe_selected_prompt  # noqa: PLC0415
+
+    issue_source = (issue.get("source") or "").strip() if isinstance(issue, dict) else ""
     try:
-        prompt_row = _load_prompt_v2(sb_pub)
+        prompt_row = load_sa3_prompt(
+            sb_pub,
+            source=issue_source,
+            family=family,
+            default_version="v2.0",
+        )
     except Exception as e:  # noqa: BLE001
         emit_fn(
             run_id,
             "sub-agent-3",
             "ERROR",
-            f"Failed to load agent prompt v2: {type(e).__name__}: {str(e)[:200]}",
+            f"Failed to load agent prompt via router: {type(e).__name__}: {str(e)[:200]}",
         )
         return None
 
@@ -686,6 +699,16 @@ def run_agentic_planner(
 
     budget = AgentBudget()
     tools = _make_tools(budget, run_id, emit_fn)
+
+    # Trace shows which prompt actually ran — makes it obvious in the UI
+    # when a specialized prompt kicks in vs the generic fallback.
+    selection_desc = describe_selected_prompt(prompt_row, issue_source, family)
+    emit_fn(
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
+        f"🧭 SA-3 router selected prompt: {selection_desc}",
+    )
 
     emit_fn(
         run_id,
@@ -702,8 +725,139 @@ def run_agentic_planner(
         "family": family,
     }
 
+    # --- Execution context injection ---
+    # Tells the agent WHERE and HOW the fix should be applied (container image
+    # vs host vs IaC). The generic v2.0 prompt already handles os_vulnerability
+    # but without this context it defaults to host apt-get. This steers it
+    # toward Dockerfile-edit + docker-build for container-image findings, or
+    # host apt-get for trivy-os findings. Scalable: any scanner in the same
+    # category gets the same context automatically.
+    source = (issue.get("source") or "").lower()
+    if "trivy-image" in source or "snyk-container" in source or "grype-image" in source:
+        user_payload["execution_context"] = {
+            "target_type": "container_image",
+            "fix_approach": (
+                "Edit the Dockerfile to REMOVE the vulnerable package version pin entirely "
+                "(e.g. change 'openssl=1.1.1f-1ubuntu2' to just 'openssl'). "
+                "This lets apt-get install the latest available patched version at build time. "
+                "Do NOT specify a target version — just remove the =X.Y.Z pin. "
+                "Then rebuild with docker build --no-cache."
+            ),
+            "dockerfile_path": "/opt/vuln-labs/infra-lab/Dockerfile",
+            "build_directory": "/opt/vuln-labs/infra-lab",
+            "image_ref": "vuln-lab-image:latest",
+            "rebuild_command": "cd /opt/vuln-labs/infra-lab && docker build --no-cache -t vuln-lab-image:latest .",
+            "sed_pattern_example": "sed -i 's/<pkg>=<any_version>/<pkg>/' /opt/vuln-labs/infra-lab/Dockerfile",
+            "rescan_command": "trivy image vuln-lab-image:latest --scanners vuln --severity HIGH,CRITICAL --format json",
+            "rescan_target": "vuln-lab-image:latest (the rebuilt image, NOT ubuntu:20.04)",
+            "validation_guidance": (
+                "IMPORTANT: The re-scan validation must check for the ABSENCE of the SPECIFIC CVE being fixed, "
+                "NOT for zero total vulnerabilities. The image has OTHER packages with their own CVEs — "
+                "fixing one CVE does not make the entire image vuln-free. "
+                "Use a command like: trivy image vuln-lab-image:latest --format json 2>&1 | grep -c '<CVE_ID>' || true "
+                "with expected='0' (zero occurrences of that specific CVE). "
+                "Do NOT use expected='\"Vulnerabilities\": []' — that will always fail on a multi-package image."
+            ),
+            "rescan_exit_code_note": (
+                "CRITICAL SHELL SEMANTICS: grep -c returns exit code 1 when match count is 0 "
+                "(i.e. when the CVE is GONE — the desired outcome). This will cause the execution "
+                "engine to treat a SUCCESSFUL fix as a failure. You MUST append '|| true' to any "
+                "grep -c command so the exit code is always 0. The validation engine checks the "
+                "OUTPUT value (expecting '0'), not the exit code. "
+                "Correct:  trivy image ... --format json 2>&1 | grep -c 'CVE-xxx' || true "
+                "Wrong:    trivy image ... --format json | grep -c 'CVE-xxx'"
+            ),
+            "remediation_steps_rules": (
+                "Do NOT put the re-scan/validation command in remediation_steps. "
+                "remediation_steps should contain ONLY actionable fix commands: "
+                "backup, sed edit, docker build, verify edit (grep Dockerfile). "
+                "The re-scan belongs EXCLUSIVELY in validation_tests with is_rescan=true."
+            ),
+            "prohibited_commands": [
+                "sudo reboot",
+                "apt-get install on host",
+                "edits to /etc/ or /usr/ on host",
+                "specifying a fixed version number in sed (just remove the pin)",
+                "expecting zero total vulnerabilities in validation (check only the specific CVE)",
+                "grep -c without || true (grep returns exit 1 on zero matches, which breaks execution)",
+            ],
+        }
+    elif "trivy-os" in source or "tenable" in source or "qualys" in source or "rapid7" in source:
+        user_payload["execution_context"] = {
+            "target_type": "host_os",
+            "fix_approach": (
+                "Run apt-get update && apt-get install --only-upgrade <pkg> -y directly on the host. "
+                "NEVER pin to a specific version (apt-get install <pkg>=<version>) — public Ubuntu/Debian "
+                "repos only serve the LATEST point release and historical versions are removed. Always use: "
+                "apt-get install --only-upgrade <pkg> -y (upgrades to latest available, which includes all "
+                "prior security fixes). This is how AWS SSM Patch Manager, Ansible, and all enterprise "
+                "patch tools operate."
+            ),
+            "verification_approach": (
+                "After the upgrade, verify the installed version is GREATER than the vulnerable version "
+                "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version — just "
+                "confirm the version number is higher than the one reported in the finding."
+            ),
+            "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
+            "rescan_target": "/ (the host root filesystem)",
+            "validation_guidance": (
+                "IMPORTANT: The re-scan must check for the ABSENCE of the SPECIFIC CVE being fixed, "
+                "NOT for zero total vulnerabilities. The host has many packages with other CVEs. "
+                "Use: trivy rootfs / --format json 2>&1 | grep -c '<CVE_ID>' || true "
+                "with expected='0'. The '|| true' is CRITICAL because grep -c returns exit 1 when "
+                "the count is 0 (the desired outcome), which would otherwise fail the step."
+            ),
+            "remediation_steps_rules": (
+                "Do NOT put the re-scan/validation command in remediation_steps. "
+                "remediation_steps should contain ONLY actionable fix commands: "
+                "1. apt-get update, 2. apt-get install --only-upgrade <pkg> -y, "
+                "3. dpkg -l <pkg> (version verification). "
+                "The re-scan belongs EXCLUSIVELY in validation_tests with is_rescan=true."
+            ),
+            "reboot_policy": (
+                "Do NOT include 'sudo reboot' unless the CVE is in a KERNEL package "
+                "(linux-image-*, linux-headers-*), libc6, or systemd. Userspace packages "
+                "(apparmor, apport, openssl, curl, etc.) do NOT require a reboot — the fix "
+                "takes effect immediately or on next service restart."
+            ),
+            "prohibited_commands": [
+                "sudo reboot (unless kernel/libc/systemd CVE)",
+                "docker build",
+                "terraform",
+                "apt-get install <pkg>=<specific_version> (never pin versions against public repos)",
+                "grep -c without || true (grep returns exit 1 on zero matches)",
+            ],
+        }
+
+    # --- Knowledge Base injection (few-shot from proven fixes) ---
+    kb_context_msg: list[Any] = []
+    try:
+        from .kb_retrieval import retrieve_examples, format_examples_for_agentic_prompt  # noqa: PLC0415
+        from ...db import supabase_admin  # noqa: PLC0415
+
+        sb_pub = supabase_admin()
+        check_id = (
+            issue.get("source_vuln_id")
+            or issue.get("cve_id")
+            or (issue.get("source_raw") or {}).get("check_id")
+        )
+        kb_examples = retrieve_examples(sb_pub, check_id=check_id, family=family)
+        if kb_examples:
+            kb_text = format_examples_for_agentic_prompt(kb_examples)
+            if kb_text:
+                kb_context_msg = [HumanMessage(content=kb_text)]
+                emit_fn(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"Injected {len(kb_examples)} proven fix pattern(s) from knowledge base",
+                )
+    except Exception:  # noqa: BLE001, S110
+        pass  # KB retrieval is best-effort
+
     messages: list[Any] = [
         SystemMessage(content=prompt_row["prompt_text"]),
+        *kb_context_msg,
         HumanMessage(content=json.dumps(user_payload, default=str)),
     ]
 

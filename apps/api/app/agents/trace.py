@@ -1,6 +1,26 @@
+import logging
+import os
 from typing import Any
 
 from ..db import supabase_admin
+
+# =============================================================================
+# File logger — mirrors trace events to a local log file
+# =============================================================================
+_LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+
+_trace_logger = logging.getLogger("agent_trace")
+_trace_logger.setLevel(logging.DEBUG)
+_trace_logger.propagate = False  # Don't send to root logger / terminal
+
+# File handler — append mode, never deletes old traces
+_log_file = os.path.join(_LOG_DIR, "agent_trace.log")
+_file_handler = logging.FileHandler(_log_file, mode="a", encoding="utf-8")
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+)
+_trace_logger.addHandler(_file_handler)
 
 
 def emit_trace(
@@ -11,6 +31,10 @@ def emit_trace(
     payload: dict[str, Any] | None = None,
 ) -> None:
     """Insert one row into agent_trace_events. Realtime pushes it to subscribed clients."""
+    # Log to file + console
+    _trace_logger.info(f"[{agent}] [{event_type}] {message}")
+
+    # Write to DB (for UI)
     sb = supabase_admin()
     sb.table("agent_trace_events").insert(
         {

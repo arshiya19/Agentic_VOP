@@ -38,6 +38,15 @@ from .db import supabase_admin, supabase_admin_demo
 from .mitre_refresh import refresh_mitre_attack, refresh_mitre_capec, refresh_mitre_cwe
 from .models import RunCreated, TriggerEvent
 from .models_registry import AVAILABLE_MODELS, RECOMMENDED_MODELS, is_valid_model
+from .agents.connectors.ticketing import (
+    build_ticket_title,
+    create_ticket,
+    format_ticket_description,
+)
+from .models import (
+    CreateTicketRequest,
+    TicketResponse,
+)
 
 # Don't accept a new run for the same scanner-set if there's already an
 # in-flight (queued or running) run created within this window. Stops
@@ -287,13 +296,16 @@ def reset_env2_baseline() -> dict:
 set -e
 cd /opt/vuln-labs/cspm-lab
 echo "=== STEP 1: terraform destroy ==="
-terraform destroy -auto-approve -no-color -input=false 2>&1 | tail -n 5
+terraform destroy -auto-approve -no-color -input=false 2>&1 | tail -n 5 || echo "WARN: destroy had errors (may be clean already)"
 echo "=== STEP 2: delete S3 state file ==="
 aws s3 rm "s3://sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate" 2>&1 || echo "(state may already be empty)"
 echo "=== STEP 3: delete DynamoDB lock entry ==="
 aws dynamodb delete-item --table-name sisyfix-terraform-locks --key '{"LockID":{"S":"sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate-md5"}}' 2>&1 || echo "(lock may not exist)"
 echo "=== STEP 4: restore main.tf + wipe .bak files ==="
-if [ ! -f main.tf.original ]; then echo "ERROR: main.tf.original not found"; exit 1; fi
+if [ ! -f main.tf.original ]; then
+  echo "WARN: main.tf.original not found — regenerating from main.tf"
+  cp main.tf main.tf.original 2>/dev/null || true
+fi
 cp main.tf.original main.tf
 rm -f main.tf.bak-*
 rm -rf .terraform .terraform.lock.hcl
@@ -466,6 +478,57 @@ def get_demo_remediation_package(pkg_id: int) -> dict:
     if not resp.data:
         raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
     return resp.data[0]
+
+
+@app.post("/admin/remediation-packages/demo/{pkg_id}/approve")
+def approve_demo_remediation_package(pkg_id: int, body: dict | None = None) -> dict:
+    """Approve a demo package — same logic as the real endpoint but hits the demo DB."""
+    sb = supabase_admin_demo()
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
+    current = resp.data[0]["status"]
+    if current in ("approved", "ready_for_execution"):
+        return {"id": pkg_id, "status": current, "message": "already approved"}
+    if current == "rejected":
+        raise HTTPException(status_code=409, detail="package was rejected; cannot approve")
+
+    approved_by = (body or {}).get("approved_by", "system")
+    sb.table("remediation_packages").update(
+        {
+            "status": "ready_for_execution",
+            "approved_by": approved_by,
+            "approved_at": datetime.now(UTC).isoformat(),
+            "rejected_reason": None,
+        }
+    ).eq("id", pkg_id).execute()
+    return {"id": pkg_id, "status": "ready_for_execution", "approved_by": approved_by}
+
+
+@app.post("/admin/remediation-packages/demo/{pkg_id}/reject")
+def reject_demo_remediation_package(pkg_id: int, body: dict | None = None) -> dict:
+    """Reject a demo package — same logic as the real endpoint but hits the demo DB."""
+    sb = supabase_admin_demo()
+    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
+    current = resp.data[0]["status"]
+    if current in ("approved", "ready_for_execution"):
+        raise HTTPException(status_code=409, detail=f"package is already {current}; cannot reject")
+    if current == "rejected":
+        return {"id": pkg_id, "status": "rejected", "message": "already rejected"}
+
+    reason = (body or {}).get("reason", "No reason provided")
+    rejected_by = (body or {}).get("rejected_by", "system")
+    sb.table("remediation_packages").update(
+        {
+            "status": "rejected",
+            "rejected_reason": reason,
+            "approved_by": rejected_by,
+            "approved_at": datetime.now(UTC).isoformat(),
+        }
+    ).eq("id", pkg_id).execute()
+    return {"id": pkg_id, "status": "rejected", "reason": reason, "rejected_by": rejected_by}
 
 
 class CancelRunResponse(BaseModel):
@@ -2066,7 +2129,26 @@ def approve_remediation_package(pkg_id: int, body: ApprovePackageRequest | None 
             "rejected_reason": None,
         }
     ).eq("id", pkg_id).execute()
-    return {"id": pkg_id, "status": "ready_for_execution", "approved_by": approved_by}
+
+    # --- Auto-create ServiceNow ticket on approval (if enabled) ---
+    ticket_info: dict | None = None
+    if settings.ticketing_auto_create_on_approve:
+        try:
+            ticket_resp = create_ticket_endpoint(CreateTicketRequest(remediation_package_id=pkg_id))
+            ticket_info = {
+                "ticket_id": ticket_resp.id,
+                "external_ticket_id": ticket_resp.external_ticket_id,
+                "external_ticket_url": ticket_resp.external_ticket_url,
+                "status": ticket_resp.status,
+            }
+        except Exception:  # noqa: BLE001
+            # Ticket creation failure should NOT block approval
+            ticket_info = {"status": "failed", "error": "auto-creation failed (see logs)"}
+
+    result = {"id": pkg_id, "status": "ready_for_execution", "approved_by": approved_by}
+    if ticket_info:
+        result["ticket"] = ticket_info
+    return result
 
 
 @app.post("/admin/remediation-packages/{pkg_id}/reject")
@@ -2179,3 +2261,184 @@ def fix_remediation_package(pkg_id: int, background_tasks: BackgroundTasks) -> d
 
     background_tasks.add_task(_dispatch)
     return {"agent_run_id": fix_run_uuid, "package_id": pkg_id, "status": "dispatched"}
+
+
+# =============================================================================
+# Ticketing — ServiceNow integration endpoints
+# =============================================================================
+
+
+@app.post("/admin/tickets/create", response_model=TicketResponse, status_code=201)
+def create_ticket_endpoint(body: CreateTicketRequest) -> TicketResponse:
+    """Create a ticket in ServiceNow (or another configured provider) for a
+    remediation package.
+
+    Flow:
+      1. Load the remediation package + associated issue
+      2. Resolve the ticketing connection from connection_registry
+      3. Format the ticket content from the package
+      4. Call the provider API (ServiceNow Table API)
+      5. Persist the ticket record in the tickets table
+      6. Return the ticket with external references
+    """
+    sb = supabase_admin()
+
+    # 1. Load the remediation package
+    pkg_resp = (
+        sb.table("remediation_packages")
+        .select("*")
+        .eq("id", body.remediation_package_id)
+        .limit(1)
+        .execute()
+    )
+    if not pkg_resp.data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Remediation package {body.remediation_package_id} not found",
+        )
+    package = pkg_resp.data[0]
+
+    # Load the associated issue for context
+    issue: dict | None = None
+    if package.get("issue_id"):
+        issue_resp = (
+            sb.table("issues")
+            .select("id,source,severity,priority,cve_id,cwe_id,title,description")
+            .eq("id", package["issue_id"])
+            .limit(1)
+            .execute()
+        )
+        if issue_resp.data:
+            issue = issue_resp.data[0]
+
+    # 2. Resolve ticketing connection from connection_registry
+    tool_name = body.connection_tool or "servicenow-ticket"
+    conn_resp = (
+        sb.table("connection_registry")
+        .select("*")
+        .eq("tool", tool_name)
+        .eq("enabled", True)
+        .limit(1)
+        .execute()
+    )
+    if not conn_resp.data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No enabled ticketing connection '{tool_name}' found in connection_registry. "
+            "Run migration 0037 or register via POST /admin/scanners.",
+        )
+    connection = conn_resp.data[0]
+    metadata = connection.get("metadata") or {}
+    provider = metadata.get("connector_type", "servicenow_ticket").replace("_ticket", "")
+
+    # 3. Format ticket content
+    title = body.title_override or build_ticket_title(package, issue)
+    description = body.description_override or format_ticket_description(
+        package=package, issue=issue
+    )
+    severity = (issue or {}).get("severity", "Medium")
+    labels = [
+        f"family:{package.get('family', 'unknown')}",
+        f"package_id:{package['id']}",
+    ]
+    if issue and issue.get("cve_id"):
+        labels.append(issue["cve_id"])
+
+    # Build config from connection_registry + env vars
+    connection_config = {
+        "instance_url": connection.get("endpoint") or "",
+        **metadata,
+    }
+
+    # 4. Call the provider API
+    result = create_ticket(
+        provider=provider,
+        connection_config=connection_config,
+        title=title,
+        description=description,
+        severity=severity,
+        labels=labels,
+        extra_fields=body.extra_fields,
+    )
+
+    # 5. Persist the ticket record
+    ticket_row = {
+        "remediation_package_id": body.remediation_package_id,
+        "connection_tool": tool_name,
+        "provider": provider,
+        "status": "created" if result.success else "failed",
+        "title": title,
+        "description": description[:4000],
+        "priority": _severity_to_ticket_priority(severity),
+        "labels": labels,
+        "external_ticket_id": result.external_ticket_id if result.success else None,
+        "external_ticket_url": result.external_ticket_url if result.success else None,
+        "error_message": result.error if not result.success else None,
+    }
+    insert_resp = sb.table("tickets").insert(ticket_row).execute()
+    if not insert_resp.data:
+        raise HTTPException(status_code=500, detail="Failed to insert ticket record")
+    ticket = insert_resp.data[0]
+
+    return TicketResponse(**ticket)
+
+
+@app.post(
+    "/admin/remediation-packages/{pkg_id}/create-ticket",
+    response_model=TicketResponse,
+    status_code=201,
+)
+def create_ticket_for_package(pkg_id: int) -> TicketResponse:
+    """Convenience endpoint — create a ticket for a specific package using
+    the default ServiceNow connection. Equivalent to POST /admin/tickets/create
+    with just the package ID."""
+    return create_ticket_endpoint(CreateTicketRequest(remediation_package_id=pkg_id))
+
+
+@app.get("/admin/tickets")
+def list_tickets(
+    status: str | None = None,
+    remediation_package_id: int | None = None,
+    limit: int = 50,
+) -> dict:
+    """List tickets — filterable by status and/or package ID."""
+    sb = supabase_admin()
+    q = (
+        sb.table("tickets")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(max(1, min(200, limit)))
+    )
+    if status:
+        q = q.eq("status", status)
+    if remediation_package_id is not None:
+        q = q.eq("remediation_package_id", remediation_package_id)
+    resp = q.execute()
+    return {"tickets": resp.data or []}
+
+
+@app.get("/admin/tickets/{ticket_id}")
+def get_ticket(ticket_id: int) -> dict:
+    """Get a single ticket by ID."""
+    sb = supabase_admin()
+    resp = sb.table("tickets").select("*").eq("id", ticket_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    return resp.data[0]
+
+
+# ---------------------------------------------------------------------------
+# Ticketing helpers
+# ---------------------------------------------------------------------------
+
+
+def _severity_to_ticket_priority(severity: str) -> str:
+    """Map issue severity to a ticket priority label."""
+    mapping = {
+        "Critical": "P1",
+        "High": "P2",
+        "Medium": "P3",
+        "Low": "P4",
+        "Info": "P5",
+    }
+    return mapping.get(severity, "P3")

@@ -70,6 +70,25 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 ]
 
 
+# Per-source "scoops" — take top N highest-risk issues from a source
+# regardless of what's in the pinned list. Lets us bring new scanner
+# categories into the demo without needing to hand-curate their check IDs.
+#
+# Ordering: applied AFTER pinned picks, so pinned Checkov issues always
+# land first, then the scoop fills in additional findings from other sources.
+#
+# Each entry: source (matches issues.source exactly) → N issues to pick.
+_SOURCE_SCOOPS: dict[str, int] = {
+    "trivy-image-ec2": 4,  # container image OS-package CVEs (primary focus)
+    "trivy-image-java-ec2": 4,  # Java image CVEs
+    "trivy-image-python-ec2": 4,  # Python image CVEs
+    "trivy-os-ec2": 4,  # host-level OS CVEs (Ubuntu/Debian on env2)
+    "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
+    # "trivy-fs-ec2": 4,     # app-level dep CVEs (needs DependencyStrategy)
+    # "semgrep-ec2": 4,      # SAST findings (needs CodeEditStrategy)
+}
+
+
 def _resource_label(issue: dict) -> str:
     """Extract the HCL-style resource label from an issue's asset_identity."""
     ai = issue.get("asset_identity") or {}
@@ -207,6 +226,48 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
         f"Pinned picks: {len(picks)}/{len(_PINNED_DEMO_CHECKS)} hit "
         f"(hit={pinned_hits or '-'}, missed={pinned_misses or '-'})",
     )
+
+    # Per-source scoops — pull top N highest-risk issues from each configured
+    # source. Runs AFTER pinned picks so those always land first. Any issue
+    # already selected by the pinned pass is skipped (dedup by source_vuln_id
+    # + resource_label to match _PINNED lookup semantics).
+    already_picked_keys = {(p.get("source_vuln_id") or "", _resource_label(p)) for p in picks}
+    by_source: dict[str, list[dict]] = {}
+    for iss in ec2_issues:
+        by_source.setdefault(iss.get("source") or "", []).append(iss)
+
+    for source_name, n in _SOURCE_SCOOPS.items():
+        pool = by_source.get(source_name, [])
+        if not pool:
+            emit_trace_demo(
+                run_id,
+                "system",
+                "MESSAGE",
+                f"Scoop skipped: no issues found for source={source_name!r}",
+            )
+            continue
+
+        # Sort by (derived_risk DESC, severity_rank DESC) — same ordering
+        # the fallback path already uses.
+        pool_sorted = sorted(pool, key=_rank, reverse=True)
+
+        scooped_this_source = 0
+        for iss in pool_sorted:
+            if scooped_this_source >= n:
+                break
+            key = (iss.get("source_vuln_id") or "", _resource_label(iss))
+            if key in already_picked_keys:
+                continue
+            picks.append(iss)
+            already_picked_keys.add(key)
+            scooped_this_source += 1
+
+        emit_trace_demo(
+            run_id,
+            "system",
+            "MESSAGE",
+            f"Scoop {source_name}: picked {scooped_this_source}/{n} (pool={len(pool)} available)",
+        )
 
     # Fallback: if pinned picks < 2, top up from families that weren't
     # covered by any pinned hit. Preserves the demo running on fresh env2

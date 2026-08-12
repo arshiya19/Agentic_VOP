@@ -322,7 +322,7 @@ def _resolve_asset(issue: dict, asset_index: dict) -> dict | None:
     name_or_alias = asset_index["name_or_alias"]
 
     # 1. Direct asset identifiers — strongest signal
-    for key in ("project", "repo"):
+    for key in ("project", "repo", "name", "os"):
         v = ai.get(key)
         if v and v in name_or_alias:
             return name_or_alias[v]

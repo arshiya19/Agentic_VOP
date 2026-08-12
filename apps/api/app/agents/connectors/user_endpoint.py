@@ -122,7 +122,39 @@ def fetch(
             f"user_endpoint connector: response from {endpoint} was not valid JSON"
         ) from e
 
-    return _extract_with_fallbacks(payload, response_path, registry_entry, run_id)
+    rows = _extract_with_fallbacks(payload, response_path, registry_entry, run_id)
+
+    # Optional cap — limits how many raw findings Sub-Agent 1 will normalize.
+    # Useful for scanners that produce thousands of rows (trivy rootfs can
+    # emit 16K+ on an unpatched host) where only a small sample is needed
+    # for the demo pipeline. Set `metadata.max_findings` on the registry row
+    # to activate.
+    #
+    # Optional filter — `metadata.pkg_name_filter` is a comma-separated list
+    # of package name substrings. When set, only findings whose PkgName/pkg_name
+    # contains one of these substrings are kept. Applied BEFORE the cap so we
+    # get the RIGHT findings, not just the first N. Use for image scanners where
+    # we only want pip/npm/maven packages (fixable) and NOT OS packages (unfixable).
+    pkg_filter_str = metadata.get("pkg_name_filter")
+    if pkg_filter_str and isinstance(rows, list):
+        filters = [f.strip().lower() for f in pkg_filter_str.split(",") if f.strip()]
+        if filters:
+            filtered = []
+            for row in rows:
+                pkg = ""
+                if isinstance(row, dict):
+                    pkg = (
+                        row.get("PkgName") or row.get("pkg_name") or row.get("pkgName") or ""
+                    ).lower()
+                if any(f in pkg for f in filters):
+                    filtered.append(row)
+            rows = filtered
+
+    max_findings = metadata.get("max_findings")
+    if max_findings and isinstance(rows, list) and len(rows) > int(max_findings):
+        rows = rows[: int(max_findings)]
+
+    return rows
 
 
 # ----------------------------------------------------------------------------

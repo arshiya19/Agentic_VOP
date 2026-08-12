@@ -513,7 +513,7 @@
 .detail-card-left {
   flex: 1;
   padding: 24px;
-  overflow: hidden;
+  overflow-y: auto;
   border-right: 1px solid #2D3748;
   display: flex;
   flex-direction: column;
@@ -647,10 +647,9 @@
   border: 1px solid #2D3748;
   border-radius: 8px;
   overflow: hidden;
-  flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  min-height: 120px;
 }
 
 .evidence-header {

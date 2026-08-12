@@ -35,6 +35,8 @@ export function useDashboardData(chartRange = '14d') {
     validated: null, // not tracked yet
     remediated: null, // not tracked yet
     severityBreakdown: { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 },
+    todayAdded: 0, // issues added today
+    previousTotal: 0, // total minus today's additions
   })
   const [latestCves, setLatestCves] = useState([])
   const [topRiskDrivers, setTopRiskDrivers] = useState([])
@@ -62,11 +64,11 @@ export function useDashboardData(chartRange = '14d') {
       const days = RANGE_TO_DAYS[chartRange] ?? 14
       const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
 
-      const [countRes, severityRes, topRiskRes, recentRes, exposureRes] = await Promise.all([
+      const [countRes, severityRes, topRiskRes, recentRes, exposureRes, remPkgRes] = await Promise.all([
         // 1. Total issue count (head=true means we only get the count, no rows)
         supabase.from('issues').select('*', { count: 'exact', head: true }),
 
-        // 2. Severity + remediation breakdown — pull just those two columns
+        // 2. Severity + remediation breakdown — pull just those columns
         supabase.from('issues').select('severity, remediation_suggestion'),
 
         // 3. Top 10 by derived_risk (the "Top Risk Drivers" table)
@@ -95,6 +97,11 @@ export function useDashboardData(chartRange = '14d') {
             'severity, asset_id, asset_exposure, asset_business_criticality, ' +
               'asset_compliance_tags, asset_network_zone'
           ),
+
+        // 6. Remediation packages count (awaiting_approval + ready_for_execution)
+        supabase
+          .from('remediation_packages')
+          .select('status, pathways, recommended_pathway_index, created_at, approved_at'),
       ])
 
       if (!mounted) return
@@ -102,21 +109,88 @@ export function useDashboardData(chartRange = '14d') {
       // ---- stats ----
       const severityBreakdown = { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 }
       let requiringAction = 0
-      let readyToRemediate = 0
       for (const row of severityRes.data || []) {
         if (row.severity && severityBreakdown[row.severity] !== undefined) {
           severityBreakdown[row.severity] += 1
         }
         if (row.severity === 'Critical' || row.severity === 'High') requiringAction += 1
-        if (row.remediation_suggestion) readyToRemediate += 1
+      }
+      // Count issues added today
+      const todayStr = new Date().toISOString().slice(0, 10)
+      let todayAdded = 0
+      for (const row of recentRes.data || []) {
+        if ((row.created_at || '').slice(0, 10) === todayStr) todayAdded += 1
+      }
+
+      // Count remediation packages that are ready
+      let readyToRemediate = 0
+      let validated = 0
+      let confidenceSum = 0
+      let confidenceCount = 0
+      let remediated = 0
+      let mttrSum = 0
+      let mttrCount = 0
+      if (remPkgRes.data && remPkgRes.data.length > 0) {
+        for (const row of remPkgRes.data || []) {
+          if (row.status === 'awaiting_approval' || row.status === 'ready_for_execution') {
+            readyToRemediate += 1
+          }
+          if (row.status === 'ready_for_execution') {
+            remediated += 1
+            // Compute MTTR: time from created_at to approved_at
+            if (row.created_at && row.approved_at) {
+              const created = new Date(row.created_at)
+              const approved = new Date(row.approved_at)
+              const diffMs = approved - created
+              if (diffMs > 0) {
+                mttrSum += diffMs
+                mttrCount += 1
+              }
+            }
+          }
+          // Check validation status from the recommended pathway
+          const pwIdx = row.recommended_pathway_index ?? 0
+          const pw = row.pathways?.[pwIdx] || row.pathways?.[0]
+          if (pw?.validation_metadata?.status === 'validated') {
+            validated += 1
+          }
+          if (pw?.confidence_score != null) {
+            confidenceSum += pw.confidence_score
+            confidenceCount += 1
+          }
+        }
+      } else {
+        // Fallback: count issues that have an AI-suggested fix
+        for (const row of severityRes.data || []) {
+          if (row.remediation_suggestion) readyToRemediate += 1
+        }
+      }
+
+      const total = countRes.count ?? 0
+      const avgConfidence = confidenceCount > 0 ? Math.round(confidenceSum / confidenceCount) : null
+      // MTTR in days (or hours if < 1 day)
+      let avgMttr = null
+      if (mttrCount > 0) {
+        const avgMs = mttrSum / mttrCount
+        const avgDays = avgMs / (1000 * 60 * 60 * 24)
+        if (avgDays >= 1) {
+          avgMttr = `${Math.round(avgDays)}d`
+        } else {
+          const avgHours = avgMs / (1000 * 60 * 60)
+          avgMttr = `${Math.round(avgHours)}h`
+        }
       }
       setStats({
-        total: countRes.count ?? 0,
+        total,
         requiringAction,
         readyToRemediate,
-        validated: null,
-        remediated: null,
+        validated: validated || null,
+        avgConfidence,
+        remediated: remediated || null,
+        avgMttr,
         severityBreakdown,
+        todayAdded,
+        previousTotal: total - todayAdded,
       })
 
       // ---- latest CVEs (dedupe, keep highest severity per CVE) ----

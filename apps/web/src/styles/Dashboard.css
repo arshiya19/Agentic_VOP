@@ -102,6 +102,30 @@
   margin-bottom: 8px;
 }
 
+/* Delta badge (+N) — shows when new issues added today */
+.stat-delta-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(16, 185, 129, 0.15);
+  color: #6EE7B7;
+  cursor: default;
+  animation: delta-pulse 2s ease-in-out 3;
+  position: relative;
+}
+
+.stat-delta-badge:hover {
+  background: rgba(16, 185, 129, 0.25);
+}
+
+@keyframes delta-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 .stat-card-value {
   font-size: var(--stat-value-size);
   font-weight: 600;
@@ -130,12 +154,73 @@
 
 .stat-card-details {
   font-size: var(--stat-details-size);
-  color: #FFFFFF !important;
+  color: #94A3B8 !important;
   line-height: 1.4;
   text-align: left !important;
   width: 100%;
   word-break: break-word;
   overflow-wrap: break-word;
+}
+
+/* Severity badges in Risk Exposure card */
+.stat-card-details.severity-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sev-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sev-badge.critical {
+  background: rgba(239, 68, 68, 0.15);
+  color: #FCA5A5;
+}
+
+.sev-badge.high {
+  background: rgba(249, 115, 22, 0.15);
+  color: #FDBA74;
+}
+
+.sev-badge.medium {
+  background: rgba(234, 179, 8, 0.15);
+  color: #FDE047;
+}
+
+/* MTTR badge styling */
+.stat-card-details.mttr-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(6, 182, 212, 0.1);
+  color: #67E8F9 !important;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 11px;
+  width: auto;
+  letter-spacing: 0.3px;
+}
+
+/* Confidence badge styling */
+.stat-card-details.confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(16, 185, 129, 0.1);
+  color: #6EE7B7 !important;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 11px;
+  width: auto;
+  letter-spacing: 0.3px;
 }
 
 /* Trend arrows in details */
