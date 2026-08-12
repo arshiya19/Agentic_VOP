@@ -275,65 +275,6 @@ cd /opt/vuln-labs/python-image-lab
 timeout 300 docker build -t vuln-python-image:latest . || echo "WARNING: python-image-lab docker build timed out or failed"
 
 # =============================================================================
-# 3b. Java Image Lab — Outdated Tomcat + JDK base image (for Trivy Image Java)
-# =============================================================================
-mkdir -p /opt/vuln-labs/java-image-lab
-cat > /opt/vuln-labs/java-image-lab/Dockerfile << 'JAVADKEOF'
-# Intentionally outdated Java runtime environment
-# Tomcat 9.0.30 + OpenJDK 8 on Debian Buster — has JDK CVEs, Tomcat CVEs,
-# and Debian OS-level CVEs baked into the base image layers.
-# No apt-get needed — Debian Buster repos are EOL and unavailable.
-FROM tomcat:9.0.30-jdk8-openjdk
-
-# Deploy a placeholder webapp
-RUN mkdir -p /usr/local/tomcat/webapps/ROOT
-RUN echo '<html><body><h1>Vulnerable Java App</h1></body></html>' > /usr/local/tomcat/webapps/ROOT/index.html
-
-# VULN: Running as root (no USER instruction)
-# VULN: No HEALTHCHECK defined
-EXPOSE 8080
-CMD ["catalina.sh", "run"]
-JAVADKEOF
-
-cd /opt/vuln-labs/java-image-lab
-docker build -t vuln-java-image:latest . 2>/dev/null || true
-
-# =============================================================================
-# 3c. Python Image Lab — Outdated Python with vulnerable pip packages (for Trivy Image Python)
-# =============================================================================
-mkdir -p /opt/vuln-labs/python-image-lab
-cat > /opt/vuln-labs/python-image-lab/Dockerfile << 'PYDKEOF'
-# Intentionally outdated Python runtime with vulnerable dependencies
-FROM python:3.8-slim-buster
-
-# Install vulnerable pip packages directly into the image
-RUN pip install --no-cache-dir \
-    flask==2.0.0 \
-    jinja2==3.0.0 \
-    requests==2.25.0 \
-    cryptography==3.3.2 \
-    pyyaml==5.3.1 \
-    urllib3==1.26.4 \
-    werkzeug==2.0.0 \
-    setuptools==58.0.0 \
-    pillow==8.1.0 \
-    certifi==2020.12.5
-
-# Add a placeholder app
-RUN mkdir -p /app
-RUN echo 'from flask import Flask; app = Flask(__name__)' > /app/main.py
-
-# VULN: Running as root (no USER instruction)
-# VULN: No HEALTHCHECK defined
-WORKDIR /app
-EXPOSE 5000
-CMD ["python", "main.py"]
-PYDKEOF
-
-cd /opt/vuln-labs/python-image-lab
-docker build -t vuln-python-image:latest . 2>/dev/null || true
-
-# =============================================================================
 # 4. CSPM Lab — Vulnerable Terraform (applied as real AWS resources)
 #    Creates intentionally misconfigured S3 bucket + Security Group.
 #    SA4 will later fix these by editing the .tf and re-applying.
