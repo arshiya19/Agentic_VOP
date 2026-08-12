@@ -51,7 +51,6 @@ _RESCAN_CLI_MARKERS: tuple[str, ...] = (
     "trivy rootfs",
     "trivy fs",
     "trivy image",
-    "dpkg -l",
     "apt list --installed",
     "rpm -qa",
     "yum list installed",
