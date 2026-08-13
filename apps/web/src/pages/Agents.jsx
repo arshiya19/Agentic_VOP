@@ -65,9 +65,11 @@ export default function Agents() {
   const [selectedTrace, setSelectedTrace] = useState(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [modelConfigOpen, setModelConfigOpen] = useState(false)
+  const [showLogs, setShowLogs] = useState(false)
   // env2 reset state — button next to Real/Demo toggle
   const [resetting, setResetting] = useState(false)
   const [resetToast, setResetToast] = useState(null)  // { kind: 'success'|'error', message: string }
+  const [dataLoaded, setDataLoaded] = useState(false)  // Track if initial data has been fetched
   // Contextual switch: 'real' (supabase realtime on public.*) or 'demo' (poll
   // backend demo endpoints). Set by Integrations page's trigger buttons; can
   // be overridden manually via the pill at the top of the page.
@@ -239,6 +241,40 @@ export default function Agents() {
     return () => clearTimeout(t)
   }, [resetToast])
 
+  // ----- Stage mapping and current stage detection -----
+  const STAGES = [
+    { id: 'connector', name: 'Smart Connector', agent: 'sub-agent-1' },
+    { id: 'enrichment', name: 'Enrichment Specialist', agent: 'sub-agent-2' },
+    { id: 'planning', name: 'Remediation Planner', agent: 'sub-agent-3' },
+    { id: 'fixing', name: 'Fixer', agent: 'sub-agent-4' },
+  ]
+
+  const getCurrentStage = () => {
+    const activeRunIds = new Set(
+      runs.filter((r) => r.status === 'running').map((r) => r.run_id)
+    )
+    
+    if (activeRunIds.size === 0) return null
+
+    // Find the most recent event from any agent to determine current stage
+    for (let i = 0; i < traceEvents.length; i++) {
+      const event = traceEvents[i]
+      if (activeRunIds.has(event.runId)) {
+        // Match agent to stage
+        for (let s = STAGES.length - 1; s >= 0; s--) {
+          const stage = STAGES[s]
+          if (event.from === stage.agent || event.from === 'master') {
+            return stage.id
+          }
+        }
+        break
+      }
+    }
+    return null
+  }
+
+  const currentStage = useMemo(() => getCurrentStage(), [traceEvents, runs])
+
   // ----- Derived: agents (master + 4 sub-agents with live status) -----
   // "working" = the agent has emitted at least one trace event for an
   // actively running run. Stays green for the entire duration of the run,
@@ -340,12 +376,6 @@ export default function Agents() {
     const errorEventsToday = traceEvents.filter(
       (e) => e.type === 'error' && new Date(e.timestamp) >= today
     )
-    const lastErrorAt =
-      errorEventsToday.length > 0
-        ? new Date(
-            errorEventsToday[errorEventsToday.length - 1].timestamp
-          ).toLocaleTimeString()
-        : '—'
 
     return {
       activeAgents: activeRuns > 0 ? 5 : 0,   // 1 master + 4 sub-agents
@@ -355,8 +385,6 @@ export default function Agents() {
       tasksQueued: queuedRuns,
       completedToday: completedTodayRuns.length,
       avgDuration,
-      errorsToday: errorEventsToday.length,
-      lastErrorAt,
     }
   }, [runs, traceEvents])
 
@@ -417,6 +445,101 @@ export default function Agents() {
 
   const handleClearTrace = () => {
     // Wire to your backend when ready
+  }
+
+  // ProgressFlow component
+  const ProgressFlow = () => {
+    const isRunning = runs.some((r) => r.status === 'running')
+    // Only show completed state if the MOST RECENT run is completed (and nothing is running)
+    const mostRecentRun = runs.length > 0 ? runs[0] : null
+    const hasCompletedRun = !isRunning && mostRecentRun && mostRecentRun.status === 'completed'
+
+    return (
+      <div className="progress-flow-container">
+        <div className="progress-flow-header">
+    
+          <p className="progress-flow-description">Agent pipeline execution</p>
+        </div>
+        {!isRunning && currentStage === null ? (
+          <div className="progress-flow-empty">
+            <svg viewBox="0 0 64 64" className="empty-icon">
+              <circle cx="32" cy="32" r="30" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.3" />
+              <path d="M32 16v32M16 32h32" stroke="currentColor" strokeWidth="2" opacity="0.3" strokeLinecap="round" />
+            </svg>
+            <p className="empty-title">No Active Run</p>
+            <p className="empty-description">Start a pipeline run to see progress</p>
+          </div>
+        ) : (
+          <div className="progress-flow">
+            {STAGES.map((stage, idx) => {
+              // When run completes, show all stages as completed
+              const isCompleted = hasCompletedRun || (
+                currentStage &&
+                STAGES.findIndex((s) => s.id === currentStage) > idx
+              )
+              const isCurrent = currentStage === stage.id && isRunning
+              const isUpcoming =
+                currentStage &&
+                STAGES.findIndex((s) => s.id === currentStage) < idx &&
+                !hasCompletedRun
+
+              return (
+                <div key={stage.id} className="progress-stage-vertical-wrapper">
+                  <div
+                    className={`progress-stage ${isCurrent ? 'current' : ''} ${
+                      isCompleted ? 'completed' : ''
+                    } ${isUpcoming ? 'upcoming' : ''}`}
+                  >
+                    <div className="stage-indicator">
+                      {isCompleted ? (
+                        <svg className="stage-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                      ) : isCurrent ? (
+                        <>
+                          <span className="stage-dot"></span>
+                          <span className="stage-pulse"></span>
+                        </>
+                      ) : (
+                        <span className="stage-number">{idx + 1}</span>
+                      )}
+                    </div>
+                    <div className="stage-info">
+                      <div className="stage-name">{stage.name}</div>
+                      <div className="stage-details">
+                        {isCurrent && isRunning && (
+                          <span className="stage-badge current-badge">
+                            <span className="badge-dot"></span>
+                            Processing
+                          </span>
+                        )}
+                        {isCompleted && (
+                          <span className="stage-badge completed-badge">
+                            <span className="badge-dot"></span>
+                            {hasCompletedRun && !isRunning ? 'Completed' : 'Done'}
+                          </span>
+                        )}
+                        {isUpcoming && (
+                          <span className="stage-badge upcoming-badge">
+                            <span className="badge-dot"></span>
+                            Queued
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  {idx < STAGES.length - 1 && (
+                    <div className={`progress-connector-vertical ${isCompleted || isCurrent ? 'active' : ''} ${hasCompletedRun ? 'completed' : ''}`}>
+                      <div className="vertical-arrow">↓</div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
   }
 
   const handleStopActiveRun = async () => {
@@ -572,13 +695,6 @@ export default function Agents() {
                 Avg duration: {stats.avgDuration ?? '—'}
               </div>
             </div>
-            <div className="agent-stat-card">
-              <div className="agent-stat-value error">{stats.errorsToday ?? '—'}</div>
-              <div className="agent-stat-label">Errors (today)</div>
-              <div className="agent-stat-sub">
-                Last error: {stats.lastErrorAt ?? '—'}
-              </div>
-            </div>
           </div>
 
           <div className="agents-content-grid">
@@ -716,6 +832,15 @@ export default function Agents() {
                     <span>Auto-scroll</span>
                   </label>
 
+                  <label className="trace-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showLogs}
+                      onChange={(e) => setShowLogs(e.target.checked)}
+                    />
+                    <span>Show Logs</span>
+                  </label>
+
                   <button className="trace-btn" onClick={handleClearTrace} title="Clear trace">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="3 6 5 6 21 6"></polyline>
@@ -737,7 +862,11 @@ export default function Agents() {
                 </div>
               </div>
 
-              <div className="trace-stream">
+              {/* somewhere here */}
+
+              {!showLogs && <ProgressFlow />}
+
+              <div className="trace-stream" style={{ display: showLogs ? 'block' : 'none' }}>
                 {filteredEvents.length === 0 ? (
                   <div className="trace-empty">
                     <div className="trace-empty-title">Waiting for agent activity</div>
