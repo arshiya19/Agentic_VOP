@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import ColumnToggle, { useColumnVisibility } from '../components/ColumnToggle'
@@ -6,6 +6,8 @@ import '../styles/Validation.css'
 import SeverityFilter from '../components/SeverityFilter'
 import ViewToggleEyeDropdown from '../components/ViewToggleEye'
 import Tooltip from '../components/Tooltip'
+
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 const validationColumns = [
   { key: 'issue_id', label: 'Issue ID' },
@@ -275,16 +277,102 @@ export default function Validation() {
   const [evidenceModalOpen, setEvidenceModalOpen] = useState(false)
   const [selectedEvidence, setSelectedEvidence] = useState(null)
   const [statusOverrides, setStatusOverrides] = useState({})
-  const [validationsData] = useState([])
-  const [assetsData] = useState([])
-  const [remediationEvidenceData] = useState({})
+  const [validationsData, setValidationsData] = useState([])
+  const [remediationEvidenceData, setRemediationEvidenceData] = useState({})
+  const [loading, setLoading] = useState(true)
 
   const itemsPerPage = 10
 
-  const assetTypeMap = assetsData.reduce((acc, asset) => {
-    acc[asset.asset_id] = asset.asset_type
-    return acc
-  }, {})
+  // Fetch remediation packages from demo API and map to validation format
+  useEffect(() => {
+    async function loadValidations() {
+      try {
+        // Use demo pipeline — includes pathways inline
+        const res = await fetch(`${API_URL}/admin/remediation-packages/demo`)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        const packages = data.packages || []
+
+        if (packages.length === 0) {
+          setLoading(false)
+          return
+        }
+
+        const mapped = packages.map(pkg => {
+          const pwIdx = pkg.recommended_pathway_index ?? 0
+          const pw = pkg.pathways?.[pwIdx] || pkg.pathways?.[0]
+          const vm = pw?.validation_metadata
+
+          // Determine validation status from package data
+          let status = 'Pending'
+          if (vm?.status === 'validated') status = 'Validated'
+          else if (vm?.status === 'partial') status = 'Action Needed'
+          else if (vm?.status === 'unvalidated') status = 'Failed'
+          else if (pkg.status === 'ready_for_execution') status = 'Validated'
+          else if (pkg.status === 'rejected') status = 'Failed'
+
+          // Determine severity from family
+          let severity = 'MEDIUM'
+          if (pkg.family === 'injection' || pkg.family === 'public_exposure') severity = 'CRITICAL'
+          else if (pkg.family === 'os_vulnerability' || pkg.family === 'network_exposure') severity = 'HIGH'
+
+          // Build evidence data for the modal
+          const steps = (pw?.remediation_steps || []).map((s, i) => ({
+            version: `${i + 1}.0.0`,
+            action: s.step,
+            targetSeverity: i === 0 ? severity : 'LOW',
+            complexity: i === 0 ? 'Medium' : 'Easy',
+            time: '~2 hours',
+            validated: vm?.status === 'validated',
+          }))
+
+          const evidenceText = pw?.validation_tests?.map(t =>
+            `# ${t.name}\n${t.command}\n# Expected: ${t.expected}`
+          ).join('\n\n') || `# Package #${pkg.id}\n# Confidence: ${pw?.confidence_score || '—'}/100`
+
+          return {
+            issue_id: pkg.issue_id ? `ISS-${String(pkg.issue_id).padStart(5, '0')}` : `PKG-${String(pkg.id).padStart(4, '0')}`,
+            issue_name: pkg.finding || 'Untitled',
+            asset_id: `PKG-${String(pkg.id).padStart(4, '0')}`,
+            asset_name: pkg.family ? pkg.family.replace(/_/g, ' ') : '',
+            asset_type: pkg.family === 'os_vulnerability' ? 'Server' : pkg.family === 'injection' ? 'Application' : pkg.family === 'network_exposure' ? 'Network' : pkg.family === 'public_exposure' ? 'Cloud' : 'Container',
+            severity,
+            pathways: pw?.objective?.slice(0, 50) || 'Direct Fix',
+            status,
+            environment: pkg.family === 'os_vulnerability' ? 'Production' : 'Development',
+            evidence: { description: pw?.execution_strategy || '' },
+            _pkg: pkg,
+            _steps: steps,
+            _evidenceText: evidenceText,
+          }
+        })
+
+        setValidationsData(mapped)
+
+        // Build evidence map for the modal
+        const evidenceMap = {}
+        mapped.forEach(item => {
+          evidenceMap[item.issue_id] = {
+            steps: item._steps,
+            evidence: item._evidenceText,
+            paths: [
+              { id: 1, name: 'Direct Fix', coverage: '100%', description: 'Full remediation', steps: item._steps, evidence: item._evidenceText },
+              { id: 2, name: 'Stepped Fix', coverage: '100%', description: 'Incremental', steps: item._steps, evidence: item._evidenceText },
+              { id: 3, name: 'Workaround', coverage: '60%', description: 'Partial mitigation', steps: item._steps.slice(0, 1), evidence: item._evidenceText },
+            ],
+          }
+        })
+        setRemediationEvidenceData(evidenceMap)
+      } catch (e) {
+        console.error('Failed to load validations:', e)
+      } finally {
+        setLoading(false)
+      }
+    }
+    loadValidations()
+  }, [])
+
+  const assetTypeMap = {}
 
   const validations = validationsData.map(v => ({
     ...v,
@@ -422,7 +510,11 @@ export default function Validation() {
       )
     }
 
-    return <span className="next-step-na">—</span>
+    return (
+      <button className="next-step-btn mark-closed" onClick={() => handleMarkAsClosed(item.issue_id)}>
+        Mark as Closed
+      </button>
+    )
   }
 
   // Get step count for an issue (priority: Direct Fix > Stepped Fix > Workaround)
@@ -526,14 +618,9 @@ export default function Validation() {
                         {viewMode === 'issue' ? (
                           <>
                             <td>
-                              <div className="combined-cell">
-                                <span className="validation-id-badge">
-                                  {item.issue_id}
-                                </span>
-                                <span className="combined-secondary">
-                                  {item.issue_name}
-                                </span>
-                              </div>
+                              <span className="validation-id-badge">
+                                {item.issue_id}
+                              </span>
                             </td>
                             {isVisible('asset_name') && <td className="validation-cell-asset">{item.asset_name}</td>}
                             {isVisible('environment') && (
@@ -616,7 +703,7 @@ export default function Validation() {
         </main>
       </div>
 
-      <EvidenceModal isOpen={evidenceModalOpen} onClose={() => { setEvidenceModalOpen(false); }} item={selectedEvidence} />
+      <EvidenceModal isOpen={evidenceModalOpen} onClose={() => { setEvidenceModalOpen(false); }} item={selectedEvidence} evidenceMap={remediationEvidenceData} />
     </div>
   )
 }

@@ -37,7 +37,7 @@ export function useAssetsData() {
             'compliance_tags, owner_team, network_zone, aliases, last_seen_at, ' +
             'created_at, updated_at'
         )
-        .order('name', { ascending: true })
+        .order('asset_id', { ascending: true })
         .limit(FETCH_LIMIT)
 
       if (!mounted) return
@@ -50,9 +50,9 @@ export function useAssetsData() {
       const mapped = (data || []).map((row) => ({
         asset_id: row.asset_id || '',
         type: row.asset_type || '',
-        // Display name: prefer hostname, then name, then application_name
-        hostname: row.hostname || row.name || row.application_name || '',
-        application_name: row.application_name || row.name || '',
+        // Display name: prefer name, then hostname, then application_name
+        hostname: row.name || row.hostname || row.application_name || '',
+        application_name: row.application_name || row.hostname || '',
         asset_criticality: CRITICALITY_MAP[row.business_criticality] || 'Low',
         business_criticality: row.business_criticality,
         environment: row.environment

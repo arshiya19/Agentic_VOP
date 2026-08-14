@@ -421,3 +421,135 @@
     flex-wrap: wrap;
   }
 }
+
+
+/* Create Report Modal */
+.report-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.report-modal {
+  background: #151C2C;
+  border: 1px solid #2D3748;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 520px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.report-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid #1E293B;
+}
+
+.report-modal-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #E2E8F0;
+  margin: 0;
+}
+
+.report-modal-close {
+  background: none;
+  border: none;
+  color: #64748B;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.report-modal-close:hover {
+  color: #E2E8F0;
+  background: #1E293B;
+}
+
+.report-modal-body {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.report-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.report-form-group label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.report-form-group input,
+.report-form-group select {
+  background: #0B0F19;
+  border: 1px solid #2D3748;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: #E2E8F0;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.report-form-group input:focus,
+.report-form-group select:focus {
+  outline: none;
+  border-color: #06B6D4;
+}
+
+.report-form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.report-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 24px;
+  border-top: 1px solid #1E293B;
+}
+
+.report-modal-footer .btn-secondary {
+  background: transparent;
+  border: 1px solid #2D3748;
+  color: #94A3B8;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.report-modal-footer .btn-secondary:hover {
+  background: #1E293B;
+  color: #E2E8F0;
+}
+
+.report-modal-footer .btn-primary {
+  background: #06B6D4;
+  border: none;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.report-modal-footer .btn-primary:hover {
+  opacity: 0.9;
+}

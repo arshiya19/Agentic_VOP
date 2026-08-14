@@ -1,13 +1,106 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import '../styles/Activity.css'
+import { supabase } from '../lib/supabase'
 
 export default function Activity() {
   const [searchTerm, setSearchTerm] = useState('')
-  const [activityData] = useState([])
-  const [activityStats] = useState({})
-  const [mostActiveEntities] = useState([])
+  const [activityData, setActivityData] = useState([])
+  const [activityStats, setActivityStats] = useState({ events24h: { total: 0, scan: 0, risk: 0, fix: 0, validation: 0 }, ticketsOpened: { total: 0, inProgress: 0, closed: 0 }, validations: { total: 0, pass: 0, fail: 0 } })
+  const [mostActiveEntities, setMostActiveEntities] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function loadActivity() {
+      try {
+        // Pull recent trace events (same as Agents page) + tickets
+        const [tracesRes, ticketsRes] = await Promise.all([
+          supabase
+            .from('agent_trace_events')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(50),
+          supabase
+            .from('tickets')
+            .select('id, status, created_at, external_ticket_id')
+            .not('external_ticket_id', 'is', null)
+        ])
+
+        const traces = tracesRes.data || []
+        const ticketsData = ticketsRes.data || []
+
+        // Map trace events to activity feed format
+        const mapped = traces.map((row) => {
+          const payload = row.payload || {}
+          const eventType = row.event_type || ''
+          let event = row.message || eventType.replace(/_/g, ' ')
+          let entity = payload.scanner || payload.sub_agent_id || row.agent || ''
+          let source = row.agent || ''
+          let severity = null
+          let status = 'Logged'
+          let detail = ''
+
+          if (eventType === 'DISPATCH') { status = 'In Progress'; detail = payload.sub_agent_id ? `→ ${payload.sub_agent_id}` : '' }
+          else if (eventType === 'DONE') { status = 'Validated'; detail = payload.summary || '' }
+          else if (eventType === 'MESSAGE') { status = 'Logged'; detail = (row.message || '').slice(0, 80) }
+          else if (eventType === 'ERROR') { status = 'Failed'; severity = 'High'; detail = payload.error || row.message || '' }
+
+          return {
+            id: row.id,
+            time: new Date(row.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+            event: event.slice(0, 60),
+            entity,
+            detail: detail.slice(0, 80),
+            source,
+            severity,
+            status,
+          }
+        })
+
+        setActivityData(mapped)
+
+        // Compute stats from last 24h
+        const now = new Date()
+        const h24 = new Date(now - 24 * 60 * 60 * 1000)
+        const recent = traces.filter(t => new Date(t.created_at) > h24)
+        const scanEvents = recent.filter(t => (t.event_type || '') === 'DISPATCH')
+        const riskEvents = recent.filter(t => (t.message || '').toLowerCase().includes('enrich'))
+        const fixEvents = recent.filter(t => (t.message || '').toLowerCase().includes('remediat') || (t.message || '').toLowerCase().includes('fix'))
+        const valEvents = recent.filter(t => (t.event_type || '') === 'DONE')
+
+        // Tickets stats
+        const totalTickets = ticketsData.length
+        const closedTickets = ticketsData.filter(t => t.status === 'closed').length
+        const inProgressTickets = totalTickets - closedTickets
+
+        setActivityStats({
+          events24h: { total: recent.length, scan: scanEvents.length, risk: riskEvents.length, fix: fixEvents.length, validation: valEvents.length },
+          ticketsOpened: { total: totalTickets, inProgress: inProgressTickets, closed: closedTickets },
+          validations: { total: valEvents.length, pass: valEvents.length, fail: recent.filter(t => (t.event_type || '') === 'ERROR').length },
+        })
+
+        // Most active entities — group by agent
+        const agentCounts = {}
+        for (const t of traces) {
+          const key = t.agent || 'unknown'
+          agentCounts[key] = (agentCounts[key] || 0) + 1
+        }
+        setMostActiveEntities(
+          Object.entries(agentCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([name, events]) => ({ name, events }))
+        )
+      } catch (e) {
+        console.error('Activity load error:', e)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadActivity()
+  }, [])
 
   const filteredActivity = activityData.filter(item =>
     searchTerm === '' ||

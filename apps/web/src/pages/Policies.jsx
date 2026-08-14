@@ -3,13 +3,36 @@ import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import '../styles/Policies.css'
 
+// Policies are configuration/rules — seed realistic ones based on the system's capabilities
+const SEEDED_POLICIES = [
+  { id: 'POL-001', name: 'Critical Vulnerability SLA', description: 'Critical vulnerabilities must be remediated within 72 hours of detection', category: 'SLA', status: 'Active', severity: 'CRITICAL', slaHours: 72, appliesTo: 'All Production Assets', lastModified: '2026-07-15', modifiedBy: 'Admin' },
+  { id: 'POL-002', name: 'High Vulnerability SLA', description: 'High severity vulnerabilities must be remediated within 7 days', category: 'SLA', status: 'Active', severity: 'HIGH', slaHours: 168, appliesTo: 'All Production Assets', lastModified: '2026-07-15', modifiedBy: 'Admin' },
+  { id: 'POL-003', name: 'Medium Vulnerability SLA', description: 'Medium severity vulnerabilities must be remediated within 30 days', category: 'SLA', status: 'Active', severity: 'MEDIUM', slaHours: 720, appliesTo: 'All Assets', lastModified: '2026-07-15', modifiedBy: 'Admin' },
+  { id: 'POL-004', name: 'KEV Mandatory Patch', description: 'Any CVE in CISA KEV catalog must be patched within 48 hours regardless of severity', category: 'Compliance', status: 'Active', severity: 'CRITICAL', slaHours: 48, appliesTo: 'All Internet-Facing Assets', lastModified: '2026-06-20', modifiedBy: 'CISO' },
+  { id: 'POL-005', name: 'Auto-Remediation Approval', description: 'Remediation packages with confidence >= 90 and validated status can be auto-approved', category: 'Automation', status: 'Active', severity: null, slaHours: null, appliesTo: 'Development & Staging', lastModified: '2026-08-01', modifiedBy: 'Admin' },
+  { id: 'POL-006', name: 'Production Change Window', description: 'Remediation execution on production assets restricted to maintenance windows (Sat 02:00-06:00 UTC)', category: 'Operations', status: 'Active', severity: null, slaHours: null, appliesTo: 'Production Assets', lastModified: '2026-07-10', modifiedBy: 'Ops Team' },
+  { id: 'POL-007', name: 'Crown Jewel Escalation', description: 'Any finding on a crown jewel asset (criticality >= 4) triggers immediate notification to CISO', category: 'Escalation', status: 'Active', severity: 'HIGH', slaHours: 1, appliesTo: 'Crown Jewel Assets', lastModified: '2026-07-20', modifiedBy: 'CISO' },
+  { id: 'POL-008', name: 'Multi-Stage Approval for Critical', description: 'Critical remediation packages require approval from both asset owner and security team', category: 'Governance', status: 'Active', severity: 'CRITICAL', slaHours: null, appliesTo: 'All Production Assets', lastModified: '2026-08-05', modifiedBy: 'Admin' },
+  { id: 'POL-009', name: 'Vulnerability Scan Frequency', description: 'All internet-facing assets must be scanned at minimum every 24 hours', category: 'Compliance', status: 'Active', severity: null, slaHours: 24, appliesTo: 'Internet-Facing Assets', lastModified: '2026-06-15', modifiedBy: 'Security Team' },
+  { id: 'POL-010', name: 'Rollback on Validation Failure', description: 'Automated rollback triggered if post-remediation validation tests fail', category: 'Automation', status: 'Active', severity: null, slaHours: null, appliesTo: 'All Assets', lastModified: '2026-08-01', modifiedBy: 'Admin' },
+]
+
+const POLICY_CATEGORIES = [
+  { name: 'SLA', count: 3 },
+  { name: 'Compliance', count: 2 },
+  { name: 'Automation', count: 2 },
+  { name: 'Operations', count: 1 },
+  { name: 'Escalation', count: 1 },
+  { name: 'Governance', count: 1 },
+]
+
 export default function Policies() {
   const [searchTerm, setSearchTerm] = useState('')
   const [filterCategory, setFilterCategory] = useState('All')
   const [filterStatus, setFilterStatus] = useState('All')
-  const [policiesData] = useState([])
-  const [policyStats] = useState({})
-  const [policyCategories] = useState([])
+  const [policiesData] = useState(SEEDED_POLICIES)
+  const [policyStats] = useState({ total: SEEDED_POLICIES.length, active: SEEDED_POLICIES.filter(p => p.status === 'Active').length, draft: 0, categories: POLICY_CATEGORIES.length })
+  const [policyCategories] = useState(POLICY_CATEGORIES)
 
   const categories = ['All', ...policyCategories.map(c => c.name)]
   const statuses = ['All', 'Active', 'Draft']

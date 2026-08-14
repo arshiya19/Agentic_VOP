@@ -25,13 +25,13 @@ export default function Sidebar() {
 
   // Main menu items - User
   const userMainMenuItems = [
-    { path: '/agents', label: 'Agents', icon: 'Agents' },
     { path: '/dashboard', label: 'Dashboard', icon: 'Dashboard' },
     { path: '/issues', label: 'Issues', icon: 'Issues' },
     { path: '/assets', label: 'Assets', icon: 'Assets' },
     { path: '/remediation', label: 'Remediation', icon: 'Remediation' },
     { path: '/validation', label: 'Validation', icon: 'Validation' },
     { path: '/integrations', label: 'Integrations', icon: 'IntegrationsCustom' },
+    { path: '/agents', label: 'Agents', icon: 'Agents' },
     { path: '/activity', label: 'Activity', icon: 'Activity' },
     { path: '/reports', label: 'Reports', icon: 'Reports' },
     { path: '/alerts', label: 'Alerts', icon: 'Alerts' },

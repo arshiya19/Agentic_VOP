@@ -98,10 +98,10 @@ export function useDashboardData(chartRange = '14d') {
               'asset_compliance_tags, asset_network_zone'
           ),
 
-        // 6. Remediation packages count (awaiting_approval + ready_for_execution)
-        supabase
-          .from('remediation_packages')
-          .select('status, pathways, recommended_pathway_index, created_at, approved_at'),
+        // 6. Remediation packages — fetch from API (uses demo pipeline data)
+        fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/admin/remediation-packages/demo`)
+          .then(r => r.ok ? r.json() : { packages: [] })
+          .catch(() => ({ packages: [] })),
       ])
 
       if (!mounted) return
@@ -130,8 +130,9 @@ export function useDashboardData(chartRange = '14d') {
       let remediated = 0
       let mttrSum = 0
       let mttrCount = 0
-      if (remPkgRes.data && remPkgRes.data.length > 0) {
-        for (const row of remPkgRes.data || []) {
+      const remPkgData = remPkgRes.packages || []
+      if (remPkgData.length > 0) {
+        for (const row of remPkgData) {
           if (row.status === 'awaiting_approval' || row.status === 'ready_for_execution') {
             readyToRemediate += 1
           }
@@ -194,9 +195,11 @@ export function useDashboardData(chartRange = '14d') {
       })
 
       // ---- latest CVEs (dedupe, keep highest severity per CVE) ----
+      // Only show CVEs from 2025 or 2026
       const cveMap = new Map()
       for (const row of recentRes.data || []) {
         if (!row.cve_id) continue
+        if (!row.cve_id.startsWith('CVE-2025') && !row.cve_id.startsWith('CVE-2026')) continue
         const existing = cveMap.get(row.cve_id)
         if (!existing) {
           cveMap.set(row.cve_id, { id: row.cve_id, severity: row.severity, count: 1 })

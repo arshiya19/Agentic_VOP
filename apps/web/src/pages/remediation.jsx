@@ -238,7 +238,8 @@ export default function Remediation() {
   // current filter. Quick second fetch when filter isn't 'all'.
   const [globalStats, setGlobalStats] = useState({ total: 0, awaiting: 0, ready: 0, rejected: 0 })
   useEffect(() => {
-    fetch(`${API_URL}/admin/remediation-packages`)
+    // Fetch stats from whichever pipeline is active (real or demo)
+    fetch(apiBase)
       .then(r => r.ok ? r.json() : { packages: [] })
       .then(d => {
         const list = d.packages || []
@@ -250,7 +251,7 @@ export default function Remediation() {
         })
       })
       .catch(() => { /* ignore */ })
-  }, [packages]) // refresh stats whenever the visible list changes
+  }, [packages, apiBase]) // refresh stats whenever the visible list or pipeline mode changes
 
   return (
     <div className="remediation-page-wrapper">
@@ -427,6 +428,7 @@ export default function Remediation() {
             onClose={() => { setSelectedId(null); setDetail(null) }}
             onApprove={() => handleApprove(selectedId)}
             onReject={() => handleReject(selectedId)}
+            apiBase={apiBase}
           />
         )}
 
@@ -484,8 +486,7 @@ function ConfidenceCell({ pkg, apiBase }) {
   const tone = confidenceTone(pw.confidence_score)
   return (
     <div className={`rmp-conf-cell ${tone}`}>
-      <span className="rmp-conf-num">{pw.confidence_score}</span>
-      <div className="rmp-conf-bar"><div className="rmp-conf-fill" style={{ width: `${pw.confidence_score}%` }} /></div>
+      <span className="rmp-conf-num">{pw.confidence_score}%</span>
     </div>
   )
 }
@@ -507,11 +508,20 @@ function StatusPill({ status }) {
 // Horizontal Detail Card — replaces the old right-side drawer
 // =============================================================================
 
-function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
+function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, apiBase }) {
   const pw = recommendedPathway(pkg)
   const vm = pw?.validation_metadata
   const [ticketLoading, setTicketLoading] = useState(false)
-  const [ticket, setTicket] = useState(null)
+  const [ticket, setTicket] = useState(() => {
+    // If package is ready_for_execution and was approved, check if we already created a ticket
+    // (Demo tickets are deterministic: INC + package ID)
+    if (pkg?.status === 'ready_for_execution' && pkg?.approved_at) {
+      // Check localStorage for demo ticket persistence
+      const stored = localStorage.getItem(`ticket_pkg_${pkg.id}`)
+      if (stored) return JSON.parse(stored)
+    }
+    return null
+  })
   const [copied, setCopied] = useState(false)
   const [activePath, setActivePath] = useState(0)
   const [localApproved, setLocalApproved] = useState(false)
@@ -527,20 +537,118 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
   }
 
   // Build upgrade steps from pathway remediation_steps
-  const steps = pw?.remediation_steps?.map((s, i) => ({
+  const allSteps = pw?.remediation_steps?.map((s, i) => ({
     version: `${i + 1}.0.0`,
     action: s.step,
     source: s.source,
     source_url: s.source_url,
     time: '—',
-    complexity: i === 0 ? 'Medium' : 'Easy',
+    complexity: i < 2 ? 'Medium' : 'Easy',
     validated: vm?.status === 'validated',
   })) || []
+
+  // WORKAROUND — single compensating control based on family
+  const WORKAROUND_BY_FAMILY = {
+    os_vulnerability: 'Apply network-level restriction (firewall rule / ACL) to limit exposure until the OS package is upgraded. CVE will continue to be reported but exploitation path is blocked.',
+    vulnerable_dependency: 'Pin the dependency to the last known safe version and disable the affected feature path. CVE remains open but attack surface is removed.',
+    network_exposure: 'Restrict ingress to known trusted IPs only. The misconfiguration persists but external exploitation is not possible.',
+    public_exposure: 'Enable access logging and add a deny-all public access block. Data remains unencrypted but public access is blocked.',
+    injection: 'Deploy WAF rule to block the specific attack pattern. Vulnerable code remains but exploitation is prevented at the edge.',
+  }
+
+  // STEPPED FIX — minor patch steps (always 2-3 easy steps)
+  const STEPPED_BY_FAMILY = {
+    os_vulnerability: [
+      { action: 'Apply the security patch for the specific CVE (minor version bump, no major upgrade)', complexity: 'Easy', time: '~30 min' },
+      { action: 'Restart affected service to load patched library', complexity: 'Easy', time: '~5 min' },
+      { action: 'Verify patch applied — run version check and confirm CVE is no longer flagged', complexity: 'Easy', time: '~10 min' },
+    ],
+    vulnerable_dependency: [
+      { action: 'Bump dependency to the nearest patched minor version (e.g. 3.0.0 → 3.0.1)', complexity: 'Easy', time: '~15 min' },
+      { action: 'Run test suite to confirm no regressions from the minor bump', complexity: 'Easy', time: '~20 min' },
+      { action: 'Deploy to staging and verify functionality', complexity: 'Easy', time: '~30 min' },
+    ],
+    network_exposure: [
+      { action: 'Update the security group to restrict the open port to specific CIDR ranges', complexity: 'Easy', time: '~10 min' },
+      { action: 'Apply terraform plan and verify the rule change', complexity: 'Easy', time: '~15 min' },
+    ],
+    public_exposure: [
+      { action: 'Add S3 public access block configuration to the bucket', complexity: 'Easy', time: '~10 min' },
+      { action: 'Enable server-side encryption (SSE-S3 default)', complexity: 'Easy', time: '~10 min' },
+      { action: 'Apply and verify — confirm bucket is no longer publicly accessible', complexity: 'Easy', time: '~15 min' },
+    ],
+    injection: [
+      { action: 'Add input validation for the affected parameter', complexity: 'Medium', time: '~30 min' },
+      { action: 'Deploy the fix and run DAST scan to confirm injection is blocked', complexity: 'Easy', time: '~20 min' },
+    ],
+  }
+
+  const steppedSteps = (STEPPED_BY_FAMILY[pkg?.family] || STEPPED_BY_FAMILY.os_vulnerability).map((s, i) => ({
+    version: `${i + 1}.0.0`,
+    action: s.action,
+    source: 'Security Best Practice',
+    source_url: null,
+    time: s.time,
+    complexity: s.complexity,
+    validated: false,
+  }))
+
+  const workaroundStep = [{
+    version: '1.0.0',
+    action: WORKAROUND_BY_FAMILY[pkg?.family] || 'Apply compensating control to reduce exposure while planning full remediation.',
+    source: 'Security Policy',
+    source_url: null,
+    time: '~15 min',
+    complexity: 'Easy',
+    validated: false,
+  }]
+
+  // 3 path configurations with summaries and overall complexity
+  const paths = [
+    { steps: allSteps, complexity: allSteps.length > 5 ? 'Complex' : 'Medium', coverage: '100%' },
+    { steps: steppedSteps, complexity: 'Easy', coverage: '~80%' },
+    { steps: workaroundStep, complexity: 'Easy', coverage: '~40%' },
+  ]
+
+  // Summaries per family for each path (2-3 lines each)
+  const SUMMARIES = {
+    os_vulnerability: {
+      direct: 'Full major package upgrade (e.g. OpenSSL 1.1.1 → 3.x). Completely resolves the CVE and hardens the system. Requires service restart and regression testing — schedule during a maintenance window.',
+      stepped: 'Minor security patch to the nearest fixed version (e.g. 1.1.1f → 1.1.1j). Addresses this specific CVE with minimal regression risk. Services may need a restart but no breaking changes expected.',
+      workaround: 'Adds a network-level restriction (firewall rule / ACL) to block the exploitation path. The CVE will continue to be reported in scans, but the system is not exploitable from external networks.',
+    },
+    vulnerable_dependency: {
+      direct: 'Full dependency upgrade to the latest major version. Resolves all known CVEs in this package and brings in new features. May require code changes if APIs have changed between major versions.',
+      stepped: 'Bump to the nearest patched minor release (e.g. 3.0.0 → 3.0.1). Fixes this specific vulnerability with no API changes. Low regression risk — safe to deploy without extensive testing.',
+      workaround: 'Pin the dependency to the last known safe version and disable the affected feature/code path. The CVE remains open in scan reports, but the vulnerable function is unreachable at runtime.',
+    },
+    network_exposure: {
+      direct: 'Complete security group reconfiguration — closes all unnecessary open ports and restricts access to documented CIDR ranges. Requires coordination with teams using the affected endpoints.',
+      stepped: 'Restrict the specific open port (e.g. SSH/22) to known trusted IP ranges. Leaves other rules unchanged. Quick to apply via terraform and verify.',
+      workaround: 'Add monitoring and alerting for connections from untrusted IPs. The misconfiguration persists but any exploitation attempt triggers immediate notification to the security team.',
+    },
+    public_exposure: {
+      direct: 'Full bucket hardening — enables KMS encryption, versioning, access logging, and public access block. Brings the resource into compliance with all relevant CIS/SOC2 controls.',
+      stepped: 'Add the S3 public access block and enable default SSE-S3 encryption. Stops public access and encrypts data at rest. Versioning and logging can follow in a separate change.',
+      workaround: 'Apply a deny-all bucket policy for public access. Data remains unencrypted and unversioned, but is no longer accessible from outside the AWS account.',
+    },
+    injection: {
+      direct: 'Full code fix — parameterize all queries, sanitize user input, and add output encoding. Resolves the vulnerability at its root. Requires code review and QA cycle.',
+      stepped: 'Add input validation for the specific vulnerable parameter identified in the finding. Targeted fix that blocks the known attack vector without refactoring the entire module.',
+      workaround: 'Deploy a WAF rule that blocks the specific injection pattern at the edge. Vulnerable code remains unchanged but the attack cannot reach it through normal request flow.',
+    },
+  }
+
+  const familySummaries = SUMMARIES[pkg?.family] || SUMMARIES.os_vulnerability
+  const summaryForPath = [familySummaries.direct, familySummaries.stepped, familySummaries.workaround]
+
+  const steps = paths[activePath]?.steps || allSteps
+  const pathComplexity = paths[activePath]?.complexity || 'Medium'
 
   // Build evidence text from validation tests or confidence info
   const evidenceText = pw?.validation_tests?.length
     ? pw.validation_tests.map(t => `# ${t.name}\n${t.command}\n# Expected: ${t.expected}`).join('\n\n')
-    : `# Remediation Package #${pkg?.id}\n# Family: ${pkg?.family || '—'}\n# Status: ${pkg?.status || '—'}\n# Confidence: ${pw?.confidence_score || '—'}/100\n# Coverage: ${pw?.security_coverage || '—'}`
+    : `# Remediation Package #${pkg?.id}\n# Family: ${pkg?.family || '—'}\n# Status: ${pkg?.status || '—'}\n# Confidence: ${pw?.confidence_score || '—'}%\n# Coverage: ${pw?.security_coverage || '—'}`
 
   if (loading || !pkg) {
     return (
@@ -650,7 +758,7 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
                     <tr>
                       <td className="change-label">Confidence Score</td>
                       <td className="change-before">—</td>
-                      <td className="change-after">{pw.confidence_score || '—'}/100</td>
+                      <td className="change-after">{pw.confidence_score || '—'}%</td>
                     </tr>
                     <tr>
                       <td className="change-label">Rollback</td>
@@ -753,7 +861,7 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
                   <path d="M18 20V4"></path>
                   <path d="M6 20v-4"></path>
                 </svg>
-                <span>Confidence: {pw.confidence_score}/100</span>
+                <span>Confidence: {pw.confidence_score}%</span>
               </div>
               <div className="change-detail-body" style={{ maxHeight: 180 }}>
                 <table className="change-detail-table">
@@ -837,41 +945,6 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
             </div>
           )}
 
-          {/* Evidence Section */}
-          <div className="detail-evidence-section">
-            <div className="evidence-header">
-              <div className="evidence-header-row">
-                <div className="evidence-header-left">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                    <line x1="16" y1="13" x2="8" y2="13"></line>
-                    <line x1="16" y1="17" x2="8" y2="17"></line>
-                  </svg>
-                  <span>Evidence</span>
-                </div>
-                <button
-                  className={`evidence-copy-btn ${copied ? 'copied' : ''}`}
-                  onClick={() => handleCopy(evidenceText)}
-                  title="Copy to clipboard"
-                >
-                  {copied ? (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  ) : (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                  )}
-                </button>
-              </div>
-            </div>
-            <div className="evidence-content">
-              <pre className="evidence-code">{evidenceText}</pre>
-            </div>
-          </div>
         </div>
 
         {/* Right Section — Upgrade Steps */}
@@ -904,15 +977,16 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
               ))}
             </div>
             <div className={`path-coverage ${activePath === 2 ? 'partial' : 'full'}`}>
-              {activePath === 0 && 'Fixes 100% — Full remediation in one step'}
-              {activePath === 1 && 'Fixes 100% — Incremental remediation'}
-              {activePath === 2 && 'Mitigates 60% — Mitigates risk without full fix'}
+              {summaryForPath[activePath]}
             </div>
           </div>
 
           <div className="upgrade-steps-section">
             <h4>
               {activePath === 0 ? 'Direct Fix Steps' : activePath === 1 ? 'Stepped Fix' : 'Workaround Steps'}
+              <span style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 4, background: pathComplexity === 'Complex' ? 'rgba(239,68,68,0.15)' : pathComplexity === 'Medium' ? 'rgba(245,158,11,0.15)' : 'rgba(16,185,129,0.15)', color: pathComplexity === 'Complex' ? '#FCA5A5' : pathComplexity === 'Medium' ? '#FCD34D' : '#6EE7B7', fontWeight: 700, textTransform: 'uppercase' }}>
+                {pathComplexity}
+              </span>
             </h4>
             <div className="upgrade-steps-list">
               {steps.length > 0 ? steps.map((step, index) => (
@@ -932,28 +1006,6 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
                       )}
                     </div>
                     <div className="step-action">{step.action}</div>
-                    <div className="step-meta-row-inline">
-                      <div className="step-meta-inline-item">
-                        <span className="step-meta-label">Complexity</span>
-                        <span className="step-complexity-tag" style={{
-                          background: step.complexity === 'Medium' ? 'rgba(245,158,11,0.2)' : 'rgba(16,185,129,0.2)',
-                          color: step.complexity === 'Medium' ? '#F59E0B' : '#10B981',
-                          borderColor: step.complexity === 'Medium' ? 'rgba(245,158,11,0.4)' : 'rgba(16,185,129,0.4)',
-                        }}>
-                          {step.complexity}
-                        </span>
-                      </div>
-                      <div className="step-meta-inline-item">
-                        <span className="step-meta-label">Status</span>
-                        <span className={`step-validated-tag ${step.validated ? 'validated' : 'not-validated'}`}>
-                          {step.validated ? (
-                            <><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Validated</>
-                          ) : (
-                            <><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg> Pending</>
-                          )}
-                        </span>
-                      </div>
-                    </div>
                   </div>
                 </div>
               )) : (
@@ -967,8 +1019,7 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
             <div style={{ padding: '12px 0', borderTop: '1px solid #2D3748', marginTop: '12px' }}>
               <div className={`rmp-conf-cell ${confidenceTone(pw.confidence_score)}`}>
                 <span style={{ fontSize: 11, color: '#64748B', marginRight: 8 }}>Confidence</span>
-                <span className="rmp-conf-num">{pw.confidence_score}</span>
-                <div className="rmp-conf-bar" style={{ flex: 1 }}><div className="rmp-conf-fill" style={{ width: `${pw.confidence_score}%` }} /></div>
+                <span className="rmp-conf-num">{pw.confidence_score}%</span>
               </div>
             </div>
           )}
@@ -994,7 +1045,7 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
                         setTicketLoading(true)
                         try {
                           const res = await fetch(
-                            `${API_URL}/admin/remediation-packages/${pkg.id}/create-ticket`,
+                            `${apiBase}/${pkg.id}/create-ticket`,
                             { method: 'POST', headers: { 'Content-Type': 'application/json' } }
                           )
                           if (!res.ok) {
@@ -1003,6 +1054,7 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject }) {
                           }
                           const data = await res.json()
                           setTicket(data)
+                          localStorage.setItem(`ticket_pkg_${pkg.id}`, JSON.stringify(data))
                         } catch (e) {
                           setTicket({ status: 'failed', error_message: e.message })
                         } finally {

@@ -42,7 +42,8 @@ export default function Dashboard() {
     {
       title: 'Requiring Action',
       value: stats.requiringAction,
-      details: 'Critical or High severity',
+      details: null,
+      actionBadges: { Critical, High },
     },
     {
       title: 'Ready-to-Remediate',
@@ -52,7 +53,7 @@ export default function Dashboard() {
     {
       title: 'Validated',
       value: stats.validated ?? '—',
-      details: stats.avgConfidence ? `Avg confidence: ${stats.avgConfidence}/100` : 'No confidence data yet',
+      details: stats.avgConfidence ? `Avg confidence: ${stats.avgConfidence}%` : 'No confidence data yet',
       hasConfidence: !!stats.avgConfidence,
     },
     {
@@ -86,6 +87,11 @@ export default function Dashboard() {
                     <span className="sev-badge critical">{card.severityBadges.Critical} C</span>
                     <span className="sev-badge high">{card.severityBadges.High} H</span>
                     <span className="sev-badge medium">{card.severityBadges.Medium} M</span>
+                  </div>
+                ) : card.actionBadges ? (
+                  <div className="stat-card-details severity-badges">
+                    <span className="sev-badge critical">{card.actionBadges.Critical} C</span>
+                    <span className="sev-badge high">{card.actionBadges.High} H</span>
                   </div>
                 ) : (
                   <div className={`stat-card-details ${card.hasMttr ? 'mttr-badge' : ''} ${card.hasConfidence ? 'confidence-badge' : ''}`}>{card.details}</div>

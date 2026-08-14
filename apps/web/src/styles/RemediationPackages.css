@@ -6,10 +6,16 @@
 
 /* Stats strip */
 .rmp-stats {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
+  display: flex;
+  gap: 12px;
   margin-bottom: 20px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+.rmp-stats .rmp-stat-card {
+  flex: 1;
+  min-width: 0;
 }
 /* Page header — title + subtitle on left, small Remediate button on right */
 .rmp-header-flex {
@@ -259,6 +265,7 @@
   border-radius: 4px;
   font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
 }
 .rmp-status-pill.st-draft               { background: #2a2d38; color: #8b94a7; }
 .rmp-status-pill.st-awaiting_approval   { background: #3a2f1d; color: #d9a44a; }

@@ -44,7 +44,8 @@ export default function Issues() {
   const [selectedSeverity, setSelectedSeverity] = useState([])
   const [currentPage, setCurrentPage] = useState(1)
   const { issues } = useIssuesData()
-  const [visibleColumns, setVisibleColumns] = useState(ISSUE_COLUMNS.map(c => c.key))
+  const [visibleColumns, setVisibleColumns] = useState(ISSUE_COLUMNS.map(c => c.key).filter(k => k !== 'cve_published' && k !== 'description'))
+  const [selectedIssue, setSelectedIssue] = useState(null)
   // Items-per-page adapts to viewport height — zoom out or use a tall screen
   // and you'll see more rows automatically instead of empty space.
   const [itemsPerPage, setItemsPerPage] = useState(() => computeItemsPerPage())
@@ -199,7 +200,7 @@ export default function Issues() {
                     </tr>
                   ) : (
                     paginatedIssues.map((issue) => (
-                      <tr key={issue.issue_id}>
+                      <tr key={issue.issue_id} onClick={() => setSelectedIssue(issue)} style={{ cursor: 'pointer' }}>
                         {isVisible('issue_id') && (
                           <td>
                             <span className="issues-id-badge">{issue.issue_id}</span>
@@ -432,6 +433,79 @@ export default function Issues() {
           </div>
         </main>
       </div>
+
+      {/* Issue Detail Dialog */}
+      {selectedIssue && (
+        <div className="issue-detail-overlay" onClick={() => setSelectedIssue(null)}>
+          <div className="issue-detail-drawer" onClick={(e) => e.stopPropagation()}>
+            <div className="issue-drawer-header">
+              <div className="issue-drawer-title">
+                <span className="issue-drawer-id">{selectedIssue.issue_id}</span>
+                <span className={`issue-drawer-severity ${getSeverityClass(selectedIssue.severity)}`}>
+                  {selectedIssue.severity}
+                </span>
+              </div>
+              <button className="issue-drawer-close" onClick={() => setSelectedIssue(null)}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+
+            <div className="issue-drawer-content">
+              <div className="issue-drawer-section">
+                <div className="issue-drawer-cve">{selectedIssue.cve_id || '—'}</div>
+              </div>
+
+              <div className="issue-drawer-section">
+                <ul className="issue-drawer-points">
+                  {(selectedIssue.description || 'No description available').split('. ').filter(Boolean).map((point, i) => (
+                    <li key={i}>{point.trim()}{point.endsWith('.') ? '' : '.'}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="issue-drawer-grid">
+                <div className="issue-drawer-item">
+                  <span className="issue-drawer-label">Asset</span>
+                  <span className="issue-drawer-value">{selectedIssue.asset_name || selectedIssue.asset_id || '—'}</span>
+                </div>
+                <div className="issue-drawer-item">
+                  <span className="issue-drawer-label">Asset Type</span>
+                  <span className="issue-drawer-value">{selectedIssue.asset_type || '—'}</span>
+                </div>
+                <div className="issue-drawer-item">
+                  <span className="issue-drawer-label">Derived Risk</span>
+                  <span className={`issue-drawer-risk ${getSeverityClass(selectedIssue.severity)}`}>
+                    {selectedIssue.derived_risk || '—'}
+                  </span>
+                </div>
+                <div className="issue-drawer-item">
+                  <span className="issue-drawer-label">Threat Vector</span>
+                  <span className="issue-drawer-value">{selectedIssue.threat_vector || '—'}</span>
+                </div>
+                <div className="issue-drawer-item">
+                  <span className="issue-drawer-label">Remediable</span>
+                  <span className={`issue-drawer-remediable ${selectedIssue.remediable === 'Yes' ? 'yes' : 'no'}`}>
+                    {selectedIssue.remediable || '—'}
+                  </span>
+                </div>
+                <div className="issue-drawer-item">
+                  <span className="issue-drawer-label">Source</span>
+                  <span className="issue-drawer-value">{selectedIssue.source || '—'}</span>
+                </div>
+                <div className="issue-drawer-item">
+                  <span className="issue-drawer-label">First Detected</span>
+                  <span className="issue-drawer-value">
+                    {selectedIssue.first_detected ? new Date(selectedIssue.first_detected).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
