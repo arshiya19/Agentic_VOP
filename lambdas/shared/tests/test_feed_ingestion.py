@@ -2,17 +2,17 @@
 
 import gzip
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 import pytest
 
+from lambdas.shared.exceptions import FeedDownloadError
 from lambdas.shared.feed_ingestion import (
     download_and_decompress,
     fetch_meta_sha256,
     parse_json_feed,
 )
-from lambdas.shared.exceptions import FeedDownloadError
 
 
 class TestParseJsonFeed:
@@ -119,9 +119,7 @@ class TestFetchMetaSha256:
     @patch("lambdas.shared.feed_ingestion.urlopen")
     def test_extracts_sha256_from_meta_content(self, mock_urlopen):
         meta_content = (
-            "lastModifiedDate:2024-01-15T12:00:00-00:00\n"
-            "size:12345678\n"
-            "sha256:ABC123DEF456789\n"
+            "lastModifiedDate:2024-01-15T12:00:00-00:00\nsize:12345678\nsha256:ABC123DEF456789\n"
         )
 
         mock_response = MagicMock()

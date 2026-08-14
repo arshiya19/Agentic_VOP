@@ -10,12 +10,8 @@ ENVIRONMENT: str = os.environ.get("ENVIRONMENT", "dev")
 # ---------------------------------------------------------------------------
 # NVD Feed URLs
 # ---------------------------------------------------------------------------
-NVD_MODIFIED_FEED_URL: str = (
-    "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-modified.json.gz"
-)
-NVD_MODIFIED_META_URL: str = (
-    "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-modified.meta"
-)
+NVD_MODIFIED_FEED_URL: str = "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-modified.json.gz"
+NVD_MODIFIED_META_URL: str = "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-modified.meta"
 NVD_API_BASE_URL: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_YEARLY_FEED_URL_PATTERN: str = (
     "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-{year}.json.gz"

@@ -69,7 +69,7 @@ export default function Agents() {
   // env2 reset state — button next to Real/Demo toggle
   const [resetting, setResetting] = useState(false)
   const [resetToast, setResetToast] = useState(null)  // { kind: 'success'|'error', message: string }
-  const [dataLoaded, setDataLoaded] = useState(false)  // Track if initial data has been fetched
+  const [_dataLoaded, _setDataLoaded] = useState(false)  // Track if initial data has been fetched
   // Contextual switch: 'real' (supabase realtime on public.*) or 'demo' (poll
   // backend demo endpoints). Set by Integrations page's trigger buttons; can
   // be overridden manually via the pill at the top of the page.
@@ -373,7 +373,7 @@ export default function Agents() {
           : `${(avgDurationMs / 1000).toFixed(0)}s`
         : '—'
 
-    const errorEventsToday = traceEvents.filter(
+    const _errorEventsToday = traceEvents.filter(
       (e) => e.type === 'error' && new Date(e.timestamp) >= today
     )
 

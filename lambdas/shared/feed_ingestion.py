@@ -8,15 +8,13 @@ Provides source-agnostic functions for:
 
 import gzip
 import json
-from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from lambdas.shared.exceptions import FeedDownloadError
 
 
-def download_and_decompress(
-    url: str, timeout: int = 30, max_size: int = 200_000_000
-) -> bytes:
+def download_and_decompress(url: str, timeout: int = 30, max_size: int = 200_000_000) -> bytes:
     """Download a gzipped file and decompress in memory.
 
     Args:

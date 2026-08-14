@@ -20,7 +20,7 @@ import logging
 import sys
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
 import urllib3
@@ -114,9 +114,7 @@ def _read_backfill_checkpoint(table_name: str) -> int | None:
     """
     table = _get_dynamodb_table(table_name)
     try:
-        response = table.get_item(
-            Key={"pk": BACKFILL_CHECKPOINT_PK, "sk": BACKFILL_CHECKPOINT_SK}
-        )
+        response = table.get_item(Key={"pk": BACKFILL_CHECKPOINT_PK, "sk": BACKFILL_CHECKPOINT_SK})
     except ClientError as e:
         logger.error("Failed to read backfill checkpoint: %s", e)
         return None
@@ -132,7 +130,7 @@ def _read_backfill_checkpoint(table_name: str) -> int | None:
 def _write_backfill_checkpoint(table_name: str, year: int) -> None:
     """Update the backfill progress checkpoint after a year completes."""
     table = _get_dynamodb_table(table_name)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     table.put_item(
         Item={
             "pk": BACKFILL_CHECKPOINT_PK,
@@ -151,7 +149,7 @@ def _write_sync_checkpoint(table_name: str) -> None:
     from the backfill completion time.
     """
     table = _get_dynamodb_table(table_name)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     table.put_item(
         Item={
             "pk": SYNC_CHECKPOINT_PK,
@@ -180,9 +178,7 @@ def _get_nvd_api_key(environment: str) -> str | None:
         response = ssm.get_parameter(Name=param_path, WithDecryption=True)
         return response["Parameter"]["Value"]
     except ClientError as e:
-        logger.warning(
-            "Failed to retrieve NVD API key from SSM (%s): %s", param_path, e
-        )
+        logger.warning("Failed to retrieve NVD API key from SSM (%s): %s", param_path, e)
         return None
 
 
@@ -238,13 +234,9 @@ def _fetch_page_with_retry(
                 return json.loads(response.data.decode("utf-8"))
 
             if response.status == 403:
-                logger.warning(
-                    "NVD API returned HTTP 403 — possible rate limit or invalid key"
-                )
+                logger.warning("NVD API returned HTTP 403 — possible rate limit or invalid key")
             elif response.status == 503:
-                logger.warning(
-                    "NVD API returned HTTP 503 — service temporarily unavailable"
-                )
+                logger.warning("NVD API returned HTTP 503 — service temporarily unavailable")
             else:
                 logger.warning("NVD API returned HTTP %d", response.status)
 
@@ -273,8 +265,8 @@ def _build_date_windows(year: int) -> list[tuple[str, str]]:
     from datetime import timedelta
 
     window_days = 120
-    year_start = datetime(year, 1, 1, tzinfo=timezone.utc)
-    year_end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    year_start = datetime(year, 1, 1, tzinfo=UTC)
+    year_end = datetime(year, 12, 31, 23, 59, 59, tzinfo=UTC)
 
     windows: list[tuple[str, str]] = []
     current_start = year_start
@@ -326,8 +318,7 @@ def _fetch_window_from_api(
 
         if response_data is None:
             logger.error(
-                "NVD API request failed after all retries for year %d "
-                "window %d (startIndex=%d)",
+                "NVD API request failed after all retries for year %d window %d (startIndex=%d)",
                 year,
                 window_idx,
                 start_index,
@@ -388,9 +379,7 @@ def _fetch_year_from_api(
         )
 
         if window_items is None:
-            logger.error(
-                "Aborting year %d: window %d failed after retries", year, idx + 1
-            )
+            logger.error("Aborting year %d: window %d failed after retries", year, idx + 1)
             return None
 
         all_items.extend(window_items)
@@ -404,9 +393,7 @@ def _fetch_year_from_api(
 # ---------------------------------------------------------------------------
 
 
-def _process_year(
-    year: int, table_name: str, timestamp: str, api_key: str | None
-) -> bool:
+def _process_year(year: int, table_name: str, timestamp: str, api_key: str | None) -> bool:
     """Process a single year: fetch from API, transform, write to DynamoDB.
 
     Args:
@@ -434,9 +421,7 @@ def _process_year(
         logger.info("Year %d: no CVEs found — skipping", year)
         return True
 
-    logger.info(
-        "Processing year %d: %d CVE items to transform", year, len(vulnerabilities)
-    )
+    logger.info("Processing year %d: %d CVE items to transform", year, len(vulnerabilities))
 
     # Transform CVEs
     items: list[dict] = []
@@ -452,9 +437,7 @@ def _process_year(
             item = transform_nvd_cve(vuln, timestamp)
             items.append(item)
         except TransformError as e:
-            logger.warning(
-                "Year %d: skipping malformed item at index %d: %s", year, idx, e
-            )
+            logger.warning("Year %d: skipping malformed item at index %d: %s", year, idx, e)
             skipped += 1
 
     logger.info(
@@ -485,9 +468,7 @@ def _process_year(
 # ---------------------------------------------------------------------------
 
 
-def main(
-    env: str, start_year: int = BACKFILL_START_YEAR, end_year: int = BACKFILL_END_YEAR
-) -> int:
+def main(env: str, start_year: int = BACKFILL_START_YEAR, end_year: int = BACKFILL_END_YEAR) -> int:
     """Run the backfill process for the specified environment.
 
     Args:
@@ -504,7 +485,7 @@ def main(
     )
 
     table_name = get_table_name(env)
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
 
     logger.info(
         "Starting NVD backfill for environment=%s, table=%s, years=%d–%d",

@@ -23,12 +23,12 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 
-class LogLevel(str, Enum):
+class LogLevel(StrEnum):
     """Supported log levels."""
 
     INFO = "INFO"
@@ -37,7 +37,7 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
-class LogEvent(str, Enum):
+class LogEvent(StrEnum):
     """Named structured log events emitted during sync operations."""
 
     SYNC_STARTED = "SYNC_STARTED"
@@ -89,6 +89,9 @@ class EmfLogger:
         """Emit a WARN-level structured log entry."""
         self._log(LogLevel.WARN, event, message, extra)
 
+    # Alias for compatibility — ruff G010 prefers .warning() over .warn()
+    warning = warn
+
     def error(self, event: str, message: str, **extra: Any) -> None:
         """Emit an ERROR-level structured log entry."""
         self._log(LogLevel.ERROR, event, message, extra)
@@ -104,7 +107,7 @@ class EmfLogger:
     def emit_metric(
         self,
         metric_name: str,
-        value: int | float,
+        value: float,
         unit: str = "Count",
         **extra: Any,
     ) -> None:
@@ -161,7 +164,7 @@ class EmfLogger:
         event: str,
         message: str,
         metric_name: str,
-        metric_value: int | float,
+        metric_value: float,
         unit: str = "Count",
         **extra: Any,
     ) -> None:
@@ -202,11 +205,7 @@ class EmfLogger:
         items_processed, items_written, items_skipped, items_failed, duration_ms.
         """
         level = LogLevel.INFO if status == "success" else LogLevel.ERROR
-        event = (
-            LogEvent.SYNC_COMPLETED.value
-            if status == "success"
-            else LogEvent.SYNC_FAILED.value
-        )
+        event = LogEvent.SYNC_COMPLETED.value if status == "success" else LogEvent.SYNC_FAILED.value
 
         entry = self._base_entry(level, event, f"Sync {status}")
         entry.update(
@@ -248,9 +247,7 @@ class EmfLogger:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _log(
-        self, level: LogLevel, event: str, message: str, extra: dict[str, Any]
-    ) -> None:
+    def _log(self, level: LogLevel, event: str, message: str, extra: dict[str, Any]) -> None:
         """Build and write a structured log entry (no EMF metrics)."""
         entry = self._base_entry(level, event, message)
         entry.update(extra)
@@ -298,4 +295,4 @@ def _now_ms() -> int:
 
 def _iso_now() -> str:
     """Current time as ISO 8601 UTC string."""
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
