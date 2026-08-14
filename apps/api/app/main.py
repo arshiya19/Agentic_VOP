@@ -531,6 +531,32 @@ def reject_demo_remediation_package(pkg_id: int, body: dict | None = None) -> di
     return {"id": pkg_id, "status": "rejected", "reason": reason, "rejected_by": rejected_by}
 
 
+@app.post("/admin/remediation-packages/demo/{pkg_id}/create-ticket", status_code=201)
+def create_ticket_for_demo_package(pkg_id: int) -> dict:
+    """Create a mock ticket for a demo package — returns a simulated ServiceNow ticket
+    without actually calling any external API."""
+    sb = supabase_admin_demo()
+    resp = (
+        sb.table("remediation_packages")
+        .select("id, finding, family")
+        .eq("id", pkg_id)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
+    pkg = resp.data[0]
+    ticket_id = f"INC{pkg_id:07d}"
+    return {
+        "id": pkg_id,
+        "status": "created",
+        "external_ticket_id": ticket_id,
+        "external_ticket_url": f"https://demo.service-now.com/nav_to.do?uri=incident.do?sys_id={ticket_id}",
+        "provider": "servicenow",
+        "title": f"[{pkg.get('family', 'security')}] {pkg.get('finding', 'Remediation')[:80]}",
+    }
+
+
 class CancelRunResponse(BaseModel):
     """Summary returned by the cancel-run endpoint."""
 

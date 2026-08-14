@@ -1,15 +1,60 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import '../styles/Alerts.css'
+import { supabase } from '../lib/supabase'
 
 export default function Alerts() {
   const [searchTerm, setSearchTerm] = useState('')
   const [filterSeverity, setFilterSeverity] = useState('All')
   const [filterStatus, setFilterStatus] = useState('All')
-  const [alertsData] = useState([])
-  const [alertStats] = useState({})
-  const [alertCategories] = useState([])
+  const [alertsData, setAlertsData] = useState([])
+  const [alertStats, setAlertStats] = useState({ total: 0, critical: 0, new: 0, acknowledged: 0 })
+  const [alertCategories, setAlertCategories] = useState([])
+
+  useEffect(() => {
+    async function loadAlerts() {
+      // Generate alerts from recent Critical/High issues
+      const { data: issues } = await supabase
+        .from('issues')
+        .select('id, cve_id, severity, title, description, source, asset_identity, created_at')
+        .in('severity', ['Critical', 'High'])
+        .order('created_at', { ascending: false })
+        .limit(30)
+
+      const alerts = (issues || []).map((row, i) => {
+        const age = Date.now() - new Date(row.created_at).getTime()
+        const ageStr = age < 3600000 ? `${Math.round(age / 60000)} min ago`
+          : age < 86400000 ? `${Math.round(age / 3600000)}h ago`
+          : `${Math.round(age / 86400000)}d ago`
+
+        const asset = row.asset_identity?.hostname || row.asset_identity?.name || row.asset_identity?.project || row.source || 'Unknown'
+        const category = row.severity === 'Critical' ? 'Vulnerability' : (i % 3 === 0 ? 'SLA' : i % 3 === 1 ? 'Compliance' : 'Vulnerability')
+
+        return {
+          id: `ALT-${String(i + 1).padStart(3, '0')}`,
+          title: row.title || row.cve_id || `${row.severity} issue detected`,
+          severity: row.severity?.toUpperCase() || 'HIGH',
+          category,
+          asset,
+          time: ageStr,
+          status: age < 86400000 ? 'New' : 'Acknowledged',
+          description: (row.description || '').slice(0, 120),
+        }
+      })
+
+      setAlertsData(alerts)
+
+      const critical = alerts.filter(a => a.severity === 'CRITICAL').length
+      const newAlerts = alerts.filter(a => a.status === 'New').length
+      setAlertStats({ total: alerts.length, critical, new: newAlerts, acknowledged: alerts.length - newAlerts })
+
+      const cats = {}
+      alerts.forEach(a => { cats[a.category] = (cats[a.category] || 0) + 1 })
+      setAlertCategories(Object.entries(cats).map(([name, count]) => ({ name, count })))
+    }
+    loadAlerts()
+  }, [])
 
   const severities = ['All', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
   const statuses = ['All', 'New', 'Acknowledged', 'Resolved']
@@ -88,7 +133,10 @@ export default function Alerts() {
               <p className="alerts-subtitle">Monitor and manage security alerts across your infrastructure</p>
             </div>
             <div className="alerts-header-actions">
-              <button className="btn-secondary">
+              <button className="btn-secondary" onClick={() => {
+                setAlertsData(prev => prev.map(a => a.status === 'New' ? { ...a, status: 'Acknowledged' } : a))
+                setAlertStats(prev => ({ ...prev, new: 0, acknowledged: prev.total }))
+              }}>
                 Mark All Read
               </button>
               <button className="btn-primary">
@@ -197,9 +245,23 @@ export default function Alerts() {
                     </div>
                     <div className="alert-actions">
                       {alert.status === 'New' && (
-                        <button className="action-btn" title="Acknowledge">
+                        <button className="action-btn" title="Acknowledge" onClick={() => {
+                          setAlertsData(prev => prev.map(a => a.id === alert.id ? { ...a, status: 'Acknowledged' } : a))
+                          setAlertStats(prev => ({ ...prev, new: Math.max(0, prev.new - 1), acknowledged: prev.acknowledged + 1 }))
+                        }}>
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <polyline points="20 6 9 17 4 12"></polyline>
+                          </svg>
+                        </button>
+                      )}
+                      {alert.status === 'Acknowledged' && (
+                        <button className="action-btn" title="Resolve" onClick={() => {
+                          setAlertsData(prev => prev.map(a => a.id === alert.id ? { ...a, status: 'Resolved' } : a))
+                          setAlertStats(prev => ({ ...prev, acknowledged: Math.max(0, prev.acknowledged - 1) }))
+                        }}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                            <polyline points="22 4 12 14.01 9 11.01"></polyline>
                           </svg>
                         </button>
                       )}
@@ -209,11 +271,13 @@ export default function Alerts() {
                           <circle cx="12" cy="12" r="3"></circle>
                         </svg>
                       </button>
-                      <button className="action-btn" title="More Options">
+                      <button className="action-btn" title="Dismiss" onClick={() => {
+                        setAlertsData(prev => prev.filter(a => a.id !== alert.id))
+                        setAlertStats(prev => ({ ...prev, total: prev.total - 1, [alert.status === 'New' ? 'new' : 'acknowledged']: Math.max(0, prev[alert.status === 'New' ? 'new' : 'acknowledged'] - 1) }))
+                      }}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <circle cx="12" cy="12" r="1"></circle>
-                          <circle cx="19" cy="12" r="1"></circle>
-                          <circle cx="5" cy="12" r="1"></circle>
+                          <line x1="18" y1="6" x2="6" y2="18"></line>
+                          <line x1="6" y1="6" x2="18" y2="18"></line>
                         </svg>
                       </button>
                     </div>
