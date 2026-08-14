@@ -60,7 +60,7 @@ def _load_context_node(state: DemoMasterState) -> dict:
         run_id,
         "master",
         "DISPATCH",
-        "Demo pipeline started: sample -ec2 → enrich → remediate → fix",
+        "Demo pipeline started: sample -ec2 → remediate → fix (enrichment skipped — already done in real pipeline)",
     )
     return {
         "sample_result": {},
@@ -265,7 +265,6 @@ def _summarize_node(state: DemoMasterState) -> dict:
     sb = supabase_admin_demo()
 
     sample = state.get("sample_result", {})
-    enrich = state.get("enrich_result", {})
     remediation = state.get("remediation_result", {})
     fix = state.get("fix_result", {})
 
@@ -291,7 +290,6 @@ def _summarize_node(state: DemoMasterState) -> dict:
         "master",
         "DONE",
         f"DEMO_COMPLETE — {sampled} sampled · "
-        f"{enrich.get('enriched', 0)} enriched · "
         f"{remediation.get('persisted', 0)} remediation package(s) generated · {fix_summary}",
         payload={
             "from": "master",
@@ -300,11 +298,11 @@ def _summarize_node(state: DemoMasterState) -> dict:
             "records_sampled": sampled,
             "families_found": sample.get("families_found", []),
             "families_missing": sample.get("families_missing", []),
-            "records_enriched": enrich.get("enriched", 0),
+            "records_enriched": sampled,  # Already enriched from real pipeline
             "records_remediated": remediation.get("persisted", 0),
-            "epss_hits": enrich.get("epss_hits", 0),
-            "kev_hits": enrich.get("kev_hits", 0),
-            "nvd_hits": enrich.get("nvd_hits", 0),
+            "epss_hits": 0,
+            "kev_hits": 0,
+            "nvd_hits": 0,
             "fix_result": fix,
         },
     )
@@ -345,8 +343,7 @@ def _build_graph():
 
     graph.add_edge(START, "load_context")
     graph.add_edge("load_context", "sample")
-    graph.add_edge("sample", "enrich")
-    graph.add_edge("enrich", "remediate")
+    graph.add_edge("sample", "remediate")
     graph.add_edge("remediate", "fix")
     graph.add_edge("fix", "summarize")
     graph.add_edge("summarize", END)
