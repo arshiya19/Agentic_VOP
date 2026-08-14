@@ -279,7 +279,7 @@ export default function Validation() {
   const [statusOverrides, setStatusOverrides] = useState({})
   const [validationsData, setValidationsData] = useState([])
   const [remediationEvidenceData, setRemediationEvidenceData] = useState({})
-  const [loading, setLoading] = useState(true)
+  const [, setLoading] = useState(true)
 
   const itemsPerPage = 10
 

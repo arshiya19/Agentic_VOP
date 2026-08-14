@@ -536,7 +536,13 @@ def create_ticket_for_demo_package(pkg_id: int) -> dict:
     """Create a mock ticket for a demo package — returns a simulated ServiceNow ticket
     without actually calling any external API."""
     sb = supabase_admin_demo()
-    resp = sb.table("remediation_packages").select("id, finding, family").eq("id", pkg_id).limit(1).execute()
+    resp = (
+        sb.table("remediation_packages")
+        .select("id, finding, family")
+        .eq("id", pkg_id)
+        .limit(1)
+        .execute()
+    )
     if not resp.data:
         raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
     pkg = resp.data[0]

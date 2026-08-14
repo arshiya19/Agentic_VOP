@@ -9,7 +9,7 @@ export default function Activity() {
   const [activityData, setActivityData] = useState([])
   const [activityStats, setActivityStats] = useState({ events24h: { total: 0, scan: 0, risk: 0, fix: 0, validation: 0 }, ticketsOpened: { total: 0, inProgress: 0, closed: 0 }, validations: { total: 0, pass: 0, fail: 0 } })
   const [mostActiveEntities, setMostActiveEntities] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [, setLoading] = useState(true)
 
   useEffect(() => {
     async function loadActivity() {

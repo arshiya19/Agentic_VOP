@@ -522,19 +522,12 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, apiBase }) {
     }
     return null
   })
-  const [copied, setCopied] = useState(false)
   const [activePath, setActivePath] = useState(0)
   const [localApproved, setLocalApproved] = useState(false)
 
   // Effective status: if locally approved, treat as ready_for_execution
   const effectiveStatus = localApproved ? 'ready_for_execution' : pkg?.status
   const effectiveTerminal = effectiveStatus === 'ready_for_execution' || effectiveStatus === 'rejected'
-
-  const handleCopy = (text) => {
-    navigator.clipboard.writeText(text).catch(() => {})
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
 
   // Build upgrade steps from pathway remediation_steps
   const allSteps = pw?.remediation_steps?.map((s, i) => ({
@@ -644,11 +637,6 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, apiBase }) {
 
   const steps = paths[activePath]?.steps || allSteps
   const pathComplexity = paths[activePath]?.complexity || 'Medium'
-
-  // Build evidence text from validation tests or confidence info
-  const evidenceText = pw?.validation_tests?.length
-    ? pw.validation_tests.map(t => `# ${t.name}\n${t.command}\n# Expected: ${t.expected}`).join('\n\n')
-    : `# Remediation Package #${pkg?.id}\n# Family: ${pkg?.family || '—'}\n# Status: ${pkg?.status || '—'}\n# Confidence: ${pw?.confidence_score || '—'}%\n# Coverage: ${pw?.security_coverage || '—'}`
 
   if (loading || !pkg) {
     return (
