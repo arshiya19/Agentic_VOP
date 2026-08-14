@@ -82,7 +82,7 @@ _SOURCE_SCOOPS: dict[str, int] = {
     "trivy-image-ec2": 4,  # container image OS-package CVEs (primary focus)
     "trivy-image-java-ec2": 4,  # Java image CVEs
     "trivy-image-python-ec2": 4,  # Python image CVEs
-    "trivy-os-ec2": 10,  # host-level OS CVEs — bigger sample
+    "trivy-os-ec2": 4,  # host-level OS CVEs (Ubuntu/Debian on env2)
     "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
     # "trivy-fs-ec2": 4,     # app-level dep CVEs (needs DependencyStrategy)
     # "semgrep-ec2": 4,      # SAST findings (needs CodeEditStrategy)

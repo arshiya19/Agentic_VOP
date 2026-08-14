@@ -549,22 +549,37 @@ def _plan_and_enrich(
                     ),
                     "verification_approach": (
                         "After upgrade, verify installed version is GREATER than the vulnerable version "
-                        "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version."
+                        "using: dpkg -l <pkg> | grep <pkg>. Do NOT check for an exact target version — "
+                        "just confirm the package is installed. The version might not change if the "
+                        "package is already at newest."
                     ),
-                    "rescan_command": "trivy rootfs / --scanners vuln --severity HIGH,CRITICAL --format json",
+                    "rescan_command": "trivy rootfs / --cache-dir /tmp/trivy-cache --scanners vuln --severity HIGH,CRITICAL --format json",
                     "rescan_target": "/ (host root filesystem)",
+                    "rescan_validation_note": (
+                        "CRITICAL SHELL SEMANTICS: grep -c returns exit code 1 when match count is 0 "
+                        "(i.e. when the CVE is GONE — the desired outcome). You MUST append '|| true' to any "
+                        "grep -c command so the exit code is always 0. The validation engine checks the "
+                        "OUTPUT value (expecting '0'), not the exit code. "
+                        "Correct:  trivy rootfs / --cache-dir /tmp/trivy-cache --format json 2>&1 | grep -c 'CVE-xxx' || true "
+                        "Wrong:    trivy rootfs / --format json | grep -c 'CVE-xxx'"
+                    ),
                     "remediation_steps_rules": (
                         "Do NOT put the re-scan in remediation_steps. Steps should be: "
                         "1. apt-get update, 2. apt-get install --only-upgrade <pkg> -y, "
-                        "3. dpkg -l <pkg> (verify). Re-scan goes in validation_tests only."
+                        "3. dpkg -l <pkg> (verify). Re-scan goes in validation_tests only. "
+                        "Do NOT add 'apt list --upgradable' or 'apt autoremove' steps — they waste time. "
+                        "Do NOT add 'systemctl restart <service>' unless the CVE is specifically in that service's daemon."
                     ),
                     "reboot_policy": (
-                        "No reboot unless CVE is in kernel (linux-image-*), libc6, or systemd."
+                        "NEVER reboot. OS package fixes do not require a reboot unless the CVE "
+                        "is in kernel (linux-image-*), libc6, or systemd."
                     ),
                     "prohibited_commands": [
                         "sudo reboot (unless kernel/libc/systemd CVE)",
                         "docker build",
                         "apt-get install <pkg>=<specific_version>",
+                        "apt list --upgradable (wastes time, not useful for fix)",
+                        "apt autoremove (not needed for single package upgrade)",
                     ],
                 }
 
