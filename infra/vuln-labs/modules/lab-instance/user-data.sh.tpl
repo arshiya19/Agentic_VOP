@@ -365,6 +365,104 @@ resource "aws_security_group" "vulnerable_sg" {
     Purpose = "checkov-scan-target"
   }
 }
+
+# -----------------------------------------------------------------------------
+# FINDING 3: KMS Key — no rotation enabled
+# Checkov: CKV_AWS_7 — Ensure rotation for customer created CMKs is enabled
+# -----------------------------------------------------------------------------
+
+resource "aws_kms_key" "vulnerable_key" {
+  description             = "CSPM lab KMS key - no rotation"
+  deletion_window_in_days = 7
+  enable_key_rotation     = false
+
+  tags = {
+    Name    = "cspm-lab-${name_prefix}-key"
+    Purpose = "checkov-scan-target"
+  }
+}
+
+resource "aws_kms_alias" "vulnerable_key" {
+  name          = "alias/cspm-lab-${name_prefix}-key"
+  target_key_id = aws_kms_key.vulnerable_key.key_id
+}
+
+# -----------------------------------------------------------------------------
+# FINDING 4: IAM Policy — overly permissive (Action: *, Resource: *)
+# Checkov: CKV_AWS_63 — Ensure no IAM policies allow * in Action and Resource
+# -----------------------------------------------------------------------------
+
+resource "aws_iam_policy" "vulnerable_policy" {
+  name        = "cspm-lab-${name_prefix}-overly-permissive"
+  description = "INTENTIONALLY OVERLY PERMISSIVE - Checkov scan target"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = "*"
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name    = "cspm-lab-${name_prefix}-overly-permissive"
+    Purpose = "checkov-scan-target"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# FINDING 5: CloudWatch Log Group — no encryption, no retention
+# Checkov: CKV_AWS_158 — Ensure CloudWatch Log Group is encrypted by KMS
+# Checkov: CKV_AWS_338 — Ensure CloudWatch log groups retains logs for at least 1 year
+# -----------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "vulnerable_log_group" {
+  name = "/cspm-lab/${name_prefix}/vulnerable-logs"
+
+  # Intentionally NO kms_key_id (no encryption)
+  # Intentionally NO retention_in_days (infinite retention)
+
+  tags = {
+    Name    = "cspm-lab-${name_prefix}-log-group"
+    Purpose = "checkov-scan-target"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# FINDING 6: SNS Topic — no encryption
+# Checkov: CKV_AWS_26 — Ensure all data stored in the SNS topic is encrypted
+# -----------------------------------------------------------------------------
+
+resource "aws_sns_topic" "vulnerable_topic" {
+  name = "cspm-lab-${name_prefix}-unencrypted-topic"
+
+  # Intentionally NO kms_master_key_id (no encryption)
+
+  tags = {
+    Name    = "cspm-lab-${name_prefix}-topic"
+    Purpose = "checkov-scan-target"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# FINDING 7: SQS Queue — no encryption
+# Checkov: CKV_AWS_27 — Ensure all data stored in the SQS queue is encrypted
+# -----------------------------------------------------------------------------
+
+resource "aws_sqs_queue" "vulnerable_queue" {
+  name = "cspm-lab-${name_prefix}-unencrypted-queue"
+
+  # Intentionally NO sqs_managed_sse_enabled (no encryption)
+  # Intentionally NO kms_master_key_id
+
+  tags = {
+    Name    = "cspm-lab-${name_prefix}-queue"
+    Purpose = "checkov-scan-target"
+  }
+}
 TFEOF
 
 # Create backend config for CSPM lab Terraform state
