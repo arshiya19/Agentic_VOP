@@ -214,6 +214,88 @@ resource "aws_iam_role_policy" "cspm_sg" {
   })
 }
 
+# CSPM Lab — KMS, IAM, CloudWatch Logs, SNS, SQS management permissions
+resource "aws_iam_role_policy" "cspm_extended" {
+  name = "${var.name_prefix}-cspm-extended"
+  role = aws_iam_role.lab.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "CSPMLabKMS"
+        Effect   = "Allow"
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "CSPMLabIAM"
+        Effect = "Allow"
+        Action = [
+          "iam:CreatePolicy",
+          "iam:DeletePolicy",
+          "iam:GetPolicy",
+          "iam:CreatePolicyVersion",
+          "iam:DeletePolicyVersion",
+          "iam:ListPolicyVersions",
+          "iam:GetPolicyVersion",
+          "iam:TagPolicy",
+          "iam:UntagPolicy"
+        ]
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/cspm-lab-*"
+      },
+      {
+        Sid    = "CSPMLabLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:DeleteLogGroup",
+          "logs:PutRetentionPolicy",
+          "logs:DeleteRetentionPolicy",
+          "logs:DescribeLogGroups",
+          "logs:ListTagsLogGroup",
+          "logs:TagLogGroup",
+          "logs:UntagLogGroup",
+          "logs:AssociateKmsKey",
+          "logs:DisassociateKmsKey"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "CSPMLabSNS"
+        Effect = "Allow"
+        Action = [
+          "sns:CreateTopic",
+          "sns:DeleteTopic",
+          "sns:GetTopicAttributes",
+          "sns:SetTopicAttributes",
+          "sns:TagResource",
+          "sns:UntagResource",
+          "sns:ListTopics",
+          "sns:ListTagsForResource"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "CSPMLabSQS"
+        Effect = "Allow"
+        Action = [
+          "sqs:CreateQueue",
+          "sqs:DeleteQueue",
+          "sqs:GetQueueAttributes",
+          "sqs:SetQueueAttributes",
+          "sqs:TagQueue",
+          "sqs:UntagQueue",
+          "sqs:ListQueues",
+          "sqs:GetQueueUrl",
+          "sqs:ListQueueTags"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 # -----------------------------------------------------------------------------
 # Security Group — Properly secured for lab operation
 # Only opens ports actually needed for the instance role.
