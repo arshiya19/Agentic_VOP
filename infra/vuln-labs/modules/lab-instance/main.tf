@@ -254,8 +254,11 @@ resource "aws_iam_role_policy" "cspm_extended" {
           "logs:DeleteRetentionPolicy",
           "logs:DescribeLogGroups",
           "logs:ListTagsLogGroup",
+          "logs:ListTagsForResource",
           "logs:TagLogGroup",
+          "logs:TagResource",
           "logs:UntagLogGroup",
+          "logs:UntagResource",
           "logs:AssociateKmsKey",
           "logs:DisassociateKmsKey"
         ]
