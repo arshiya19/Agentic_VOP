@@ -21,9 +21,8 @@ env1 (Scan Source)                          env2 (Remediation Playground)
 
 | Lab | Path | Scanner | Vulnerabilities |
 |-----|------|---------|-----------------|
-| SAST | `/opt/vuln-labs/sast-lab/` | Semgrep | Flask app with SQL injection |
-| SCA (Node) | `/opt/vuln-labs/sca-lab/` | Trivy FS | lodash, express, etc. |
-| SCA (Java) | `/opt/vuln-labs/sca-lab/java-app/` | Trivy FS | Log4Shell, Spring4Shell |
+| AppSec (SAST) | `/opt/vuln-labs/appsec-lab/` | Semgrep | SQLi, XSS, SSRF, command injection, hardcoded secrets, etc. |
+| AppSec (SCA) | `/opt/vuln-labs/appsec-lab/` | Trivy FS | Vulnerable pinned Python dependencies |
 | Infra | `/opt/vuln-labs/infra-lab/` | Trivy Image | Outdated Ubuntu + OpenSSL |
 | CSPM | `/opt/vuln-labs/cspm-lab/` | Checkov | Public S3, open SSH SG |
 

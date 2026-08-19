@@ -1,0 +1,8 @@
+# Gitleaks configuration
+# Allowlist paths that contain intentionally planted secrets for vulnerability scanning demos.
+
+[allowlist]
+  description = "Intentionally vulnerable lab files (not real credentials)"
+  paths = [
+    '''infra/vuln-labs/appsec-lab/.*''',
+  ]
