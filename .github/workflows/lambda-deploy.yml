@@ -139,7 +139,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-terraform-apply-dev
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.7"
 
