@@ -328,7 +328,7 @@ jobs:
       # -----------------------------------------------------------------
       - name: Upload Checkov HCL Report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: checkov-hcl-report
           path: infra/results_json.json
@@ -337,7 +337,7 @@ jobs:
 
       - name: Upload Checkov Plan Report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: checkov-plan-report
           path: infra/plan_checkov/results_json.json

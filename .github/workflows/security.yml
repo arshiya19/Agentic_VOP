@@ -98,7 +98,7 @@ jobs:
 
       - name: Upload Bandit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bandit-report
           path: bandit-report.json
@@ -166,7 +166,7 @@ jobs:
 
       - name: Upload Bandit Lambdas report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bandit-lambdas-report
           path: bandit-lambdas-report.json
@@ -239,7 +239,7 @@ jobs:
 
       - name: Upload Semgrep report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: semgrep-report
           path: semgrep-report.json
@@ -356,7 +356,7 @@ jobs:
 
       - name: Upload pip-audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pip-audit-report
           path: apps/api/pip-audit-report.json
@@ -437,7 +437,7 @@ jobs:
 
       - name: Upload pip-audit lambdas report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pip-audit-lambdas-report
           path: lambdas/pip-audit-lambdas-report.json
@@ -542,7 +542,7 @@ jobs:
 
       - name: Upload npm audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: npm-audit-report
           path: apps/web/npm-audit-report.json
