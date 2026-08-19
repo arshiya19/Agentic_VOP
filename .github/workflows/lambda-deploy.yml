@@ -133,7 +133,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-apply-dev
           aws-region: ${{ env.AWS_REGION }}
@@ -205,7 +205,7 @@ jobs:
           echo "Zip size: $(stat --format=%s lambda.zip) bytes"
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-lambda-deploy-dev
           aws-region: ${{ env.AWS_REGION }}
@@ -253,7 +253,7 @@ jobs:
     environment: dev
     steps:
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-lambda-deploy-dev
           aws-region: ${{ env.AWS_REGION }}
@@ -299,7 +299,7 @@ jobs:
     environment: prod
     steps:
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-lambda-deploy-prod
           aws-region: ${{ env.AWS_REGION }}

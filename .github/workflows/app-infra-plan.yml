@@ -51,7 +51,7 @@ jobs:
       # Requirement 10.8: Use sisyfix-github-infra-plan role for PRs
       # -----------------------------------------------------------------
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-plan
           role-session-name: github-actions-app-infra-plan

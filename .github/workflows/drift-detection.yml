@@ -46,7 +46,7 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-infra-plan
           role-session-name: drift-detection-${{ matrix.environment }}

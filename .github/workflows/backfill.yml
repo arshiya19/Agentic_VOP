@@ -60,7 +60,7 @@ jobs:
           python-version: "3.11"
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-backfill-${{ inputs.environment }}
           aws-region: us-east-1
