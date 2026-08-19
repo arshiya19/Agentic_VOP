@@ -53,7 +53,7 @@ curl -fsSL "$APPSEC_BASE/file_handler.py" -o /opt/vuln-labs/appsec-lab/file_hand
 curl -fsSL "$APPSEC_BASE/api_client.py" -o /opt/vuln-labs/appsec-lab/api_client.py
 curl -fsSL "$APPSEC_BASE/utils.py" -o /opt/vuln-labs/appsec-lab/utils.py
 curl -fsSL "$APPSEC_BASE/config.py" -o /opt/vuln-labs/appsec-lab/config.py
-curl -fsSL "$APPSEC_BASE/requirements.txt" -o /opt/vuln-labs/appsec-lab/requirements.txt
+curl -fsSL "$APPSEC_BASE/requirements-vuln.txt" -o /opt/vuln-labs/appsec-lab/requirements.txt
 
 # =============================================================================
 # 3. Infra Lab — Dockerfile with outdated base image (for Trivy Image)
