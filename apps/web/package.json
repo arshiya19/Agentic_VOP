@@ -13,7 +13,7 @@
     "@supabase/supabase-js": "^2.75.0",
     "clsx": "^2.1.1",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
+    "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.1",
     "recharts": "^3.2.0",
     "tailwind-merge": "^3.4.0"
@@ -21,7 +21,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/react": "^19.1.10",
-    "@types/react-dom": "^19.1.7",
+    "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.4.23",
     "eslint": "^10.8.0",
