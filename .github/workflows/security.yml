@@ -39,7 +39,7 @@ jobs:
     name: "SAST · Python (Bandit)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -111,7 +111,7 @@ jobs:
     name: "SAST · Python Lambdas (Bandit)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -181,7 +181,7 @@ jobs:
     container:
       image: semgrep/semgrep:1.127.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Run OSS rule packs for JS/TS security + generic secrets + SQL injection + Python security.
       # Output JSON for gate parsing.
@@ -252,7 +252,7 @@ jobs:
     name: "Secrets (Gitleaks)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history so Gitleaks can scan all commits on the branch,
           # not just the latest snapshot.
@@ -272,7 +272,7 @@ jobs:
     name: "SCA · Python (pip-audit)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -369,7 +369,7 @@ jobs:
     name: "SCA · Python Lambdas (pip-audit)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -450,7 +450,7 @@ jobs:
     name: "SCA · JS (npm audit)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:

@@ -57,7 +57,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -93,7 +93,7 @@ jobs:
       infra_changed: ${{ steps.changes.outputs.infra }}
       lambdas_changed: ${{ steps.changes.outputs.lambdas }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
 
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -171,7 +171,7 @@ jobs:
       git_sha: ${{ steps.meta.outputs.git_sha }}
       built_at: ${{ steps.meta.outputs.built_at }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
