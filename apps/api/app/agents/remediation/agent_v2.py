@@ -846,6 +846,56 @@ def run_agentic_planner(
                 "grep -c without || true (grep returns exit 1 on zero matches)",
             ],
         }
+    elif "semgrep" in source or "bandit" in source or "sonarqube" in source or "gosec" in source:
+        user_payload["execution_context"] = {
+            "target_type": "source_code",
+            "fix_approach": (
+                "Edit the source file to replace the vulnerable code pattern with the secure "
+                "equivalent. The source file IS the artifact — there is no IaC, container, or "
+                "cloud layer. Fix the code directly: parameterized queries for SQLi, input "
+                "escaping for XSS, subprocess with list args for command injection, "
+                "os.environ.get() for hardcoded secrets, strong algorithms for weak hashing, "
+                "etc. The language and specific secure pattern should be derived from the "
+                "file extension and CWE classification in the finding."
+            ),
+            "file_base_path": "/opt/vuln-labs/appsec-lab",
+            "rescan_command": (
+                "semgrep scan --config /opt/vuln-labs/appsec-lab/semgrep-rules.yaml "
+                "{file_path} --json --no-git-ignore"
+            ),
+            "rescan_filter_note": (
+                "The re-scan must check for the ABSENCE of the specific rule_id that fired, "
+                "NOT for zero total findings. Other rules may still fire on the same file. "
+                "Use: semgrep scan --config /opt/vuln-labs/appsec-lab/semgrep-rules.yaml "
+                "{file_path} --json --no-git-ignore 2>&1 | grep -c '<rule_id>' || true "
+                "with expected='0'."
+            ),
+            "syntax_check": "python3 -m py_compile {file_path}",
+            "edit_guidance": (
+                "For single-line changes (e.g., debug=True to debug=False), use sed -i. "
+                "For multi-line changes (e.g., refactoring a function to use parameterized "
+                "queries), use cat > file << 'EOF' with the FULL corrected file content. "
+                "Use single-quoted 'EOF' to prevent shell interpolation of $variables in "
+                "the source code. Always verify the edit with grep afterward."
+            ),
+            "structural_constraint": (
+                "Step order MUST be: "
+                "1. Backup (cp file file.bak-timestamp), "
+                "2. Edit source (sed -i or cat > heredoc), "
+                "3. Verify edit (grep to confirm vulnerable pattern removed), "
+                "4. Syntax check (python3 -m py_compile or equivalent). "
+                "The re-scan belongs EXCLUSIVELY in validation_tests."
+            ),
+            "prohibited_commands": [
+                "terraform (no IaC layer for this target)",
+                "docker build (source code fix, not container rebuild)",
+                "sudo reboot",
+                "apt-get / yum (not a package vulnerability)",
+                "pip install (fix the source code, not dependencies)",
+                "grep -c without || true (grep returns exit 1 on zero matches)",
+                "rm or unlink on source files (edit in place, never delete)",
+            ],
+        }
 
     # --- Knowledge Base injection (few-shot from proven fixes) ---
     kb_context_msg: list[Any] = []

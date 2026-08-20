@@ -437,7 +437,15 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
         prefix = (settings.fixer_env2_path_prefix or "").rstrip("/")
         # Only prepend if the file_path isn't already inside the prefix
         # (idempotent — safe if raw_finding already emits full env2 paths).
-        if prefix and not file_path.startswith(prefix + "/"):
+        # Also skip if the path is already a full absolute path under a known
+        # vuln-labs directory (SAST/SCA scanners emit full paths like
+        # /opt/vuln-labs/appsec-lab/app.py that should NOT be prefixed).
+        prefix_base = prefix.rsplit("/", 1)[0] if prefix else ""  # e.g. /opt/vuln-labs
+        if (
+            prefix
+            and not file_path.startswith(prefix + "/")
+            and not (prefix_base and file_path.startswith(prefix_base + "/"))
+        ):
             file_path = prefix + file_path
 
     # working_directory — parent of file_path

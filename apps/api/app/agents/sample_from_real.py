@@ -86,7 +86,7 @@ _SOURCE_SCOOPS: dict[str, int] = {
     "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
     "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
     # "trivy-fs-ec2": 4,     # app-level dep CVEs (needs DependencyStrategy)
-    # "semgrep-ec2": 4,      # SAST findings (needs CodeEditStrategy)
+    "semgrep-ec2": 1,  # SAST findings (needs CodeEditStrategy)
 }
 
 # Hard cap on final sample size — trims picks after pinned + scoops + fallback.
