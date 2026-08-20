@@ -28,8 +28,8 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 CSPM_PATH = os.environ.get("VULN_LABS_CSPM_PATH", "/opt/vuln-labs/cspm-lab/")
-SAST_PATH = os.environ.get("VULN_LABS_SAST_PATH", "/opt/vuln-labs/sast-lab/")
-SCA_PATH = os.environ.get("VULN_LABS_SCA_PATH", "/opt/vuln-labs/sca-lab/")
+SAST_PATH = os.environ.get("VULN_LABS_SAST_PATH", "/opt/vuln-labs/appsec-lab/")
+SCA_PATH = os.environ.get("VULN_LABS_SCA_PATH", "/opt/vuln-labs/appsec-lab/")
 INFRA_IMAGE = os.environ.get("VULN_LABS_INFRA_IMAGE", "vuln-lab-image:latest")
 JAVA_IMAGE = os.environ.get("VULN_LABS_JAVA_IMAGE", "vuln-java-image:latest")
 PYTHON_IMAGE = os.environ.get("VULN_LABS_PYTHON_IMAGE", "vuln-python-image:latest")
@@ -47,14 +47,16 @@ def ensure_results_dir():
 def run_checkov():
     """Run Checkov and cache only the 3 key findings (1 per resource type)."""
     TARGET_CHECKS = {
-        "CKV_AWS_24",   # Security Group: SSH open to 0.0.0.0/0
+        "CKV_AWS_24",  # Security Group: SSH open to 0.0.0.0/0
         "CKV_AWS_145",  # S3 Bucket: No KMS encryption
-        "CKV_AWS_63",   # IAM: Policy allows * actions
+        "CKV_AWS_63",  # IAM: Policy allows * actions
     }
     try:
         result = subprocess.run(
             ["checkov", "-d", CSPM_PATH, "--output", "json", "--quiet", "--compact"],
-            capture_output=True, text=True, timeout=120
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         output = result.stdout or result.stderr
         try:
@@ -70,18 +72,24 @@ def run_checkov():
             results = check_group.get("results", {})
             failed = results.get("failed_checks", [])
             for f in failed:
-                findings.append({
-                    "check_id": f.get("check_id"),
-                    "check_name": f.get("check_name") or f.get("check_id"),
-                    "severity": f.get("severity") or "MEDIUM",
-                    "resource": f.get("resource"),
-                    "file_path": f.get("file_path"),
-                    "file_line_range": f.get("file_line_range"),
-                    "guideline": f.get("guideline"),
-                    "check_type": check_group.get("check_type", "terraform"),
-                })
+                findings.append(
+                    {
+                        "check_id": f.get("check_id"),
+                        "check_name": f.get("check_name") or f.get("check_id"),
+                        "severity": f.get("severity") or "MEDIUM",
+                        "resource": f.get("resource"),
+                        "file_path": f.get("file_path"),
+                        "file_line_range": f.get("file_line_range"),
+                        "guideline": f.get("guideline"),
+                        "check_type": check_group.get("check_type", "terraform"),
+                    }
+                )
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "checkov.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["checkov"] = datetime.utcnow().isoformat()
@@ -94,8 +102,12 @@ def run_semgrep():
     """Run Semgrep against the SAST lab and cache results."""
     if not os.path.isdir(SAST_PATH):
         print(f"[scan] Semgrep SKIPPED — SAST lab path does not exist: {SAST_PATH}")
-        error_data = {"findings": [], "total": 0, "error": f"SAST path missing: {SAST_PATH}",
-                      "scanned_at": datetime.utcnow().isoformat()}
+        error_data = {
+            "findings": [],
+            "total": 0,
+            "error": f"SAST path missing: {SAST_PATH}",
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
             json.dump(error_data, f)
         scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
@@ -113,17 +125,10 @@ def run_semgrep():
         rules_file = os.path.join(RESULTS_DIR, "semgrep-rules.yaml")
         with open(rules_file, "w") as rf:
             rf.write("""rules:
+  # --- SQL Injection (CWE-89) ---
   - id: sql-injection-format-string
     patterns:
       - pattern-either:
-          - pattern: |
-              $QUERY = f"...{$VAR}..."
-              ...
-              $CURSOR = $CONN.execute($QUERY)
-          - pattern: |
-              $QUERY = "..." + $VAR + "..."
-              ...
-              $CURSOR = $CONN.execute($QUERY)
           - pattern: $CONN.execute(f"...{$VAR}...")
           - pattern: $CONN.execute("..." + $VAR + "...")
     message: >
@@ -134,6 +139,57 @@ def run_semgrep():
       cwe: ["CWE-89"]
       owasp: ["A03:2021 - Injection"]
       confidence: HIGH
+
+  - id: sql-injection-fstring-variable
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $QUERY = f"...{$VAR}..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+          - pattern: |
+              $QUERY = "..." + $VAR + "..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+    message: >
+      SQL injection via string formatting in variable. Use parameterized queries.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  # --- XSS / Reflected Input (CWE-79) ---
+  - id: xss-render-template-string
+    patterns:
+      - pattern-either:
+          - pattern: render_template_string("..." + $VAR + "...")
+          - pattern: render_template_string(f"...{$VAR}...")
+    message: >
+      XSS via unsanitized user input in render_template_string. Escape user input.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  - id: xss-formatted-html-response
+    pattern: |
+      $HTML = f"...{$VAR}..."
+      ...
+      return render_template_string($HTML)
+    message: >
+      XSS via user input embedded in HTML string passed to render_template_string.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  # --- Flask Debug Mode (CWE-489) ---
   - id: flask-debug-enabled
     pattern: $APP.run(..., debug=True, ...)
     message: Flask debug mode enabled in production.
@@ -142,26 +198,188 @@ def run_semgrep():
     metadata:
       cwe: ["CWE-489"]
       owasp: ["A05:2021 - Security Misconfiguration"]
+
+  # --- Hardcoded Secrets (CWE-798) ---
+  - id: hardcoded-secret-key
+    patterns:
+      - pattern-either:
+          - pattern: SECRET_KEY = "..."
+          - pattern: API_TOKEN = "..."
+          - pattern: DB_PASSWORD = "..."
+          - pattern: AWS_ACCESS_KEY_ID = "..."
+          - pattern: AWS_SECRET_ACCESS_KEY = "..."
+    message: >
+      Hardcoded credential or secret in source code. Use environment variables.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-798"]
+      owasp: ["A07:2021 - Identification and Authentication Failures"]
+
+  # --- Weak Hashing (CWE-328) ---
+  - id: weak-hash-md5
+    pattern: hashlib.md5(...)
+    message: >
+      Weak hash algorithm MD5 used. Use SHA-256 or bcrypt for password hashing.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-328"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+
+  - id: weak-hash-sha1
+    pattern: hashlib.sha1(...)
+    message: >
+      Weak hash algorithm SHA1 used. Use SHA-256 or stronger for security tokens.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-328"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+
+  # --- Path Traversal (CWE-22) ---
+  - id: path-traversal-open
+    patterns:
+      - pattern-either:
+          - pattern: open(os.path.join($DIR, $USERINPUT), ...)
+          - pattern: send_file(open(os.path.join($DIR, $USERINPUT), ...), ...)
+    message: >
+      Path traversal — user-controlled filename passed to os.path.join + open.
+      Validate that the resolved path stays within the intended directory.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-22"]
+      owasp: ["A01:2021 - Broken Access Control"]
+
+  # --- Unrestricted File Upload (CWE-434) ---
+  - id: unrestricted-file-upload
+    pattern: $FILE.save(os.path.join($DIR, $FILE.filename))
+    message: >
+      Unrestricted file upload — file saved with user-supplied filename without
+      extension or content-type validation.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-434"]
+      owasp: ["A04:2021 - Insecure Design"]
+
+  # --- SSRF (CWE-918) ---
+  - id: ssrf-requests-get
+    pattern: requests.get($URL)
+    message: >
+      SSRF — user-controlled URL passed to requests.get. Validate against an allowlist.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+      owasp: ["A10:2021 - Server-Side Request Forgery"]
+
+  - id: ssrf-urllib-urlopen
+    pattern: urllib.request.urlopen($URL)
+    message: >
+      SSRF — user-controlled URL passed to urllib.request.urlopen.
+      Validate against an allowlist.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+      owasp: ["A10:2021 - Server-Side Request Forgery"]
+
+  # --- Command Injection (CWE-78) ---
+  - id: command-injection-os-system
+    pattern: os.system("..." + $VAR)
+    message: >
+      Command injection via os.system with concatenated user input.
+      Use subprocess with a list of arguments instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  - id: command-injection-subprocess-shell
+    pattern: subprocess.run($CMD, shell=True, ...)
+    message: >
+      Command injection risk — subprocess.run with shell=True.
+      Use shell=False and pass arguments as a list.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      owasp: ["A03:2021 - Injection"]
+
+  # --- Insecure Deserialization (CWE-502) ---
+  - id: insecure-deserialization-pickle
+    pattern: pickle.loads(...)
+    message: >
+      Insecure deserialization — pickle.loads on potentially untrusted data.
+      Use json.loads or a safe serialization format.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+      owasp: ["A08:2021 - Software and Data Integrity Failures"]
+
+  # --- Weak Random (CWE-330) ---
+  - id: weak-random-token
+    pattern: random.randint(...)
+    message: >
+      Weak randomness — random.randint used for security-sensitive token.
+      Use secrets.token_hex() or secrets.randbelow() instead.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-330"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+
+  # --- Dangerous Eval (CWE-95) ---
+  - id: dangerous-eval
+    pattern: eval($EXPR)
+    message: >
+      Dangerous eval() on potentially untrusted input. Use ast.literal_eval()
+      for safe expression evaluation.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-95"]
+      owasp: ["A03:2021 - Injection"]
 """)
 
         # Use local rules + memory limits for small EC2 instances
         result = subprocess.run(
-            ["semgrep", "scan",
-             "--config", rules_file,
-             SAST_PATH, "--json", "--no-git-ignore",
-             "--timeout", "60",
-             "--max-memory", "256",
-             "-j", "1",
-             "--optimizations", "none"],
-            capture_output=True, text=True, timeout=180
+            [
+                "semgrep",
+                "scan",
+                "--config",
+                rules_file,
+                SAST_PATH,
+                "--json",
+                "--no-git-ignore",
+                "--timeout",
+                "60",
+                "--max-memory",
+                "256",
+                "-j",
+                "1",
+                "--optimizations",
+                "none",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
         if result.stderr:
             print(f"[scan] Semgrep stderr: {result.stderr[:500]}")
 
         if not result.stdout:
-            error_data = {"findings": [], "total": 0,
-                          "error": f"No stdout. returncode={result.returncode}. stderr={result.stderr[:500]}",
-                          "scanned_at": datetime.utcnow().isoformat()}
+            error_data = {
+                "findings": [],
+                "total": 0,
+                "error": f"No stdout. returncode={result.returncode}. stderr={result.stderr[:500]}",
+                "scanned_at": datetime.utcnow().isoformat(),
+            }
             with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
                 json.dump(error_data, f)
             scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
@@ -173,29 +391,40 @@ def run_semgrep():
         errors = data.get("errors", [])
         findings = []
         for r in results:
-            findings.append({
-                "rule_id": r.get("check_id"),
-                "message": r.get("extra", {}).get("message"),
-                "severity": r.get("extra", {}).get("severity", "WARNING"),
-                "path": r.get("path"),
-                "start_line": r.get("start", {}).get("line"),
-                "end_line": r.get("end", {}).get("line"),
-                "metadata": r.get("extra", {}).get("metadata", {}),
-            })
+            findings.append(
+                {
+                    "rule_id": r.get("check_id"),
+                    "message": r.get("extra", {}).get("message"),
+                    "severity": r.get("extra", {}).get("severity", "WARNING"),
+                    "path": r.get("path"),
+                    "start_line": r.get("start", {}).get("line"),
+                    "end_line": r.get("end", {}).get("line"),
+                    "metadata": r.get("extra", {}).get("metadata", {}),
+                }
+            )
 
-        result_data = {"findings": findings, "total": len(findings),
-                       "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         # Include errors from semgrep if any (e.g. invalid path, rule download failure)
         if errors:
             result_data["errors"] = errors[:5]
         with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
-        print(f"[scan] Semgrep complete: {len(findings)} findings, {len(errors)} errors")
+        print(
+            f"[scan] Semgrep complete: {len(findings)} findings, {len(errors)} errors"
+        )
     except Exception as e:
         print(f"[scan] Semgrep failed: {e}")
-        error_data = {"findings": [], "total": 0, "error": str(e),
-                      "scanned_at": datetime.utcnow().isoformat()}
+        error_data = {
+            "findings": [],
+            "total": 0,
+            "error": str(e),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "semgrep.json"), "w") as f:
             json.dump(error_data, f)
         scan_timestamps["semgrep"] = datetime.utcnow().isoformat()
@@ -206,25 +435,33 @@ def run_trivy_fs():
     try:
         result = subprocess.run(
             ["trivy", "fs", SCA_PATH, "--format", "json", "--scanners", "vuln"],
-            capture_output=True, text=True, timeout=120
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         data = json.loads(result.stdout) if result.stdout else {}
         findings = []
         for target_result in data.get("Results", []):
             for vuln in target_result.get("Vulnerabilities", []):
-                findings.append({
-                    "vuln_id": vuln.get("VulnerabilityID"),
-                    "pkg_name": vuln.get("PkgName"),
-                    "installed_version": vuln.get("InstalledVersion"),
-                    "fixed_version": vuln.get("FixedVersion"),
-                    "severity": vuln.get("Severity"),
-                    "title": vuln.get("Title"),
-                    "description": vuln.get("Description"),
-                    "target": target_result.get("Target"),
-                    "type": target_result.get("Type"),
-                })
+                findings.append(
+                    {
+                        "vuln_id": vuln.get("VulnerabilityID"),
+                        "pkg_name": vuln.get("PkgName"),
+                        "installed_version": vuln.get("InstalledVersion"),
+                        "fixed_version": vuln.get("FixedVersion"),
+                        "severity": vuln.get("Severity"),
+                        "title": vuln.get("Title"),
+                        "description": vuln.get("Description"),
+                        "target": target_result.get("Target"),
+                        "type": target_result.get("Type"),
+                    }
+                )
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "trivy-fs.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["trivy-fs"] = datetime.utcnow().isoformat()
@@ -238,25 +475,33 @@ def run_trivy_image():
     try:
         result = subprocess.run(
             ["trivy", "image", INFRA_IMAGE, "--format", "json", "--scanners", "vuln"],
-            capture_output=True, text=True, timeout=180
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
         data = json.loads(result.stdout) if result.stdout else {}
         findings = []
         for target_result in data.get("Results", []):
             for vuln in target_result.get("Vulnerabilities", []):
-                findings.append({
-                    "vuln_id": vuln.get("VulnerabilityID"),
-                    "pkg_name": vuln.get("PkgName"),
-                    "installed_version": vuln.get("InstalledVersion"),
-                    "fixed_version": vuln.get("FixedVersion"),
-                    "severity": vuln.get("Severity"),
-                    "title": vuln.get("Title"),
-                    "description": vuln.get("Description"),
-                    "target": target_result.get("Target"),
-                    "type": target_result.get("Type"),
-                })
+                findings.append(
+                    {
+                        "vuln_id": vuln.get("VulnerabilityID"),
+                        "pkg_name": vuln.get("PkgName"),
+                        "installed_version": vuln.get("InstalledVersion"),
+                        "fixed_version": vuln.get("FixedVersion"),
+                        "severity": vuln.get("Severity"),
+                        "title": vuln.get("Title"),
+                        "description": vuln.get("Description"),
+                        "target": target_result.get("Target"),
+                        "type": target_result.get("Type"),
+                    }
+                )
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "trivy-image.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["trivy-image"] = datetime.utcnow().isoformat()
@@ -270,25 +515,33 @@ def run_trivy_image_java():
     try:
         result = subprocess.run(
             ["trivy", "image", JAVA_IMAGE, "--format", "json", "--scanners", "vuln"],
-            capture_output=True, text=True, timeout=180
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
         data = json.loads(result.stdout) if result.stdout else {}
         findings = []
         for target_result in data.get("Results", []):
             for vuln in target_result.get("Vulnerabilities", []):
-                findings.append({
-                    "vuln_id": vuln.get("VulnerabilityID"),
-                    "pkg_name": vuln.get("PkgName"),
-                    "installed_version": vuln.get("InstalledVersion"),
-                    "fixed_version": vuln.get("FixedVersion"),
-                    "severity": vuln.get("Severity"),
-                    "title": vuln.get("Title"),
-                    "description": vuln.get("Description"),
-                    "target": target_result.get("Target"),
-                    "type": target_result.get("Type"),
-                })
+                findings.append(
+                    {
+                        "vuln_id": vuln.get("VulnerabilityID"),
+                        "pkg_name": vuln.get("PkgName"),
+                        "installed_version": vuln.get("InstalledVersion"),
+                        "fixed_version": vuln.get("FixedVersion"),
+                        "severity": vuln.get("Severity"),
+                        "title": vuln.get("Title"),
+                        "description": vuln.get("Description"),
+                        "target": target_result.get("Target"),
+                        "type": target_result.get("Type"),
+                    }
+                )
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "trivy-image-java.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["trivy-image-java"] = datetime.utcnow().isoformat()
@@ -308,29 +561,44 @@ def run_trivy_image_python():
     try:
         result = subprocess.run(
             ["trivy", "image", PYTHON_IMAGE, "--format", "json", "--scanners", "vuln"],
-            capture_output=True, text=True, timeout=180
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
         data = json.loads(result.stdout) if result.stdout else {}
         findings = []
         for target_result in data.get("Results", []):
             # Only include python-pkg (pip) findings — skip OS-level debian packages
             result_type = (target_result.get("Type") or "").lower()
-            if result_type in ("debian", "ubuntu", "alpine", "redhat", "oracle", "amazon"):
+            if result_type in (
+                "debian",
+                "ubuntu",
+                "alpine",
+                "redhat",
+                "oracle",
+                "amazon",
+            ):
                 continue
             for vuln in target_result.get("Vulnerabilities", []):
-                findings.append({
-                    "vuln_id": vuln.get("VulnerabilityID"),
-                    "pkg_name": vuln.get("PkgName"),
-                    "installed_version": vuln.get("InstalledVersion"),
-                    "fixed_version": vuln.get("FixedVersion"),
-                    "severity": vuln.get("Severity"),
-                    "title": vuln.get("Title"),
-                    "description": vuln.get("Description"),
-                    "target": target_result.get("Target"),
-                    "type": target_result.get("Type"),
-                })
+                findings.append(
+                    {
+                        "vuln_id": vuln.get("VulnerabilityID"),
+                        "pkg_name": vuln.get("PkgName"),
+                        "installed_version": vuln.get("InstalledVersion"),
+                        "fixed_version": vuln.get("FixedVersion"),
+                        "severity": vuln.get("Severity"),
+                        "title": vuln.get("Title"),
+                        "description": vuln.get("Description"),
+                        "target": target_result.get("Target"),
+                        "type": target_result.get("Type"),
+                    }
+                )
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "trivy-image-python.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["trivy-image-python"] = datetime.utcnow().isoformat()
@@ -344,14 +612,20 @@ def run_trivy_os():
     try:
         result = subprocess.run(
             ["trivy", "rootfs", "/", "--format", "json", "--scanners", "vuln"],
-            capture_output=True, text=True, timeout=300
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
 
         if not result.stdout:
             error_msg = f"trivy produced no output (rc={result.returncode}): {result.stderr[:300]}"
             print(f"[scan] {error_msg}")
-            error_data = {"findings": [], "total": 0, "error": error_msg,
-                          "scanned_at": datetime.utcnow().isoformat()}
+            error_data = {
+                "findings": [],
+                "total": 0,
+                "error": error_msg,
+                "scanned_at": datetime.utcnow().isoformat(),
+            }
             with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
                 json.dump(error_data, f)
             scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
@@ -361,28 +635,38 @@ def run_trivy_os():
         findings = []
         for target_result in data.get("Results", []):
             for vuln in target_result.get("Vulnerabilities", []):
-                findings.append({
-                    "vuln_id": vuln.get("VulnerabilityID"),
-                    "pkg_name": vuln.get("PkgName"),
-                    "installed_version": vuln.get("InstalledVersion"),
-                    "fixed_version": vuln.get("FixedVersion"),
-                    "severity": vuln.get("Severity"),
-                    "title": vuln.get("Title"),
-                    "description": vuln.get("Description"),
-                    "target": target_result.get("Target"),
-                    "type": target_result.get("Type"),
-                    "os": "ubuntu 20.04 (host)",
-                })
+                findings.append(
+                    {
+                        "vuln_id": vuln.get("VulnerabilityID"),
+                        "pkg_name": vuln.get("PkgName"),
+                        "installed_version": vuln.get("InstalledVersion"),
+                        "fixed_version": vuln.get("FixedVersion"),
+                        "severity": vuln.get("Severity"),
+                        "title": vuln.get("Title"),
+                        "description": vuln.get("Description"),
+                        "target": target_result.get("Target"),
+                        "type": target_result.get("Type"),
+                        "os": "ubuntu 20.04 (host)",
+                    }
+                )
 
-        result_data = {"findings": findings, "total": len(findings), "scanned_at": datetime.utcnow().isoformat()}
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
             json.dump(result_data, f)
         scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
         print(f"[scan] Trivy OS (host rootfs) complete: {len(findings)} findings")
     except Exception as e:
         print(f"[scan] Trivy OS failed: {e}")
-        error_data = {"findings": [], "total": 0, "error": str(e),
-                      "scanned_at": datetime.utcnow().isoformat()}
+        error_data = {
+            "findings": [],
+            "total": 0,
+            "error": str(e),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
         with open(os.path.join(RESULTS_DIR, "trivy-os.json"), "w") as f:
             json.dump(error_data, f)
         scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
@@ -425,18 +709,36 @@ class ScanHandler(BaseHTTPRequestHandler):
         elif self.path == "/scan-status":
             self._respond(200, {"timestamps": scan_timestamps})
         else:
-            self._respond(404, {"error": "unknown endpoint", "available": [
-                "/health", "/scan/checkov", "/scan/semgrep",
-                "/scan/trivy-fs", "/scan/trivy-image/infra",
-                "/scan/trivy-image/java", "/scan/trivy-image/python",
-                "/scan/trivy-os", "/scan-status", "POST /trigger-scan"
-            ]})
+            self._respond(
+                404,
+                {
+                    "error": "unknown endpoint",
+                    "available": [
+                        "/health",
+                        "/scan/checkov",
+                        "/scan/semgrep",
+                        "/scan/trivy-fs",
+                        "/scan/trivy-image/infra",
+                        "/scan/trivy-image/java",
+                        "/scan/trivy-image/python",
+                        "/scan/trivy-os",
+                        "/scan-status",
+                        "POST /trigger-scan",
+                    ],
+                },
+            )
 
     def do_POST(self):
         if self.path == "/trigger-scan":
             thread = threading.Thread(target=run_all_scans, daemon=True)
             thread.start()
-            self._respond(202, {"status": "scan triggered", "message": "Scans running in background. Check /scan-status for completion."})
+            self._respond(
+                202,
+                {
+                    "status": "scan triggered",
+                    "message": "Scans running in background. Check /scan-status for completion.",
+                },
+            )
         elif self.path == "/trigger-scan/semgrep":
             thread = threading.Thread(target=run_semgrep, daemon=True)
             thread.start()
@@ -472,7 +774,12 @@ class ScanHandler(BaseHTTPRequestHandler):
         """Return cached scan results from disk."""
         filepath = os.path.join(RESULTS_DIR, filename)
         if not os.path.exists(filepath):
-            self._respond(404, {"error": f"No cached results for {filename}. POST /trigger-scan first or wait for startup scan to complete."})
+            self._respond(
+                404,
+                {
+                    "error": f"No cached results for {filename}. POST /trigger-scan first or wait for startup scan to complete."
+                },
+            )
             return
         with open(filepath) as f:
             data = json.load(f)
@@ -502,7 +809,9 @@ if __name__ == "__main__":
         waited += 10
 
     if not os.path.exists(SETUP_MARKER):
-        print(f"[startup] WARNING: {SETUP_MARKER} not found after {MAX_WAIT}s. Running scans anyway.")
+        print(
+            f"[startup] WARNING: {SETUP_MARKER} not found after {MAX_WAIT}s. Running scans anyway."
+        )
     else:
         print(f"[startup] Lab setup complete. Starting scans.")
 
