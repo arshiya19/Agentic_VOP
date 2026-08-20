@@ -622,6 +622,7 @@ def verify_output(
     # per package + ~4 tool calls; the scanner-provided guideline URL is already
     # authoritative for these fixes.
     import os as _os  # noqa: PLC0415
+
     _skip_xverify = _os.getenv("SA3_DISABLE_VERIFICATION_PASS", "").lower() in ("1", "true", "yes")
     to_verify = [] if _skip_xverify else candidates[:max_commands_to_verify]
     if _skip_xverify and candidates:

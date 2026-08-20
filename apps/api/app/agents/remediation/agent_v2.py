@@ -348,6 +348,7 @@ def _maybe_expand_for_depth(
     # even if they have <min_steps steps. Trigger B (zero-command drafts) still
     # forces expansion — those are genuinely unrunnable.
     import os as _os  # noqa: PLC0415
+
     if _os.getenv("SA3_DISABLE_EXPANSION_RETRY", "").lower() in ("1", "true", "yes"):
         if _count_extractable_commands(parsed) > 0:
             emit_fn(

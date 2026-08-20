@@ -294,18 +294,20 @@ def try_kb_replay(
             )
             retry_messages = messages + [
                 AIMessage(content=text),
-                HumanMessage(content=(
-                    "Your previous response failed strict schema validation with this "
-                    f"EXACT pydantic error:\n\n{first_err}\n\n"
-                    "Fix ONLY the specific field(s) named in the error above. Preserve "
-                    "every other value you already emitted. The schema requires: "
-                    "top-level `finding`/`root_cause`/`impact` (each 20-400 chars) plus "
-                    "`pathways` (array of 1-3 entries). Each pathway needs objective, "
-                    "security_coverage, remediation_steps, rollback_plan (with supported, "
-                    "objective, steps, validation, explanation), validation_tests, "
-                    "test_scripts, execution_strategy, advantages, considerations. "
-                    "Emit ONLY the corrected JSON, no prose."
-                )),
+                HumanMessage(
+                    content=(
+                        "Your previous response failed strict schema validation with this "
+                        f"EXACT pydantic error:\n\n{first_err}\n\n"
+                        "Fix ONLY the specific field(s) named in the error above. Preserve "
+                        "every other value you already emitted. The schema requires: "
+                        "top-level `finding`/`root_cause`/`impact` (each 20-400 chars) plus "
+                        "`pathways` (array of 1-3 entries). Each pathway needs objective, "
+                        "security_coverage, remediation_steps, rollback_plan (with supported, "
+                        "objective, steps, validation, explanation), validation_tests, "
+                        "test_scripts, execution_strategy, advantages, considerations. "
+                        "Emit ONLY the corrected JSON, no prose."
+                    )
+                ),
             ]
             retry_errors: list = []
             try:
@@ -457,7 +459,9 @@ def _ensure_rescan_in_validation(
 # =============================================================================
 # Parse adaptation LLM output
 # =============================================================================
-def _parse_adaptation_output(text: str, capture_error: list | None = None) -> LLMRemediationOutput | None:
+def _parse_adaptation_output(
+    text: str, capture_error: list | None = None
+) -> LLMRemediationOutput | None:
     """Parse the adaptation LLM's output as LLMRemediationOutput.
 
     Handles:
