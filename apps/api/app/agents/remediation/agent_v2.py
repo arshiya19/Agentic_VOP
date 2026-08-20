@@ -342,6 +342,23 @@ def _maybe_expand_for_depth(
     """
     if not parsed.pathways:
         return parsed
+    # LOCAL knob (SA3_DISABLE_EXPANSION_RETRY=1) — skip the "expand to N steps"
+    # re-invocation. Costs no tool calls but adds a full LLM round-trip (10-15s
+    # + ~2k output tokens) per package. Turning it off accepts pathways as-is
+    # even if they have <min_steps steps. Trigger B (zero-command drafts) still
+    # forces expansion — those are genuinely unrunnable.
+    import os as _os  # noqa: PLC0415
+    if _os.getenv("SA3_DISABLE_EXPANSION_RETRY", "").lower() in ("1", "true", "yes"):
+        if _count_extractable_commands(parsed) > 0:
+            emit_fn(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                "Depth-expansion retry skipped (SA3_DISABLE_EXPANSION_RETRY=1) — "
+                "keeping draft as produced",
+            )
+            return parsed
+        # else: fall through — zero-command drafts still need repair
 
     reasons: list[str] = []
     shortfalls: list[tuple[int, int]] = []

@@ -497,11 +497,25 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
         if any(file_path.endswith(ext) for ext in iac_extensions):
             scanner_type = "iac"
 
+    # file_line_range — scanner-provided precise line range (checkov: [start, end],
+    # semgrep: {start: {line}, end: {line}}, bandit: line_number). Lets SA-3 target
+    # the exact lines instead of the whole file when it composes edits.
+    file_line_range = (
+        raw.get("file_line_range")  # Checkov: [117, 136]
+        or (
+            [raw["start"]["line"], raw["end"]["line"]]  # Semgrep
+            if isinstance(raw.get("start"), dict) and isinstance(raw.get("end"), dict)
+            else None
+        )
+        or ([raw["line_number"], raw["line_number"]] if raw.get("line_number") else None)  # Bandit
+    )
+
     return {
         "file_path": file_path,
         "working_directory": working_directory,
         "resource_name": resource_name,
         "scanner_type": scanner_type,
+        "file_line_range": file_line_range,
     }
 
 

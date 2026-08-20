@@ -166,7 +166,13 @@ def run_fixer(
     if not FixerConfig.allow_concurrent_runs:
         import time  # noqa: PLC0415 — local import; keeps top-of-file clean
 
-        LOCK_WAIT_MAX_S = 300  # 5 min total wait
+        # 30 min total wait (was 5). Sized to survive a slow SA-4 fix chain
+        # (~90s each × 20 packages = 30 min worst case) so a legitimately
+        # long-running fix upstream doesn't cause downstream package casualties.
+        # Trace we saw: 6 packages of 20 timed out at 300s while a stuck fix_run
+        # from a prior killed uvicorn held the lock. 1800s gives comfortable
+        # headroom even if a real (not stuck) fix run takes its full time.
+        LOCK_WAIT_MAX_S = 1800
         LOCK_POLL_INTERVAL_S = 10
         waited_s = 0
         other = any_concurrent_run(sb)

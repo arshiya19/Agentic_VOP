@@ -1,4 +1,11 @@
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Push .env values into os.environ so plain os.getenv() calls (used for
+# local-only feature flags that aren't worth adding to the Settings schema)
+# can see them. pydantic-settings itself reads .env for declared Settings
+# fields but does NOT propagate unknown keys to os.environ.
+load_dotenv()
 
 
 class Settings(BaseSettings):

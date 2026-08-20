@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ...models import LLMRemediationOutput
 from ..llm import get_chat_llm
@@ -99,11 +99,12 @@ RULES:
 5. Keep all source/source_url fields from the recipe unchanged.
 6. Emit valid JSON matching the OUTPUT SCHEMA exactly.
 
-OUTPUT SCHEMA:
+OUTPUT SCHEMA (all four top-level keys REQUIRED — `pathways` array MUST be
+present with at least one entry, or the output will be rejected):
 {
-  "finding": "<1-2 sentences>",
-  "root_cause": "<1-2 sentences>",
-  "impact": "<1-2 sentences>",
+  "finding": "<1-2 sentences, 20-400 chars>",
+  "root_cause": "<1-2 sentences, 20-400 chars>",
+  "impact": "<1-2 sentences, 20-400 chars>",
   "pathways": [{
     "objective": "<1 sentence>",
     "security_coverage": "complete",
@@ -120,7 +121,9 @@ OUTPUT SCHEMA:
   }]
 }
 
-Emit ONLY the JSON. No prose, no explanation.
+CRITICAL: emit ALL four top-level keys. Do NOT emit only finding/root_cause/impact
+without the pathways array — the pathways array is what carries the actual
+adapted steps and is what the parser reads. Emit ONLY the JSON. No prose.
 """
 
 
@@ -269,18 +272,76 @@ def try_kb_replay(
         )
 
         # Parse the response as LLMRemediationOutput
-        # Try direct parse first, then extract JSON from fences
-        output = _parse_adaptation_output(text)
+        # Try direct parse first, then extract JSON from fences.
+        # capture_error collects the pydantic ValidationError so we can feed
+        # the EXACT missing/wrong field back to the LLM on retry.
+        first_errors: list = []
+        output = _parse_adaptation_output(text, capture_error=first_errors)
 
         if output is None:
+            # ONE retry with the parse error fed back. Costs 1 extra LLM call
+            # (~$0.02, ~5s) vs falling through to full agentic path (~5-15 calls,
+            # ~60-90s, ~$0.10). We now pass the EXACT pydantic validation error
+            # to the LLM so it knows precisely which field is missing/wrong,
+            # rather than a generic "shape wrong" hint that it may not act on.
+            first_err = first_errors[0] if first_errors else "unknown parse error"
             emit_fn(
                 run_id,
                 "sub-agent-3",
-                "ERROR",
-                f"📚 KB replay: adaptation LLM returned unparseable output "
-                f"(first 200 chars: {text[:200]!r}) — falling through to agentic path.",
+                "MESSAGE",
+                f"📚 KB replay: first adaptation attempt failed to parse — "
+                f"validation error: {first_err[:220]}. Retrying with feedback...",
             )
-            return None, None
+            retry_messages = messages + [
+                AIMessage(content=text),
+                HumanMessage(content=(
+                    "Your previous response failed strict schema validation with this "
+                    f"EXACT pydantic error:\n\n{first_err}\n\n"
+                    "Fix ONLY the specific field(s) named in the error above. Preserve "
+                    "every other value you already emitted. The schema requires: "
+                    "top-level `finding`/`root_cause`/`impact` (each 20-400 chars) plus "
+                    "`pathways` (array of 1-3 entries). Each pathway needs objective, "
+                    "security_coverage, remediation_steps, rollback_plan (with supported, "
+                    "objective, steps, validation, explanation), validation_tests, "
+                    "test_scripts, execution_strategy, advantages, considerations. "
+                    "Emit ONLY the corrected JSON, no prose."
+                )),
+            ]
+            retry_errors: list = []
+            try:
+                retry_response = llm.invoke(retry_messages)
+                retry_text = (
+                    retry_response.content
+                    if isinstance(retry_response.content, str)
+                    else json.dumps(retry_response.content)
+                )
+                output = _parse_adaptation_output(retry_text, capture_error=retry_errors)
+            except Exception as retry_err:  # noqa: BLE001
+                emit_fn(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"📚 KB replay: retry LLM call raised "
+                    f"({type(retry_err).__name__}: {str(retry_err)[:100]})",
+                )
+                output = None
+
+            if output is None:
+                retry_err_msg = retry_errors[0] if retry_errors else "no retry error captured"
+                emit_fn(
+                    run_id,
+                    "sub-agent-3",
+                    "ERROR",
+                    f"📚 KB replay: adaptation output unparseable after 1 retry — "
+                    f"retry validation error: {retry_err_msg[:220]}. Falling through to agentic.",
+                )
+                return None, None
+            emit_fn(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                "📚 KB replay: retry succeeded — proceeding with adapted recipe.",
+            )
 
         # 4. Ensure validation_tests include the re-scan from the KB entry.
         # The adaptation LLM sometimes drops or truncates validation_tests.
@@ -396,17 +457,24 @@ def _ensure_rescan_in_validation(
 # =============================================================================
 # Parse adaptation LLM output
 # =============================================================================
-def _parse_adaptation_output(text: str) -> LLMRemediationOutput | None:
+def _parse_adaptation_output(text: str, capture_error: list | None = None) -> LLMRemediationOutput | None:
     """Parse the adaptation LLM's output as LLMRemediationOutput.
 
     Handles:
         - Bare JSON
         - JSON inside ```json ... ``` fences
         - JSON with leading/trailing prose
+
+    If `capture_error` is a list, the last pydantic ValidationError message is
+    appended to it so callers can surface the exact reason parsing failed
+    (missing required field, wrong type, etc.). Only errors from the FINAL
+    parse attempt survive — earlier attempt errors are overwritten.
     """
     import re  # noqa: PLC0415
 
     if not text or not text.strip():
+        if capture_error is not None:
+            capture_error.append("empty or whitespace-only response")
         return None
 
     # Try bare parse
@@ -431,10 +499,18 @@ def _parse_adaptation_output(text: str) -> LLMRemediationOutput | None:
                     candidates.append(text[start : i + 1])
                     break
 
+    last_err = None
     for candidate in candidates:
         try:
             return LLMRemediationOutput.model_validate_json(candidate)
-        except Exception:  # noqa: BLE001, S112
+        except Exception as e:  # noqa: BLE001
+            last_err = e
             continue
 
+    if capture_error is not None and last_err is not None:
+        # Compact the pydantic error to a single line — usually the first 2-3
+        # error entries are the most informative (missing required field name,
+        # wrong type at path). Full traces are enormous.
+        err_str = str(last_err).replace("\n", " ")[:400]
+        capture_error.append(err_str)
     return None

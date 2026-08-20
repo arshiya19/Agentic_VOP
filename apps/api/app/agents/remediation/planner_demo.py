@@ -45,6 +45,11 @@ from .planner import (
 )
 
 
+# Hard cap on packages generated per demo run. Belt-and-suspenders with the
+# sample_from_real cap — trims here even if upstream loosens later.
+_MAX_PACKAGES = 20
+
+
 def run_demo_remediation(run_id: str) -> dict:
     """Generate + persist RemediationPackages for every demo issue in this run.
 
@@ -130,6 +135,15 @@ def run_demo_remediation(run_id: str) -> dict:
     planned = persisted = failed = 0
 
     for issue in issues:
+        if persisted >= _MAX_PACKAGES:
+            emit_trace_demo(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                f"Package cap reached ({_MAX_PACKAGES}) — skipping remaining "
+                f"{len(issues) - (planned + failed)} issue(s) this run",
+            )
+            break
         try:
             family = classify_finding(issue, raw=_raw_for(issue))
             if family == "unknown":

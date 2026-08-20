@@ -79,14 +79,19 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 #
 # Each entry: source (matches issues.source exactly) → N issues to pick.
 _SOURCE_SCOOPS: dict[str, int] = {
-    "trivy-image-ec2": 4,  # container image OS-package CVEs (primary focus)
+    "checkov-ec2": 20,  # IaC misconfigurations (env2 focus — pinned picks land first, scoop fills to 20)
+    "trivy-image-ec2": 20,  # container image OS-package CVEs
     "trivy-image-java-ec2": 4,  # Java image CVEs
     "trivy-image-python-ec2": 4,  # Python image CVEs
-    "trivy-os-ec2": 4,  # host-level OS CVEs (Ubuntu/Debian on env2)
+    "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
     "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
     # "trivy-fs-ec2": 4,     # app-level dep CVEs (needs DependencyStrategy)
     # "semgrep-ec2": 4,      # SAST findings (needs CodeEditStrategy)
 }
+
+# Hard cap on final sample size — trims picks after pinned + scoops + fallback.
+# Guarantees the downstream planner never sees more than N issues per demo run.
+_MAX_SAMPLE_SIZE = 20
 
 
 def _resource_label(issue: dict) -> str:
@@ -291,6 +296,19 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
                 f"⚠ Fallback: pinned set insufficient — added highest-risk {fam} "
                 f"issue (source_vuln_id={fallback_pick.get('source_vuln_id')})",
             )
+
+    # Hard cap — trim final sample so the downstream planner + fixer never
+    # see more than _MAX_SAMPLE_SIZE issues. Pinned picks + higher-risk
+    # scoops land first, so the trimmed set stays representative.
+    if len(picks) > _MAX_SAMPLE_SIZE:
+        dropped = len(picks) - _MAX_SAMPLE_SIZE
+        picks = picks[:_MAX_SAMPLE_SIZE]
+        emit_trace_demo(
+            run_id,
+            "system",
+            "MESSAGE",
+            f"Cap applied: trimmed to {_MAX_SAMPLE_SIZE} issue(s) (dropped {dropped} lower-priority pick(s))",
+        )
 
     families_missing = [
         f
