@@ -134,24 +134,48 @@ def run_demo_remediation(run_id: str) -> dict:
 
     planned = persisted = failed = 0
 
-    for issue in issues:
+    # --- Per-file batching ---
+    # Group issues by the file they target. Multi-finding files get ONE
+    # package with N edit_file steps composed against a single view of the
+    # file (eliminates within-run state drift). Single-finding files keep
+    # current behavior. Universal — same code path for any scanner that
+    # emits file paths (semgrep, bandit, sonarqube, checkov, tfsec, trivy IaC).
+    file_groups = _group_issues_by_file(issues, _raw_for)
+    grouped_count = sum(1 for g in file_groups.values() if len(g) > 1)
+    if grouped_count:
+        emit_trace_demo(
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"📦 Per-file batching: {len(issues)} finding(s) → {len(file_groups)} package(s) "
+            f"({grouped_count} file(s) with multiple findings will be batched)",
+        )
+
+    for file_key, group in file_groups.items():
         if persisted >= _MAX_PACKAGES:
             emit_trace_demo(
                 run_id,
                 "sub-agent-3",
                 "MESSAGE",
                 f"Package cap reached ({_MAX_PACKAGES}) — skipping remaining "
-                f"{len(issues) - (planned + failed)} issue(s) this run",
+                f"{len(file_groups) - persisted - failed} file group(s) this run",
             )
             break
+
+        # Use the highest-severity finding in the group as the "primary"
+        # (for issue_id / family / pattern / asset lookup) — other findings
+        # in the group ride along in the payload as additional_findings.
+        primary = _select_primary(group)
+        related = [i for i in group if i.get("id") != primary.get("id")]
+
         try:
-            family = classify_finding(issue, raw=_raw_for(issue))
+            family = classify_finding(primary, raw=_raw_for(primary))
             if family == "unknown":
                 emit_trace_demo(
                     run_id,
                     "sub-agent-3",
                     "ERROR",
-                    f"Issue {issue.get('id')} did not classify — skipping",
+                    f"Primary issue {primary.get('id')} in file group did not classify — skipping",
                 )
                 failed += 1
                 continue
@@ -162,15 +186,28 @@ def run_demo_remediation(run_id: str) -> dict:
                     run_id,
                     "sub-agent-3",
                     "ERROR",
-                    f"No pattern for family='{family}' — skipping issue {issue.get('id')}",
+                    f"No pattern for family='{family}' — skipping file={file_key}",
                 )
                 failed += 1
                 continue
 
-            asset = _lookup_demo_asset(all_assets, issue)
+            asset = _lookup_demo_asset(all_assets, primary)
 
-            raw = _raw_for(issue)
-            pkg = _plan_and_enrich(run_id, prompt_row, issue, pattern, asset, family, sb_pub, raw)
+            if related:
+                # Multi-finding batch — SA-3 sees primary + related, emits
+                # ONE package with edit_file steps for each
+                pkg = _plan_and_enrich_batch(
+                    run_id, prompt_row, primary, related, pattern, asset, family, sb_pub, _raw_for
+                )
+                emit_trace_demo(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"🧩 Batched {1 + len(related)} finding(s) for {file_key} into 1 package "
+                    f"(primary issue={primary['id']}, related={[i['id'] for i in related]})",
+                )
+            else:
+                pkg = _plan_and_enrich(run_id, prompt_row, primary, pattern, asset, family, sb_pub, _raw_for(primary))
             planned += 1
 
             _persist_to_demo(sb_demo, pkg, run_id)
@@ -180,7 +217,7 @@ def run_demo_remediation(run_id: str) -> dict:
                 run_id,
                 "sub-agent-3",
                 "MESSAGE",
-                f"Package generated for issue {issue['id']} "
+                f"Package generated for issue {primary['id']} "
                 f"(family={family}, confidence={pkg.pathways[pkg.recommended_pathway_index].confidence_score})",
             )
         except Exception as e:  # noqa: BLE001
@@ -189,8 +226,8 @@ def run_demo_remediation(run_id: str) -> dict:
                 run_id,
                 "sub-agent-3",
                 "ERROR",
-                f"Package generation failed for issue {issue.get('id')} "
-                f"({type(e).__name__}): {str(e)[:250]}",
+                f"Package generation failed for file={file_key} "
+                f"(primary issue={primary.get('id')}, {type(e).__name__}): {str(e)[:250]}",
             )
 
     emit_trace_demo(
@@ -207,6 +244,132 @@ def run_demo_remediation(run_id: str) -> dict:
         },
     )
     return {"planned": planned, "persisted": persisted, "failed": failed}
+
+
+# =============================================================================
+# Per-file batching helpers
+# =============================================================================
+# Group findings by the file they target so a single package can fix multiple
+# vulnerabilities in one place — eliminates within-run state drift AND matches
+# how enterprise coding agents (Cursor, Aider, Copilot Workspaces) work.
+# Universal — no scanner-specific logic, works for any tool that emits a file.
+
+_SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "": 0}
+
+
+def _file_key_for(issue: dict, raw: dict | None) -> str:
+    """Return the file path this issue targets. Empty string when unattributable
+    (findings without a file path fall through as their own group, one per issue,
+    which preserves current per-finding behavior for OS/CVE-style findings)."""
+    raw = raw or {}
+    return (
+        raw.get("file_path")  # Checkov, Prisma
+        or raw.get("path")  # Semgrep
+        or raw.get("filename")  # Bandit
+        or raw.get("Target")  # Trivy (container/image target)
+        or (issue.get("asset_identity") or {}).get("file")
+        or ""
+    )
+
+
+def _group_issues_by_file(issues: list[dict], raw_for) -> dict:
+    """Group issues by target file. Preserves insertion order (dict).
+
+    Returns dict[file_key, list[issues]]. Files sharing a path get one entry
+    with all their findings. Findings without a file path get a unique key
+    per issue (fall through as singletons) so we don't accidentally batch
+    unrelated no-path findings together.
+    """
+    groups: dict = {}
+    for iss in issues:
+        key = _file_key_for(iss, raw_for(iss))
+        if not key:
+            # Unattributable — synthesize a unique key so it stays a singleton
+            key = f"__no_file__:{iss.get('id')}"
+        groups.setdefault(key, []).append(iss)
+    return groups
+
+
+def _select_primary(group: list[dict]) -> dict:
+    """Pick the highest-risk finding in a file group as the primary.
+    Others ride along in the payload as additional_findings. Highest
+    derived_risk wins; ties broken by severity rank, then by earliest id."""
+    def _score(iss: dict) -> tuple[float, int, int]:
+        risk = iss.get("derived_risk")
+        risk_val = float(risk) if risk is not None else -1.0
+        sev_val = _SEVERITY_ORDER.get((iss.get("severity") or "").upper(), 0)
+        # Negate id so lower id wins the tiebreak (stable ordering)
+        return (risk_val, sev_val, -int(iss.get("id") or 0))
+    return max(group, key=_score)
+
+
+def _plan_and_enrich_batch(
+    run_id: str,
+    prompt_row: dict,
+    primary: dict,
+    related: list[dict],
+    pattern: dict,
+    asset: dict,
+    family: str,
+    sb_pub,
+    raw_for,
+) -> "RemediationPackage":  # noqa: F821
+    """Plan a batched fix package covering primary + related findings for one file.
+
+    SA-3 sees the primary as the main issue and the related findings as
+    `additional_findings` in the user_payload. The SAST execution_context
+    guidance (in agent_v2) tells the LLM to emit ONE pathway containing
+    ONE backup step + N #EDIT_FILE steps (one per finding) + verify_absent
+    checks for each + a single re-scan at the end.
+    """
+    raw = raw_for(primary)
+    related_payloads = [
+        {
+            "id": r.get("id"),
+            "source_vuln_id": r.get("source_vuln_id"),
+            "cve_id": r.get("cve_id"),
+            "cwe_id": r.get("cwe_id"),
+            "title": r.get("title"),
+            "severity": r.get("severity"),
+            "description": r.get("description"),
+            "solution": r.get("solution"),
+            "remediation_suggestion": r.get("remediation_suggestion"),
+            # Include raw finding line-range hint if scanner provided one
+            "raw_hint": {
+                "check_id": (raw_for(r) or {}).get("check_id"),
+                "start_line": (raw_for(r) or {}).get("start", {}).get("line"),
+                "end_line": (raw_for(r) or {}).get("end", {}).get("line"),
+            },
+        }
+        for r in related
+    ]
+    # Delegate to the same LLM path used for single-issue planning. Batch
+    # context is attached to the issue dict itself (no signature churn) —
+    # downstream _issue_payload / remediate_agentic pick it up and surface
+    # `additional_findings` in the user_payload so SA-3 composes ONE
+    # package covering all.
+    covered_ids = [primary["id"]] + [r["id"] for r in related]
+    primary_with_batch = dict(primary)
+    primary_with_batch["_batch_related_findings"] = related_payloads
+    primary_with_batch["_batch_covered_ids"] = covered_ids
+    pkg = _plan_and_enrich(run_id, prompt_row, primary_with_batch, pattern, asset, family, sb_pub, raw)
+    # Persist the covered-issue list on the package pathway so master can
+    # count real findings per fix_run without a DB schema change. The
+    # `__batch_covered_ids__:` prefix is a machine-readable audit note in
+    # pathway.considerations (a list[str] the schema already supports).
+    try:
+        marker = f"__batch_covered_ids__:{','.join(str(i) for i in covered_ids)}"
+        for pathway in pkg.pathways:
+            existing = list(pathway.considerations or [])
+            existing.append(marker)
+            # Cap at schema max (15) — batch marker is important, drop oldest
+            # (informational) items if we exceed
+            if len(existing) > 15:
+                existing = existing[:14] + [marker]
+            pathway.considerations = existing
+    except Exception:  # noqa: BLE001, S110 — audit best-effort, never blocks
+        pass
+    return pkg
 
 
 def _lookup_demo_asset(all_assets: list[dict], issue: dict) -> dict:

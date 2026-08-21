@@ -690,10 +690,25 @@ def _run_lifecycle(
     #     check failure defeats the whole point of the closed loop.
     #   - Absent a scanner re-scan (SA3 v2.4 hard rule 17 violation), fall
     #     back to strict mode: any non-rescan failure triggers rollback.
-    rescan = next((v for v in validation_results if v.is_rescan), None)
+    # Collect ALL re-scan tests (batch mode emits one per finding — the old
+    # `next()` only picked the first, losing signal for the others).
+    all_rescans = [v for v in validation_results if v.is_rescan]
+    passed_rescans = [v for v in all_rescans if v.passed]
+    failed_rescans = [v for v in all_rescans if not v.passed]
+    # Primary rescan (for ancillary-vs-authoritative comparison downstream):
+    # the FIRST re-scan test. Kept for backward compat with single-fix packages.
+    rescan = all_rescans[0] if all_rescans else None
     non_rescan_failures = [v for v in validation_results if not v.is_rescan and not v.passed]
 
-    if rescan is not None and not rescan.passed:
+    # Rollback decision (updated 2026-08-21):
+    #   - ALL re-scans failed → rollback (nothing worked)
+    #   - SOME re-scans passed, SOME failed → PARTIAL SUCCESS
+    #     (keep the file — good edits stay applied. Unfixed findings noted
+    #     in error_message. This preserves the value of batching: one bad
+    #     LLM composition doesn't undo the good ones.)
+    #   - ALL re-scans passed → success (as before)
+    if all_rescans and not passed_rescans:
+        # Complete re-scan failure — rollback
         rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
         return StrategyOutcome(
             status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
@@ -702,7 +717,37 @@ def _run_lifecycle(
             rollback_results=rollback,
             backup_reference=backup.backup_reference,
             terraform_plan_output=plan_out,
-            error_message=f"Scanner re-scan still reports the finding: {rescan.actual[:300]}",
+            error_message=(
+                f"Scanner re-scan still reports the finding{'s' if len(failed_rescans) > 1 else ''}: "
+                f"{len(failed_rescans)} of {len(all_rescans)} re-scan(s) failed. "
+                f"First: {failed_rescans[0].actual[:200]}"
+            ),
+        )
+
+    if failed_rescans and passed_rescans:
+        # Batch mode with mixed re-scan outcomes: keep the file as-is,
+        # good edits stay applied. In master's report each finding shows
+        # up as "fixed" or "rolled back" individually — no new status
+        # vocabulary needed at the user layer.
+        emit_fn(
+            ctx.agent_run_id,
+            "sub-agent-4",
+            "MESSAGE",
+            f"🟡 Mixed outcome — {len(passed_rescans)} finding(s) fixed, "
+            f"{len(failed_rescans)} finding(s) rolled back. "
+            f"File kept as-is (good edits preserved). "
+            f"First unfixed: {failed_rescans[0].test_name}",
+        )
+        return StrategyOutcome(
+            status="partial_success",  # internal marker — persistence translates → "success" for DB
+            step_results=step_results,
+            validation_results=validation_results,
+            backup_reference=backup.backup_reference,
+            terraform_plan_output=plan_out,
+            error_message=(
+                f"{len(passed_rescans)} finding(s) fixed, {len(failed_rescans)} rolled back. "
+                f"Unfixed re-scans: {[r.test_name for r in failed_rescans][:5]}"
+            ),
         )
 
     if non_rescan_failures:

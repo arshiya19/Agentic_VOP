@@ -736,12 +736,67 @@ def run_agentic_planner(
         f"${budget.max_cost_usd:.2f} — model={model} @ temp={temperature}",
     )
 
-    # Build the initial context: issue + asset + family passed as JSON
+    # Build the initial context: issue + asset + family passed as JSON.
+    # Per-file batch context (attached by planner_demo._plan_and_enrich_batch)
+    # is surfaced as `additional_findings` + `covered_issue_ids` so SA-3
+    # composes ONE package covering every finding in the file group.
     user_payload = {
         "issue": issue,
         "asset": asset,
         "family": family,
     }
+    _batch_related = issue.get("_batch_related_findings")
+    _batch_covered = issue.get("_batch_covered_ids")
+    if _batch_related:
+        user_payload["additional_findings"] = _batch_related
+        user_payload["covered_issue_ids"] = _batch_covered
+        user_payload["batch_mode"] = True
+        # Strip internal markers from the copy that goes to the LLM so they
+        # don't leak into the prompt as fake metadata.
+        user_payload["issue"] = {k: v for k, v in issue.items() if not k.startswith("_batch_")}
+
+        # Build an EXPLICIT numbered task list. The LLM historically glosses
+        # over `additional_findings` (JSON-shaped, easy to skim past) and
+        # produces edits for just the primary. This enumeration names each
+        # finding by number + check_id + resource so it's impossible to miss.
+        # Master's honest-counting pass will report any un-emitted finding as
+        # UNADDRESSED — so under-emitting no longer inflates the fixed count.
+        def _finding_short(iss: dict) -> tuple[str, str]:
+            _raw = iss.get("source_raw") or {}
+            _check = (
+                _raw.get("check_id")
+                or _raw.get("rule_id")
+                or iss.get("source_vuln_id")
+                or "unknown"
+            )
+            _res = (
+                _raw.get("resource")
+                or _raw.get("path")
+                or iss.get("resource_label")
+                or iss.get("file_path")
+                or "unknown"
+            )
+            return str(_check), str(_res)
+
+        _task_list_lines = [
+            f"HARD BATCHING RULE — this package covers {len(_batch_covered)} DISTINCT findings.",
+            f"You MUST address each numbered finding below with its own edit + its own re-scan.",
+            f"If you emit fewer edits or fewer re-scans than there are distinct check_ids,",
+            f"the missing findings will be reported as UNADDRESSED in the run summary",
+            f"(not fixed — the counting layer verifies each check_id has a passing re-scan).",
+            f"",
+            f"Findings to fix (must produce ONE edit + ONE per-check re-scan for each distinct check_id):",
+        ]
+        _primary_check, _primary_res = _finding_short(user_payload["issue"])
+        _task_list_lines.append(
+            f"  1. [primary]  issue_id={user_payload['issue'].get('id')}  check_id={_primary_check}  resource={_primary_res}"
+        )
+        for _i, _rel in enumerate(_batch_related, start=2):
+            _rc, _rr = _finding_short(_rel)
+            _task_list_lines.append(
+                f"  {_i}. issue_id={_rel.get('id')}  check_id={_rc}  resource={_rr}"
+            )
+        user_payload["batch_task_list"] = "\n".join(_task_list_lines)
 
     # --- Execution context injection ---
     # Tells the agent WHERE and HOW the fix should be applied (container image
@@ -872,11 +927,84 @@ def run_agentic_planner(
             ),
             "syntax_check": "python3 -m py_compile {file_path}",
             "edit_guidance": (
-                "For single-line changes (e.g., debug=True to debug=False), use sed -i. "
-                "For multi-line changes (e.g., refactoring a function to use parameterized "
-                "queries), use cat > file << 'EOF' with the FULL corrected file content. "
-                "Use single-quoted 'EOF' to prevent shell interpolation of $variables in "
-                "the source code. Always verify the edit with grep afterward."
+                "PREFERRED: use the #EDIT_FILE structured tool for ALL source-code edits. "
+                "Emit it as a step's Command block (see edit_file_marker spec below). "
+                "The executor does exact-string replace with no shell parsing of the "
+                "payload — so f-strings, quotes, curly braces, backslashes, and any "
+                "regex metacharacters pass through untouched. This eliminates the "
+                "entire class of sed/quoting failures. Use #EDIT_FILE for both "
+                "single-line and multi-line edits.\n\n"
+                "FALLBACK ONLY (avoid unless #EDIT_FILE truly doesn't fit): "
+                "For single-line literal changes (debug=True to debug=False), sed -i "
+                "may work. For multi-line rewrites, use cat > file << 'EOF' with the "
+                "FULL corrected file. Always verify with grep afterward."
+            ),
+            "edit_file_marker": (
+                "To emit a structured edit, put this in the step's Command block:\n"
+                "  #EDIT_FILE\n"
+                "  {\"path\": \"<absolute file path>\",\n"
+                "   \"old_text\": \"<exact substring currently in the file — must match ONCE>\",\n"
+                "   \"new_text\": \"<what it becomes after edit>\"}\n\n"
+                "CRITICAL — old_text composition rules:\n"
+                "  - The GROUND TRUTH file content is provided to you at the top of "
+                "this conversation. Copy old_text VERBATIM byte-for-byte from that "
+                "content. Do NOT add characters that aren't in the file (parens, "
+                "quotes, whitespace) — the tool does exact-string match, and any "
+                "difference means no match found.\n"
+                "  - Common composition mistakes to avoid:\n"
+                "      • Wrapping in parens: file has `query = f\"...\"` — do NOT "
+                "emit `query = (f\"...\")` in old_text\n"
+                "      • Adding trailing whitespace or newlines not in the file\n"
+                "      • \"Cleaning up\" quotes (single↔double) or spacing\n"
+                "  - old_text must uniquely locate the edit — include surrounding "
+                "lines if the vulnerable pattern appears multiple times\n"
+                "  - old_text and new_text cannot be identical (no-op rejected)\n"
+                "  - JSON strings: escape internal quotes and backslashes per JSON rules\n\n"
+                "CRITICAL — new_text must FULLY REMOVE the vulnerable pattern:\n"
+                "  - After the edit, a #VERIFY_ABSENT check runs against the "
+                "vulnerable substring. If ANY occurrence of the vulnerable pattern "
+                "remains in new_text, verification FAILS and the fix rolls back.\n"
+                "  - Examples of the mistake:\n"
+                "      • Fixing `resp = urllib.request.urlopen(endpoint)` with "
+                "new_text that still contains `urllib.request.urlopen` (e.g., adding "
+                "a wrapper but keeping the call) — check for the SUBSTRING absence\n"
+                "      • Fixing `pickle.loads(x)` with new_text containing "
+                "`json.loads(x); # was: pickle.loads(x)` — the comment still has the "
+                "vulnerable substring\n"
+                "      • Fixing `hashlib.md5(...)` with `hashlib.sha256(hashlib.md5(...))` "
+                "— the old call is still there\n"
+                "  - Rule: new_text must NOT contain any identifier or call from the "
+                "vulnerable pattern. Replace, don't wrap.\n\n"
+                "Other:\n"
+                "  - path must be absolute (starts with /)\n"
+                "  - Executor auto-backups the file before writing\n"
+                "  - Executor auto-preserves indentation of multi-line new_text: if "
+                "the line containing old_text is indented N spaces, every new_text "
+                "line AFTER the first will be prefixed with the same indent. You can "
+                "write new_text with lines at column 0 (`import json\\nx = json.loads(d)`) "
+                "— the executor aligns them to the surrounding block.\n"
+                "  - No shell escaping needed for the payload — base64 transport."
+            ),
+            "verify_absent_marker": (
+                "For verify steps that check a vulnerable pattern is GONE from a file "
+                "after the edit, PREFER the structured #VERIFY_ABSENT marker over "
+                "shell grep. Shell grep is brittle: quoting the pattern is error-prone, "
+                "grep exits 1 when zero matches are found (which is the SUCCESS state "
+                "for absence checks), and `|| true` is easy to forget.\n\n"
+                "To emit a structured absence check:\n"
+                "  #VERIFY_ABSENT\n"
+                "  {\"path\": \"<absolute file path>\",\n"
+                "   \"pattern\": \"<vulnerable substring that must NOT appear in the file>\"}\n\n"
+                "Rules:\n"
+                "  - Exit 0 = pattern absent (success). Exit 3 = still present (fail).\n"
+                "  - `pattern` is checked with exact substring match — NO regex, "
+                "no glob, no fuzzy matching. Include enough of the vulnerable line to "
+                "avoid false positives from unrelated code with the same substring.\n"
+                "  - Same base64 transport as #EDIT_FILE — no shell escaping of the "
+                "pattern needed. Curly braces, quotes, backslashes all safe.\n"
+                "Use plain shell only for verifies that #VERIFY_ABSENT can't express "
+                "(e.g., checking a NEW pattern is PRESENT, or running py_compile / "
+                "the scanner re-scan which belong in validation_tests anyway)."
             ),
             "structural_constraint": (
                 "Step order MUST be: "
@@ -885,6 +1013,42 @@ def run_agentic_planner(
                 "3. Verify edit (grep to confirm vulnerable pattern removed), "
                 "4. Syntax check (python3 -m py_compile or equivalent). "
                 "The re-scan belongs EXCLUSIVELY in validation_tests."
+            ),
+            "batch_mode_guidance": (
+                "BATCH MODE — when the payload contains `additional_findings`, ALL "
+                "of those findings target the SAME file as the primary issue. Emit "
+                "ONE pathway that fixes EVERY finding (primary + additional) in a "
+                "single package.\n\n"
+                "SEE `batch_task_list` in the payload — it enumerates every finding "
+                "by number + check_id + resource. Address each numbered item.\n\n"
+                "Structure:\n"
+                "  Step 1: Backup the file ONCE (cp file file.bak-<timestamp>)\n"
+                "  Step 2..N+1: One #EDIT_FILE per finding (in ANY safe order; the "
+                "                executor applies them sequentially against the "
+                "                accumulating file state)\n"
+                "  Step N+2..2N+1: One #VERIFY_ABSENT per finding's vulnerable "
+                "                   substring (all must pass)\n"
+                "  Step last: py_compile the file ONCE\n"
+                "Do NOT emit a separate backup per finding. The single backup at "
+                "Step 1 is the rollback anchor for the whole batch.\n"
+                "Consult the ground-truth file content (provided) to derive each "
+                "old_text verbatim. Since edit_file steps run sequentially on the "
+                "accumulating file, each subsequent edit's old_text must match the "
+                "file state AFTER prior edits — but since edits touch different "
+                "lines of the file (different findings = different code sites), "
+                "this normally 'just works'. If two findings target the SAME line, "
+                "combine them into ONE #EDIT_FILE with a new_text that fixes both.\n\n"
+                "VALIDATION — the re-scan must cover every distinct rule_id in the "
+                "batch. Emit ONE validation_test per distinct rule_id with a grep "
+                "narrowed to that rule_id, e.g.:\n"
+                "  {name: 'Re-scan rule <rule_id_X>', method: 'cli',\n"
+                "   command: 'semgrep scan ... {file_path} ... | grep -c '<rule_id_X>' || true',\n"
+                "   expected: '0', is_rescan: true}\n"
+                "The counting layer credits a finding as FIXED only when its rule_id "
+                "has a passing per-rule re-scan. A single broad re-scan without "
+                "rule filtering credits ALL findings only if it returns 0 total "
+                "matches — otherwise the un-rescanned findings show as UNADDRESSED "
+                "in the run summary."
             ),
             "prohibited_commands": [
                 "terraform (no IaC layer for this target)",
@@ -896,6 +1060,50 @@ def run_agentic_planner(
                 "rm or unlink on source files (edit in place, never delete)",
             ],
         }
+
+    # --- Pre-fetch target file content into turn-1 context (GROUND TRUTH) ---
+    # Toggle: SA3_DISABLE_FILE_FETCH=true to skip (falls back to legacy blind
+    # generation). Default = enabled. Reads the exact file the fix will edit
+    # via SSM so the LLM composes edits against real bytes, not guesses.
+    # Any-scanner: works for main.tf, Dockerfile, app.py, sshd_config, etc.
+    # Zero env-specific knowledge — SSM cat + inject as data section.
+    file_ctx_msg: list[Any] = []
+    import os as _os  # noqa: PLC0415
+    if _os.getenv("SA3_DISABLE_FILE_FETCH", "").lower() not in ("1", "true", "yes"):
+        file_path_hint = user_payload.get("issue", {}).get("file_path") if isinstance(user_payload, dict) else None
+        if not file_path_hint:
+            # Fall back to raw finding + working_dir composition
+            _wd = user_payload.get("issue", {}).get("working_directory") if isinstance(user_payload, dict) else None
+            _fp = user_payload.get("issue", {}).get("file_path") if isinstance(user_payload, dict) else None
+            file_path_hint = _fp or (_wd + "/main.tf" if _wd else None)
+        if file_path_hint and isinstance(file_path_hint, str) and file_path_hint.startswith("/"):
+            try:
+                from .tools.file_fetch import fetch_file  # noqa: PLC0415
+                prefetch = fetch_file(
+                    file_path_hint,
+                    budget,
+                    target_instance_id=None,  # falls back to settings.fixer_env2_instance_id
+                    run_id=run_id,
+                    emit_fn=emit_fn,
+                )
+                if prefetch.get("exists") and prefetch.get("content"):
+                    content = prefetch["content"]
+                    trunc_note = " (TRUNCATED)" if prefetch.get("truncated") else ""
+                    file_ctx_msg = [HumanMessage(content=(
+                        f"# GROUND TRUTH — actual current content of {file_path_hint}{trunc_note}\n"
+                        f"# When generating any edit / sed / grep / regex, use the EXACT SYNTAX below.\n"
+                        f"# Web sources are for concept understanding only — this file is authoritative.\n\n"
+                        f"{content}"
+                    ))]
+                    emit_fn(
+                        run_id, "sub-agent-3", "MESSAGE",
+                        f"📎 Pre-fetched {prefetch['content_length']} chars of {file_path_hint} into turn-1 context",
+                    )
+            except Exception as e:  # noqa: BLE001
+                emit_fn(
+                    run_id, "sub-agent-3", "MESSAGE",
+                    f"⚠ file_fetch pre-inject skipped ({type(e).__name__}: {str(e)[:100]}) — LLM will work blind",
+                )
 
     # --- Knowledge Base injection (few-shot from proven fixes) ---
     kb_context_msg: list[Any] = []
@@ -926,6 +1134,7 @@ def run_agentic_planner(
     messages: list[Any] = [
         SystemMessage(content=prompt_row["prompt_text"]),
         *kb_context_msg,
+        *file_ctx_msg,
         HumanMessage(content=json.dumps(user_payload, default=str)),
     ]
 

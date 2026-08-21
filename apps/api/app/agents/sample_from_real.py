@@ -86,7 +86,7 @@ _SOURCE_SCOOPS: dict[str, int] = {
     "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
     "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
     # "trivy-fs-ec2": 4,     # app-level dep CVEs (needs DependencyStrategy)
-    "semgrep-ec2": 1,  # SAST findings (needs CodeEditStrategy)
+    "semgrep-ec2": 20,  # SAST findings (needs CodeEditStrategy)
 }
 
 # Hard cap on final sample size — trims picks after pinned + scoops + fallback.
@@ -234,9 +234,37 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
 
     # Per-source scoops — pull top N highest-risk issues from each configured
     # source. Runs AFTER pinned picks so those always land first. Any issue
-    # already selected by the pinned pass is skipped (dedup by source_vuln_id
-    # + resource_label to match _PINNED lookup semantics).
-    already_picked_keys = {(p.get("source_vuln_id") or "", _resource_label(p)) for p in picks}
+    # already selected by the pinned pass is skipped.
+    #
+    # Dedup key: (source_vuln_id, resource_label, line_hint). The line hint
+    # collapses TRUE duplicates (same rule + same file + same line) while
+    # keeping legitimately distinct findings (same rule triggered on multiple
+    # lines of the same file). Universal — line is derived generically from
+    # whatever field each scanner emits (semgrep start.line, checkov
+    # file_line_range[0], bandit line_number). Without a line hint (rare —
+    # some scanners don't emit one), we fall back to the old key.
+    def _line_hint(iss: dict) -> str:
+        raw = raw_by_id.get(iss.get("raw_finding_id")) or {}
+        # Semgrep emits flat `start_line` (int). Some semgrep versions also
+        # use nested `start.line`. Check both shapes for portability.
+        sl = raw.get("start_line")
+        if sl is not None:
+            return f"L{sl}"
+        start = raw.get("start")
+        if isinstance(start, dict) and "line" in start:
+            return f"L{start['line']}"  # semgrep (nested form)
+        flr = raw.get("file_line_range")
+        if isinstance(flr, (list, tuple)) and flr:
+            return f"L{flr[0]}"  # checkov
+        ln = raw.get("line_number")
+        if ln is not None:
+            return f"L{ln}"  # bandit
+        return ""  # no line info → dedup key stays as (rule, file)
+
+    def _dedup_key(iss: dict) -> tuple[str, str, str]:
+        return (iss.get("source_vuln_id") or "", _resource_label(iss), _line_hint(iss))
+
+    already_picked_keys = {_dedup_key(p) for p in picks}
     by_source: dict[str, list[dict]] = {}
     for iss in ec2_issues:
         by_source.setdefault(iss.get("source") or "", []).append(iss)
@@ -260,7 +288,7 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
         for iss in pool_sorted:
             if scooped_this_source >= n:
                 break
-            key = (iss.get("source_vuln_id") or "", _resource_label(iss))
+            key = _dedup_key(iss)
             if key in already_picked_keys:
                 continue
             picks.append(iss)
@@ -296,6 +324,11 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
                 f"⚠ Fallback: pinned set insufficient — added highest-risk {fam} "
                 f"issue (source_vuln_id={fallback_pick.get('source_vuln_id')})",
             )
+
+    # (per-file dedup removed 2026-08-21 — replaced by per-file batching in
+    # planner_demo.run_demo_remediation. Batching groups multiple findings
+    # for the same file into ONE package so state drift is impossible AND
+    # we still fix every vuln. See the "group by file" step downstream.)
 
     # Hard cap — trim final sample so the downstream planner + fixer never
     # see more than _MAX_SAMPLE_SIZE issues. Pinned picks + higher-risk

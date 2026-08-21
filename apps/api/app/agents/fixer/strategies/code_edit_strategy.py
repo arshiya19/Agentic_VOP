@@ -188,6 +188,58 @@ class CodeEditStrategy(BaseFixStrategy):
             self._emit(ctx, "ERROR", "No remediation_steps in package pathway")
             return results
 
+        # Isolate-failures detection: in either of these cases, individual
+        # EDIT_FILE / VERIFY_ABSENT failures use status "skipped" and `continue`
+        # instead of halting the whole package. Non-structured steps (backup,
+        # py_compile, etc.) still halt-on-fail — they're prerequisites, not
+        # supplementary checks.
+        #
+        #  a) Batch mode — >1 #EDIT_FILE marker in this pathway (per-file batch
+        #     covering multiple findings) → don't let one bad edit undo the
+        #     good ones.
+        #  b) Planner batch marker — `__batch_covered_ids__:...` in
+        #     considerations means the planner batched N findings even if
+        #     SA-3 only emitted 1 edit; still treat as isolated.
+        #  c) Scanner re-scan queued — the pathway will run a scanner re-scan
+        #     in the Validate phase, which is the AUTHORITATIVE judge of
+        #     whether the vulnerability is gone. Supplementary sub-step checks
+        #     (substring VERIFY_ABSENT, EDIT_FILE old_text-not-found) should
+        #     not halt the run before the authority has spoken; if the scanner
+        #     re-scan later fails, orchestrator will still rollback.
+        _edit_file_marker_count = sum(
+            1 for s in remediation_steps if "#EDIT_FILE" in (s.get("step", "") or "")
+        )
+        _batch_covered_marker = any(
+            (c or "").startswith("__batch_covered_ids__:")
+            for c in (ctx.pathway.get("considerations") or [])
+        )
+        _scanner_rescan_queued = any(
+            self._looks_like_rescan(t.get("command", "") or "")
+            for t in (ctx.pathway.get("validation_tests") or [])
+        )
+        _batch_mode = (
+            _edit_file_marker_count > 1
+            or _batch_covered_marker
+            or _scanner_rescan_queued
+        )
+        if _batch_mode:
+            if _edit_file_marker_count > 1:
+                _reason = (
+                    f"🧩 Isolate-failures mode: {_edit_file_marker_count} structured edits in this package — "
+                    f"individual failures will be isolated (one bad edit won't undo the good ones)"
+                )
+            elif _batch_covered_marker:
+                _reason = (
+                    "🧩 Isolate-failures mode: planner batched multiple findings into this package — "
+                    "sub-step failures won't halt the run before the scanner re-scan judges"
+                )
+            else:
+                _reason = (
+                    "🧩 Isolate-failures mode: scanner re-scan queued as authoritative judge — "
+                    "supplementary sub-check failures won't halt the run"
+                )
+            self._emit(ctx, "MESSAGE", _reason)
+
         self._emit(
             ctx,
             "MESSAGE",
@@ -203,6 +255,188 @@ class CodeEditStrategy(BaseFixStrategy):
                 "MESSAGE",
                 f"→ Step {step_num}/{len(remediation_steps)}: {action_label}",
             )
+
+            # Structured-op branches: if the step contains a #EDIT_FILE or
+            # #VERIFY_ABSENT marker, parse + dispatch to the corresponding
+            # executor (base64-encoded SSM roundtrip, zero shell parsing of
+            # the payload). Falls back to shell extraction otherwise, OR when
+            # SA3_DISABLE_EDIT_FILE=true (guard covers both structured tools —
+            # they share the same tolerance semantic).
+            import os as _os  # noqa: PLC0415
+            _edit_file_disabled = _os.getenv("SA3_DISABLE_EDIT_FILE", "").lower() in ("1", "true", "yes")
+            from ..tools.edit_file import (  # noqa: PLC0415
+                is_edit_file_step,
+                parse_edit_spec,
+                build_ssm_command,
+                summarize_spec,
+                is_verify_absent_step,
+                parse_verify_absent_spec,
+                build_verify_absent_ssm_command,
+                summarize_verify_absent,
+            )
+            # ---- #VERIFY_ABSENT branch (evaluated first — cheap check) ----
+            if not _edit_file_disabled and is_verify_absent_step(step_text):
+                try:
+                    vspec = parse_verify_absent_spec(step_text)
+                except ValueError as e:
+                    self._emit(ctx, "ERROR", f"🛑 Step {step_num} VERIFY_ABSENT spec invalid: {e} — skipping")
+                    results.append(self._skipped_step(step_num, action_label, f"invalid VERIFY_ABSENT spec: {e}"))
+                    if _batch_mode:
+                        continue  # isolate — don't halt sibling edits
+                    return results
+                verify_cmd = build_verify_absent_ssm_command(vspec)
+                self._emit(ctx, "MESSAGE", f"   🔍 Structured verify: {summarize_verify_absent(vspec)}")
+                started = utcnow()
+                try:
+                    cmd_result = executor.run_command(verify_cmd, working_directory=None, timeout_s=60)
+                except (RemoteExecError, CommandTimeoutError) as e:
+                    finished = utcnow()
+                    _fail_status = "skipped" if _batch_mode else "failed"
+                    self._emit(ctx, "ERROR" if not _batch_mode else "MESSAGE",
+                        f"{'⏭' if _batch_mode else '✗'} Step {step_num} VERIFY_ABSENT raised {type(e).__name__}: {str(e)[:200]}"
+                        + (" — isolated (batch mode)" if _batch_mode else ""))
+                    results.append(StepResult(
+                        step_num=step_num, action=action_label, command=verify_cmd,
+                        stderr=str(e)[:2000], exit_code=-1,
+                        duration_ms=int((finished - started).total_seconds() * 1000),
+                        status=_fail_status, started_at=started, finished_at=finished, ssm_command_id=None,
+                    ))
+                    if _batch_mode:
+                        continue
+                    return results
+                finished = utcnow()
+                step_ok = cmd_result.exit_code == 0
+                # In batch mode, a "failed" verify becomes "skipped" so the
+                # orchestrator doesn't halt/rollback the sibling edits.
+                if step_ok:
+                    status = "success"
+                elif _batch_mode:
+                    status = "skipped"
+                else:
+                    status = "failed"
+                results.append(StepResult(
+                    step_num=step_num, action=action_label, command=verify_cmd,
+                    stdout=cmd_result.stdout[:2000], stderr=cmd_result.stderr[:2000],
+                    exit_code=cmd_result.exit_code,
+                    duration_ms=int((finished - started).total_seconds() * 1000),
+                    status=status, started_at=started, finished_at=finished,
+                    ssm_command_id=cmd_result.ssm_command_id,
+                ))
+                if step_ok:
+                    self._emit(ctx, "MESSAGE", f"✓ Step {step_num} VERIFY_ABSENT passed (pattern gone)")
+                    continue
+                # Failure branch
+                if _batch_mode:
+                    self._emit(ctx, "MESSAGE",
+                        f"⏭ Step {step_num} VERIFY_ABSENT failed (pattern still present) — "
+                        f"isolated in batch mode, sibling edits keep going")
+                    continue
+                self._emit(ctx, "ERROR",
+                    f"✗ Step {step_num} VERIFY_ABSENT exit={cmd_result.exit_code}: {cmd_result.stderr[:300]}")
+                return results
+            if not _edit_file_disabled and is_edit_file_step(step_text):
+                try:
+                    spec = parse_edit_spec(step_text)
+                except ValueError as e:
+                    self._emit(
+                        ctx,
+                        "ERROR",
+                        f"🛑 Step {step_num} EDIT_FILE spec invalid: {e} — skipping",
+                    )
+                    results.append(
+                        self._skipped_step(step_num, action_label, f"invalid EDIT_FILE spec: {e}")
+                    )
+                    if _batch_mode:
+                        continue
+                    return results  # HALT — orchestrator triggers rollback
+                edit_cmd = build_ssm_command(spec)
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"   ✎ Structured edit: {summarize_spec(spec)}",
+                )
+                started = utcnow()
+                try:
+                    cmd_result = executor.run_command(
+                        edit_cmd,
+                        working_directory=None,  # spec contains absolute path
+                        timeout_s=60,
+                    )
+                except (RemoteExecError, CommandTimeoutError) as e:
+                    finished = utcnow()
+                    _fail_status = "skipped" if _batch_mode else "failed"
+                    self._emit(
+                        ctx,
+                        "ERROR" if not _batch_mode else "MESSAGE",
+                        f"{'⏭' if _batch_mode else '✗'} Step {step_num} EDIT_FILE raised {type(e).__name__}: {str(e)[:200]}"
+                        + (" — isolated (batch mode)" if _batch_mode else ""),
+                    )
+                    results.append(
+                        StepResult(
+                            step_num=step_num,
+                            action=action_label,
+                            command=edit_cmd,
+                            stderr=str(e)[:2000],
+                            exit_code=-1,
+                            duration_ms=int((finished - started).total_seconds() * 1000),
+                            status=_fail_status,
+                            started_at=started,
+                            finished_at=finished,
+                            ssm_command_id=None,
+                        )
+                    )
+                    if _batch_mode:
+                        continue
+                    return results  # HALT
+                step_ok = cmd_result.exit_code == 0
+                # In batch mode, a "failed" edit becomes "skipped" — the file
+                # is UNCHANGED (edit_file refuses to write on any error), so
+                # sibling edits process against the same file view SA-3 saw.
+                if step_ok:
+                    status = "success"
+                elif _batch_mode:
+                    status = "skipped"
+                else:
+                    status = "failed"
+                finished = utcnow()
+                results.append(
+                    StepResult(
+                        step_num=step_num,
+                        action=action_label,
+                        command=edit_cmd,
+                        stdout=cmd_result.stdout[:2000],
+                        stderr=cmd_result.stderr[:2000],
+                        exit_code=cmd_result.exit_code,
+                        duration_ms=int((finished - started).total_seconds() * 1000),
+                        status=status,
+                        started_at=started,
+                        finished_at=finished,
+                        ssm_command_id=cmd_result.ssm_command_id,
+                    )
+                )
+                if step_ok:
+                    self._emit(
+                        ctx,
+                        "MESSAGE",
+                        f"✓ Step {step_num} EDIT_FILE applied (exit=0, {int((finished - started).total_seconds() * 1000)}ms)",
+                    )
+                    continue  # next step
+                # Failure path
+                if _batch_mode:
+                    self._emit(
+                        ctx,
+                        "MESSAGE",
+                        f"⏭ Step {step_num} EDIT_FILE exit={cmd_result.exit_code}: "
+                        f"{cmd_result.stderr[:200]} — isolated in batch mode, "
+                        f"sibling edits keep going",
+                    )
+                    continue
+                self._emit(
+                    ctx,
+                    "ERROR",
+                    f"✗ Step {step_num} EDIT_FILE exit={cmd_result.exit_code}: {cmd_result.stderr[:300]}",
+                )
+                return results  # HALT
 
             # Extract shell blocks from the step text
             blocks = _extract_shell_blocks(step_text)

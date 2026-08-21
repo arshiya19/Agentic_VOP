@@ -132,8 +132,17 @@ def _build_adaptation_messages(
     issue: dict,
     family: str,
     iac_context: dict,
+    target_file_content: str | None = None,
+    target_file_truncated: bool = False,
 ) -> list:
-    """Build the LLM messages for the adaptation call."""
+    """Build the LLM messages for the adaptation call.
+
+    When `target_file_content` is provided, it's injected as a GROUND TRUTH
+    message BEFORE the recipe payload. The LLM composes old_text against the
+    NEW file's real content instead of blindly copying literals from the KB
+    recipe's source file. This eliminates the cross-file phantom-success
+    class of bug (KB recipe from config.py applied blind to auth.py).
+    """
     # Parse recipe steps
     recipe_steps = recipe_row.get("remediation_steps") or []
     if isinstance(recipe_steps, str):
@@ -176,10 +185,21 @@ def _build_adaptation_messages(
         default=str,
     )
 
-    return [
-        SystemMessage(content=_ADAPTATION_SYSTEM_PROMPT),
-        HumanMessage(content=user_content),
-    ]
+    messages = [SystemMessage(content=_ADAPTATION_SYSTEM_PROMPT)]
+    if target_file_content:
+        target_file = iac_context.get("file_path") or "<unknown>"
+        trunc_note = " (TRUNCATED)" if target_file_truncated else ""
+        messages.append(HumanMessage(content=(
+            f"# GROUND TRUTH — actual current content of {target_file}{trunc_note}\n"
+            f"# The proven_recipe below was captured from a DIFFERENT file. Its\n"
+            f"# `remediation_steps` contain literal old_text values from THAT file.\n"
+            f"# When you emit adapted steps, compose old_text from the actual\n"
+            f"# bytes below — DO NOT copy the recipe's literals verbatim if this\n"
+            f"# file uses different variable names / strings / positions.\n\n"
+            f"{target_file_content}"
+        )))
+    messages.append(HumanMessage(content=user_content))
+    return messages
 
 
 # =============================================================================
@@ -253,9 +273,49 @@ def try_kb_replay(
         f"Adapting proven recipe via constrained LLM call...",
     )
 
-    # 3. Build adaptation messages and call LLM
+    # 3. Pre-fetch the target file content so the adaptation LLM can compose
+    #    old_text against real bytes (Fix A). Prevents cross-file phantom
+    #    successes where a KB recipe's literals from file X get blindly
+    #    reused on file Y that doesn't contain them. Best-effort — if fetch
+    #    fails, adaptation still runs blind (falls back to prior behavior).
+    target_content: str | None = None
+    target_truncated = False
+    target_path = iac_context.get("file_path")
+    if target_path and isinstance(target_path, str) and target_path.startswith("/"):
+        try:
+            from .tools.file_fetch import fetch_file  # noqa: PLC0415
+            from .tools.budget import AgentBudget  # noqa: PLC0415
+            # Small budget just for this one fetch — we're not doing web research
+            _kb_budget = AgentBudget(max_calls=2, max_cost_usd=0.10)
+            _prefetch = fetch_file(
+                target_path,
+                _kb_budget,
+                target_instance_id=None,  # falls back to settings.fixer_env2_instance_id
+                run_id=run_id,
+                emit_fn=emit_fn,
+            )
+            if _prefetch.get("exists") and _prefetch.get("content"):
+                target_content = _prefetch["content"]
+                target_truncated = bool(_prefetch.get("truncated"))
+                emit_fn(
+                    run_id, "sub-agent-3", "MESSAGE",
+                    f"📎 KB adapter pre-fetched {_prefetch['content_length']} chars of "
+                    f"{target_path} — recipe will be adapted to actual file bytes",
+                )
+        except Exception as _e:  # noqa: BLE001
+            emit_fn(
+                run_id, "sub-agent-3", "MESSAGE",
+                f"⚠ KB adapter file_fetch skipped ({type(_e).__name__}: {str(_e)[:100]}) "
+                f"— falling back to blind adaptation",
+            )
+
+    # 4. Build adaptation messages and call LLM
     try:
-        messages = _build_adaptation_messages(candidate, issue, family, iac_context)
+        messages = _build_adaptation_messages(
+            candidate, issue, family, iac_context,
+            target_file_content=target_content,
+            target_file_truncated=target_truncated,
+        )
 
         llm = get_chat_llm(
             run_id=run_id,

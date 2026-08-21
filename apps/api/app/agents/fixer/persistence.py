@@ -120,8 +120,15 @@ def finalize_fix_run(
     finished_at = utcnow()
     duration_s = int((finished_at - started_at).total_seconds())
 
+    # DB CHECK constraint on fix_runs.status doesn't include "partial_success"
+    # yet (schema migration pending). For persistence, translate to "success"
+    # — master reads the truth from validation_results (per-rescan pass/fail
+    # counts) rather than relying on the status string alone. The in-memory
+    # StrategyOutcome keeps "partial_success" so orchestrator + emit logs
+    # reflect reality.
+    persisted_status = "success" if outcome.status == "partial_success" else outcome.status
     patch: dict[str, Any] = {
-        "status": outcome.status,
+        "status": persisted_status,
         "step_results": [r.model_dump(mode="json") for r in outcome.step_results],
         "validation_results": [r.model_dump(mode="json") for r in outcome.validation_results],
         "rollback_results": [r.model_dump(mode="json") for r in outcome.rollback_results],
