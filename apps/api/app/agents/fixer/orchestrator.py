@@ -34,6 +34,7 @@ from .persistence import (
 )
 from .strategies.base import BaseFixStrategy
 from .strategies.code_edit_strategy import CodeEditStrategy
+from .strategies.dependency_strategy import DependencyStrategy
 from .strategies.iac_strategy import IaCStrategy
 from .strategies.image_strategy import ImageStrategy
 from .strategies.os_strategy import OSStrategy
@@ -48,8 +49,8 @@ _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
     "image": ImageStrategy,  # trivy-image (container image OS pkgs)
     "os": OSStrategy,  # trivy-os / tenable / qualys (host apt/yum)
     "code_edit": CodeEditStrategy,  # semgrep / bandit / sonarqube (source edits)
-    # Phase-2 additions land here:
-    # "dependency": DependencyStrategy,   # trivy-fs / snyk-appsec (app pkgs)
+    "dependency": DependencyStrategy,  # trivy-fs / snyk-appsec (manifest edits)
+    # Phase-3 additions land here:
     # "cli":        CliStrategy,          # aws-cli direct cloud fixes
 }
 

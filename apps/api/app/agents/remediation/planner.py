@@ -424,7 +424,8 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
         or raw.get("path")  # Semgrep
         or (raw.get("location") or {}).get("filename")  # tfsec
         or (raw.get("location") or {}).get("path")
-        or raw.get("Target")  # Trivy container/fs target
+        or raw.get("Target")  # Trivy container/fs target (original casing)
+        or raw.get("target")  # Trivy FS (scan-server normalizes to lowercase)
         or identity.get("file")  # canonical fallback
     )
 
@@ -433,6 +434,30 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
     # scan root (Checkov shows `/main.tf` when scanning `/opt/lab/`), so
     # env2's actual path is `<prefix>/main.tf`. Without translation, SA4's
     # pre-flight file-existence check fails on the raw path.
+    #
+    # Two cases:
+    #   a) Absolute path starting with "/" — may need prefix if it's root-relative
+    #      (e.g., Checkov emits `/main.tf` meaning `<scan_root>/main.tf`)
+    #   b) Relative path (no leading "/") — SCA scanners like TrivyFs emit just
+    #      the filename (e.g., `requirements.txt`). Need to resolve to full path
+    #      using the scanner's known scan directory from connection_registry or
+    #      a source-based convention.
+    if file_path and not file_path.startswith("/"):
+        # Relative path — resolve to absolute using source-based scan directory.
+        # SCA/SAST scanners scan /opt/vuln-labs/appsec-lab/ on env2.
+        # IaC scanners scan /opt/vuln-labs/cspm-lab/ on env2.
+        src_lower = (issue.get("source") or "").lower()
+        if (
+            "trivy-fs" in src_lower
+            or "semgrep" in src_lower
+            or "bandit" in src_lower
+            or "snyk-appsec" in src_lower
+        ):
+            file_path = f"/opt/vuln-labs/appsec-lab/{file_path}"
+        elif settings.fixer_env2_path_prefix:
+            file_path = f"{settings.fixer_env2_path_prefix.rstrip('/')}/{file_path}"
+        # else: leave as-is (relative) — SA-3 and SA-4 will handle or fail gracefully
+
     if file_path and file_path.startswith("/"):
         prefix = (settings.fixer_env2_path_prefix or "").rstrip("/")
         # Only prepend if the file_path isn't already inside the prefix

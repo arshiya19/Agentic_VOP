@@ -901,6 +901,84 @@ def run_agentic_planner(
                 "grep -c without || true (grep returns exit 1 on zero matches)",
             ],
         }
+    elif "trivy-fs" in source or "snyk-appsec" in source or "dependabot" in source:
+        user_payload["execution_context"] = {
+            "target_type": "dependency_manifest",
+            "fix_approach": (
+                "Edit the dependency manifest file to bump the vulnerable package version "
+                "pin to a fixed version. The manifest (requirements.txt / package.json / "
+                "pom.xml / go.mod / etc.) IS the artifact — there is no separate IaC or "
+                "container layer. The fix is: change the version pin from the vulnerable "
+                "version to the fixed version specified in the finding's FixedVersion field. "
+                "If no specific fixed version is known, remove the version pin entirely so "
+                "the package manager installs the latest available."
+            ),
+            "rescan_command": "trivy fs {working_directory} --scanners vuln --format json",
+            "rescan_filter_note": (
+                "The re-scan must check for the ABSENCE of the specific CVE that fired, "
+                "NOT for zero total vulnerabilities. Other packages in the same manifest "
+                "may still have CVEs. Use: "
+                "trivy fs {working_directory} --scanners vuln --format json 2>&1 | "
+                "grep -c '<CVE_ID>' || true with expected='0'."
+            ),
+            "edit_guidance": (
+                "PREFERRED: use the #EDIT_FILE structured tool for manifest edits. "
+                "The old_text is the vulnerable version pin (e.g., 'flask==1.0') and "
+                "new_text is the fixed version pin (e.g., 'flask==2.3.3'). This is a "
+                "simple single-line replacement in most cases.\n\n"
+                "IMPORTANT: copy old_text VERBATIM from the ground-truth file content "
+                "provided. Include the exact package name, operator (==, >=, ~=), and "
+                "version string as they appear in the file. Do NOT add whitespace or "
+                "change casing."
+            ),
+            "edit_file_marker": (
+                "To emit a structured edit, put this in the step's Command block:\n"
+                "  #EDIT_FILE\n"
+                '  {"path": "<absolute path to manifest file>",\n'
+                '   "old_text": "<exact vulnerable version pin, e.g. flask==1.0>",\n'
+                '   "new_text": "<fixed version pin, e.g. flask==2.3.3>"}\n\n'
+                "Rules:\n"
+                "  - old_text must match exactly ONCE in the file\n"
+                "  - path must be absolute (starts with /)\n"
+                "  - For Python requirements.txt: the pin format is pkg==version\n"
+                "  - For package.json: the pin is inside the JSON dependencies object\n"
+                "  - Executor auto-backups the file before writing\n"
+                "  - No shell escaping needed — base64 transport"
+            ),
+            "verify_absent_marker": (
+                "For verify steps that check the vulnerable pin is GONE after the edit:\n"
+                "  #VERIFY_ABSENT\n"
+                '  {"path": "<absolute path to manifest>",\n'
+                '   "pattern": "<vulnerable pin, e.g. flask==1.0>"}\n\n'
+                "Exit 0 = pin absent (success). Exit 3 = still present (fail)."
+            ),
+            "structural_constraint": (
+                "Step order MUST be: "
+                "1. Backup manifest (cp file file.bak-timestamp), "
+                "2. Edit manifest — bump version pin (#EDIT_FILE), "
+                "3. Verify edit — confirm old pin removed (#VERIFY_ABSENT), "
+                "4. Dry-run install check (pip install --dry-run -r file OR equivalent). "
+                "The re-scan belongs EXCLUSIVELY in validation_tests."
+            ),
+            "batch_mode_guidance": (
+                "BATCH MODE — when the payload contains `additional_findings`, ALL "
+                "findings target the SAME manifest file. Emit ONE pathway:\n"
+                "  Step 1: Backup manifest ONCE\n"
+                "  Step 2..N+1: One #EDIT_FILE per vulnerable pin\n"
+                "  Step N+2..2N+1: One #VERIFY_ABSENT per old pin\n"
+                "  Step last: dry-run install check ONCE\n"
+                "Each edit is independent (different lines), so order doesn't matter."
+            ),
+            "prohibited_commands": [
+                "terraform (no IaC layer for this target)",
+                "docker build (manifest fix, not container rebuild)",
+                "sudo reboot",
+                "pip install (do NOT actually install — just edit the manifest pin)",
+                "apt-get / yum (not an OS package vulnerability)",
+                "grep -c without || true (grep returns exit 1 on zero matches)",
+                "rm or unlink on manifest files (edit in place, never delete)",
+            ],
+        }
     elif "semgrep" in source or "bandit" in source or "sonarqube" in source or "gosec" in source:
         user_payload["execution_context"] = {
             "target_type": "source_code",
