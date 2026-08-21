@@ -93,13 +93,10 @@ EVERY dependency remediation package MUST follow this shape:
     Confirm the OLD version pin is no longer present in the manifest.
     Use #VERIFY_ABSENT (preferred) or grep (fallback).
 
-  Phase D — DRY-RUN INSTALL CHECK (ensure the new version is resolvable)
-    Run the package manager's dry-run/check mode to confirm no conflicts:
-      Python:  pip install --dry-run -r <file_path> 2>&1 | tail -20
-      Node:    npm install --dry-run (in the manifest's directory)
-      Java:    mvn dependency:resolve -f <pom_path>
-      Go:      go mod tidy -v
-    This catches version conflicts or yanked packages before real install.
+  Phase D — VERIFY NEW PIN PRESENT (confirm the bump landed)
+    Confirm the NEW version pin appears in the manifest:
+      grep '<package>==<fixed_version>' <file_path>
+    This is a fast sanity check before re-scan.
 
   Phase E — RE-SCAN with the ORIGINAL scanner (authoritative proof)
     Re-run the scanner that produced this finding, targeting the same
@@ -159,9 +156,9 @@ Typical step structure:
   Step 1: Backup manifest (cp)
   Step 2: Edit manifest — bump version pin (#EDIT_FILE)
   Step 3: Verify edit — confirm old pin removed (#VERIFY_ABSENT)
-  Step 4: Dry-run install check (pip install --dry-run or equivalent)
-  Step 5: Verify new version resolvable (grep new pin present)
-  Step 6: Confirm no dependency conflicts (check pip output for errors)
+  Step 4: Verify new pin present (grep new version in file)
+  Step 5: Confirm file is valid (cat file to show current state)
+  Step 6: Additional verify if batch mode (one per finding)
 
 Rollback steps: ≥ 3 (≥ 50% of remediation steps).
 Validation tests: ≥ 3 (including mandatory re-scan).
@@ -293,8 +290,10 @@ HARD RULES
     execution_strategy 50-600; step ≤ 8000.
 12. **RE-SCAN IS MANDATORY.** Exactly one validation_test MUST re-run the
     original scanner filtered to the specific CVE.
-13. **DRY-RUN CHECK IS MANDATORY.** At least one step must run the package
-    manager's dry-run/resolve mode after the edit.
+13. **DO NOT RUN PIP INSTALL OR ANY PACKAGE MANAGER.** The target env has
+    pip 20.0.2 which does not support --dry-run, and actually installing
+    packages is out of scope. The fix edits the manifest; the trivy re-scan
+    is the authoritative proof. Use grep/cat to verify the edit instead.
 14. **ONE CVE = ONE FIX.** Fix ONLY the specific CVE that fired. Do NOT
     bump other packages in the same manifest as "bonus" hardening.
 15. **SHELL VARIABLES DO NOT PERSIST BETWEEN STEPS.**

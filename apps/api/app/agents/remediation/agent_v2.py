@@ -957,8 +957,13 @@ def run_agentic_planner(
                 "1. Backup manifest (cp file file.bak-timestamp), "
                 "2. Edit manifest — bump version pin (#EDIT_FILE), "
                 "3. Verify edit — confirm old pin removed (#VERIFY_ABSENT), "
-                "4. Dry-run install check (pip install --dry-run -r file OR equivalent). "
-                "The re-scan belongs EXCLUSIVELY in validation_tests."
+                "4. Verify new pin present (grep to confirm new version in file). "
+                "The re-scan belongs EXCLUSIVELY in validation_tests. "
+                "Do NOT run pip install, pip download, or any package manager command — "
+                "the target environment uses pip 20.0.2 which does not support --dry-run, "
+                "and actually installing packages is out of scope (we fix the manifest, "
+                "not the runtime). The trivy re-scan in validation_tests is the "
+                "authoritative proof that the CVE is resolved."
             ),
             "batch_mode_guidance": (
                 "BATCH MODE — when the payload contains `additional_findings`, ALL "
@@ -973,7 +978,8 @@ def run_agentic_planner(
                 "terraform (no IaC layer for this target)",
                 "docker build (manifest fix, not container rebuild)",
                 "sudo reboot",
-                "pip install (do NOT actually install — just edit the manifest pin)",
+                "pip install (do NOT install packages — just edit the manifest pin; pip 20.0.2 on env2 does not support --dry-run)",
+                "pip download (not supported reliably on pip 20.0.2)",
                 "apt-get / yum (not an OS package vulnerability)",
                 "grep -c without || true (grep returns exit 1 on zero matches)",
                 "rm or unlink on manifest files (edit in place, never delete)",
