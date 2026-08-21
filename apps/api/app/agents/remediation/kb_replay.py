@@ -189,15 +189,19 @@ def _build_adaptation_messages(
     if target_file_content:
         target_file = iac_context.get("file_path") or "<unknown>"
         trunc_note = " (TRUNCATED)" if target_file_truncated else ""
-        messages.append(HumanMessage(content=(
-            f"# GROUND TRUTH — actual current content of {target_file}{trunc_note}\n"
-            f"# The proven_recipe below was captured from a DIFFERENT file. Its\n"
-            f"# `remediation_steps` contain literal old_text values from THAT file.\n"
-            f"# When you emit adapted steps, compose old_text from the actual\n"
-            f"# bytes below — DO NOT copy the recipe's literals verbatim if this\n"
-            f"# file uses different variable names / strings / positions.\n\n"
-            f"{target_file_content}"
-        )))
+        messages.append(
+            HumanMessage(
+                content=(
+                    f"# GROUND TRUTH — actual current content of {target_file}{trunc_note}\n"
+                    f"# The proven_recipe below was captured from a DIFFERENT file. Its\n"
+                    f"# `remediation_steps` contain literal old_text values from THAT file.\n"
+                    f"# When you emit adapted steps, compose old_text from the actual\n"
+                    f"# bytes below — DO NOT copy the recipe's literals verbatim if this\n"
+                    f"# file uses different variable names / strings / positions.\n\n"
+                    f"{target_file_content}"
+                )
+            )
+        )
     messages.append(HumanMessage(content=user_content))
     return messages
 
@@ -285,6 +289,7 @@ def try_kb_replay(
         try:
             from .tools.file_fetch import fetch_file  # noqa: PLC0415
             from .tools.budget import AgentBudget  # noqa: PLC0415
+
             # Small budget just for this one fetch — we're not doing web research
             _kb_budget = AgentBudget(max_calls=2, max_cost_usd=0.10)
             _prefetch = fetch_file(
@@ -298,13 +303,17 @@ def try_kb_replay(
                 target_content = _prefetch["content"]
                 target_truncated = bool(_prefetch.get("truncated"))
                 emit_fn(
-                    run_id, "sub-agent-3", "MESSAGE",
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
                     f"📎 KB adapter pre-fetched {_prefetch['content_length']} chars of "
                     f"{target_path} — recipe will be adapted to actual file bytes",
                 )
         except Exception as _e:  # noqa: BLE001
             emit_fn(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 f"⚠ KB adapter file_fetch skipped ({type(_e).__name__}: {str(_e)[:100]}) "
                 f"— falling back to blind adaptation",
             )
@@ -312,7 +321,10 @@ def try_kb_replay(
     # 4. Build adaptation messages and call LLM
     try:
         messages = _build_adaptation_messages(
-            candidate, issue, family, iac_context,
+            candidate,
+            issue,
+            family,
+            iac_context,
             target_file_content=target_content,
             target_file_truncated=target_truncated,
         )

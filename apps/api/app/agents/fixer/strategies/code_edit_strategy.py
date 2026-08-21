@@ -217,11 +217,7 @@ class CodeEditStrategy(BaseFixStrategy):
             self._looks_like_rescan(t.get("command", "") or "")
             for t in (ctx.pathway.get("validation_tests") or [])
         )
-        _batch_mode = (
-            _edit_file_marker_count > 1
-            or _batch_covered_marker
-            or _scanner_rescan_queued
-        )
+        _batch_mode = _edit_file_marker_count > 1 or _batch_covered_marker or _scanner_rescan_queued
         if _batch_mode:
             if _edit_file_marker_count > 1:
                 _reason = (
@@ -263,7 +259,12 @@ class CodeEditStrategy(BaseFixStrategy):
             # SA3_DISABLE_EDIT_FILE=true (guard covers both structured tools —
             # they share the same tolerance semantic).
             import os as _os  # noqa: PLC0415
-            _edit_file_disabled = _os.getenv("SA3_DISABLE_EDIT_FILE", "").lower() in ("1", "true", "yes")
+
+            _edit_file_disabled = _os.getenv("SA3_DISABLE_EDIT_FILE", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
             from ..tools.edit_file import (  # noqa: PLC0415
                 is_edit_file_step,
                 parse_edit_spec,
@@ -274,33 +275,57 @@ class CodeEditStrategy(BaseFixStrategy):
                 build_verify_absent_ssm_command,
                 summarize_verify_absent,
             )
+
             # ---- #VERIFY_ABSENT branch (evaluated first — cheap check) ----
             if not _edit_file_disabled and is_verify_absent_step(step_text):
                 try:
                     vspec = parse_verify_absent_spec(step_text)
                 except ValueError as e:
-                    self._emit(ctx, "ERROR", f"🛑 Step {step_num} VERIFY_ABSENT spec invalid: {e} — skipping")
-                    results.append(self._skipped_step(step_num, action_label, f"invalid VERIFY_ABSENT spec: {e}"))
+                    self._emit(
+                        ctx,
+                        "ERROR",
+                        f"🛑 Step {step_num} VERIFY_ABSENT spec invalid: {e} — skipping",
+                    )
+                    results.append(
+                        self._skipped_step(
+                            step_num, action_label, f"invalid VERIFY_ABSENT spec: {e}"
+                        )
+                    )
                     if _batch_mode:
                         continue  # isolate — don't halt sibling edits
                     return results
                 verify_cmd = build_verify_absent_ssm_command(vspec)
-                self._emit(ctx, "MESSAGE", f"   🔍 Structured verify: {summarize_verify_absent(vspec)}")
+                self._emit(
+                    ctx, "MESSAGE", f"   🔍 Structured verify: {summarize_verify_absent(vspec)}"
+                )
                 started = utcnow()
                 try:
-                    cmd_result = executor.run_command(verify_cmd, working_directory=None, timeout_s=60)
+                    cmd_result = executor.run_command(
+                        verify_cmd, working_directory=None, timeout_s=60
+                    )
                 except (RemoteExecError, CommandTimeoutError) as e:
                     finished = utcnow()
                     _fail_status = "skipped" if _batch_mode else "failed"
-                    self._emit(ctx, "ERROR" if not _batch_mode else "MESSAGE",
+                    self._emit(
+                        ctx,
+                        "ERROR" if not _batch_mode else "MESSAGE",
                         f"{'⏭' if _batch_mode else '✗'} Step {step_num} VERIFY_ABSENT raised {type(e).__name__}: {str(e)[:200]}"
-                        + (" — isolated (batch mode)" if _batch_mode else ""))
-                    results.append(StepResult(
-                        step_num=step_num, action=action_label, command=verify_cmd,
-                        stderr=str(e)[:2000], exit_code=-1,
-                        duration_ms=int((finished - started).total_seconds() * 1000),
-                        status=_fail_status, started_at=started, finished_at=finished, ssm_command_id=None,
-                    ))
+                        + (" — isolated (batch mode)" if _batch_mode else ""),
+                    )
+                    results.append(
+                        StepResult(
+                            step_num=step_num,
+                            action=action_label,
+                            command=verify_cmd,
+                            stderr=str(e)[:2000],
+                            exit_code=-1,
+                            duration_ms=int((finished - started).total_seconds() * 1000),
+                            status=_fail_status,
+                            started_at=started,
+                            finished_at=finished,
+                            ssm_command_id=None,
+                        )
+                    )
                     if _batch_mode:
                         continue
                     return results
@@ -314,25 +339,40 @@ class CodeEditStrategy(BaseFixStrategy):
                     status = "skipped"
                 else:
                     status = "failed"
-                results.append(StepResult(
-                    step_num=step_num, action=action_label, command=verify_cmd,
-                    stdout=cmd_result.stdout[:2000], stderr=cmd_result.stderr[:2000],
-                    exit_code=cmd_result.exit_code,
-                    duration_ms=int((finished - started).total_seconds() * 1000),
-                    status=status, started_at=started, finished_at=finished,
-                    ssm_command_id=cmd_result.ssm_command_id,
-                ))
+                results.append(
+                    StepResult(
+                        step_num=step_num,
+                        action=action_label,
+                        command=verify_cmd,
+                        stdout=cmd_result.stdout[:2000],
+                        stderr=cmd_result.stderr[:2000],
+                        exit_code=cmd_result.exit_code,
+                        duration_ms=int((finished - started).total_seconds() * 1000),
+                        status=status,
+                        started_at=started,
+                        finished_at=finished,
+                        ssm_command_id=cmd_result.ssm_command_id,
+                    )
+                )
                 if step_ok:
-                    self._emit(ctx, "MESSAGE", f"✓ Step {step_num} VERIFY_ABSENT passed (pattern gone)")
+                    self._emit(
+                        ctx, "MESSAGE", f"✓ Step {step_num} VERIFY_ABSENT passed (pattern gone)"
+                    )
                     continue
                 # Failure branch
                 if _batch_mode:
-                    self._emit(ctx, "MESSAGE",
+                    self._emit(
+                        ctx,
+                        "MESSAGE",
                         f"⏭ Step {step_num} VERIFY_ABSENT failed (pattern still present) — "
-                        f"isolated in batch mode, sibling edits keep going")
+                        f"isolated in batch mode, sibling edits keep going",
+                    )
                     continue
-                self._emit(ctx, "ERROR",
-                    f"✗ Step {step_num} VERIFY_ABSENT exit={cmd_result.exit_code}: {cmd_result.stderr[:300]}")
+                self._emit(
+                    ctx,
+                    "ERROR",
+                    f"✗ Step {step_num} VERIFY_ABSENT exit={cmd_result.exit_code}: {cmd_result.stderr[:300]}",
+                )
                 return results
             if not _edit_file_disabled and is_edit_file_step(step_text):
                 try:

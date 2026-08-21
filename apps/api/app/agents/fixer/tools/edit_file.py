@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any
 
 
 # The Python one-liner that runs on the target via SSM. Reads the file,
@@ -58,7 +57,7 @@ from typing import Any
 # Fix: detect the leading whitespace of the line where old_text starts.
 # Prepend that indent to every line of new_text EXCEPT the first (first
 # already sits where old_text sits). NO-OP for single-line edits.
-_EXECUTOR_SCRIPT = r'''
+_EXECUTOR_SCRIPT = r"""
 import base64, os, sys
 path = os.environ["EDIT_PATH"]
 old_text = base64.b64decode(os.environ["EDIT_OLD_B64"]).decode("utf-8")
@@ -99,7 +98,7 @@ new_content = content.replace(old_text, new_text, 1)
 with open(path, "w", encoding="utf-8") as f:
     f.write(new_content)
 print(f"EDIT_OK: {path} — {len(old_text)} chars replaced with {len(new_text)} chars")
-'''.strip()
+""".strip()
 
 
 # Marker the LLM emits so CodeEditStrategy knows to parse the block as a
@@ -131,7 +130,7 @@ EDIT_FILE_MARKER = "#EDIT_FILE"
 #   3 → pattern still present (fix incomplete)
 #   2 → file not found
 VERIFY_ABSENT_MARKER = "#VERIFY_ABSENT"
-_VERIFY_ABSENT_SCRIPT = r'''
+_VERIFY_ABSENT_SCRIPT = r"""
 import base64, os, sys
 path = os.environ["VERIFY_PATH"]
 pattern = base64.b64decode(os.environ["VERIFY_PATTERN_B64"]).decode("utf-8")
@@ -147,7 +146,7 @@ if count > 0:
     sys.stderr.write(f"  pattern preview: {pattern[:200]!r}\n")
     sys.exit(3)
 print(f"VERIFY_OK: pattern absent from {path}")
-'''.strip()
+""".strip()
 
 
 def parse_verify_absent_spec(step_text: str) -> dict[str, str] | None:
@@ -158,6 +157,7 @@ def parse_verify_absent_spec(step_text: str) -> dict[str, str] | None:
     if VERIFY_ABSENT_MARKER not in step_text:
         return None
     import json  # noqa: PLC0415
+
     after = step_text.split(VERIFY_ABSENT_MARKER, 1)[1].strip()
     if after.endswith("```"):
         after = after[:-3].rstrip()

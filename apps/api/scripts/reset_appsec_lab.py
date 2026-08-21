@@ -108,7 +108,7 @@ def _clean_backups(client, instance_id: str) -> tuple[bool, str]:
     cmd = (
         f"count=$(find {_ENV2_APPSEC_LAB} -maxdepth 1 -name '*.bak-*' | wc -l) && "
         f"find {_ENV2_APPSEC_LAB} -maxdepth 1 -name '*.bak-*' -delete && "
-        f"echo \"deleted $count backup file(s)\""
+        f'echo "deleted $count backup file(s)"'
     )
     rc, stdout, stderr = _ssm_run(client, instance_id, cmd, timeout_s=30)
     return rc == 0, (stdout.strip() if rc == 0 else stderr.strip() or f"exit {rc}")
@@ -138,6 +138,7 @@ def main() -> int:
     # shell has, which can point boto3 at a different account/profile entirely).
     load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
     import os
+
     instance_id = args.instance_id or os.environ.get("FIXER_ENV2_INSTANCE_ID", "")
     if not instance_id:
         print("ERROR: no instance id — set FIXER_ENV2_INSTANCE_ID in .env or pass --instance-id")

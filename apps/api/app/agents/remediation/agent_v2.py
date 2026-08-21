@@ -780,12 +780,12 @@ def run_agentic_planner(
 
         _task_list_lines = [
             f"HARD BATCHING RULE — this package covers {len(_batch_covered)} DISTINCT findings.",
-            f"You MUST address each numbered finding below with its own edit + its own re-scan.",
-            f"If you emit fewer edits or fewer re-scans than there are distinct check_ids,",
-            f"the missing findings will be reported as UNADDRESSED in the run summary",
-            f"(not fixed — the counting layer verifies each check_id has a passing re-scan).",
-            f"",
-            f"Findings to fix (must produce ONE edit + ONE per-check re-scan for each distinct check_id):",
+            "You MUST address each numbered finding below with its own edit + its own re-scan.",
+            "If you emit fewer edits or fewer re-scans than there are distinct check_ids,",
+            "the missing findings will be reported as UNADDRESSED in the run summary",
+            "(not fixed — the counting layer verifies each check_id has a passing re-scan).",
+            "",
+            "Findings to fix (must produce ONE edit + ONE per-check re-scan for each distinct check_id):",
         ]
         _primary_check, _primary_res = _finding_short(user_payload["issue"])
         _task_list_lines.append(
@@ -942,9 +942,9 @@ def run_agentic_planner(
             "edit_file_marker": (
                 "To emit a structured edit, put this in the step's Command block:\n"
                 "  #EDIT_FILE\n"
-                "  {\"path\": \"<absolute file path>\",\n"
-                "   \"old_text\": \"<exact substring currently in the file — must match ONCE>\",\n"
-                "   \"new_text\": \"<what it becomes after edit>\"}\n\n"
+                '  {"path": "<absolute file path>",\n'
+                '   "old_text": "<exact substring currently in the file — must match ONCE>",\n'
+                '   "new_text": "<what it becomes after edit>"}\n\n'
                 "CRITICAL — old_text composition rules:\n"
                 "  - The GROUND TRUTH file content is provided to you at the top of "
                 "this conversation. Copy old_text VERBATIM byte-for-byte from that "
@@ -952,10 +952,10 @@ def run_agentic_planner(
                 "quotes, whitespace) — the tool does exact-string match, and any "
                 "difference means no match found.\n"
                 "  - Common composition mistakes to avoid:\n"
-                "      • Wrapping in parens: file has `query = f\"...\"` — do NOT "
-                "emit `query = (f\"...\")` in old_text\n"
+                '      • Wrapping in parens: file has `query = f"..."` — do NOT '
+                'emit `query = (f"...")` in old_text\n'
                 "      • Adding trailing whitespace or newlines not in the file\n"
-                "      • \"Cleaning up\" quotes (single↔double) or spacing\n"
+                '      • "Cleaning up" quotes (single↔double) or spacing\n'
                 "  - old_text must uniquely locate the edit — include surrounding "
                 "lines if the vulnerable pattern appears multiple times\n"
                 "  - old_text and new_text cannot be identical (no-op rejected)\n"
@@ -993,8 +993,8 @@ def run_agentic_planner(
                 "for absence checks), and `|| true` is easy to forget.\n\n"
                 "To emit a structured absence check:\n"
                 "  #VERIFY_ABSENT\n"
-                "  {\"path\": \"<absolute file path>\",\n"
-                "   \"pattern\": \"<vulnerable substring that must NOT appear in the file>\"}\n\n"
+                '  {"path": "<absolute file path>",\n'
+                '   "pattern": "<vulnerable substring that must NOT appear in the file>"}\n\n'
                 "Rules:\n"
                 "  - Exit 0 = pattern absent (success). Exit 3 = still present (fail).\n"
                 "  - `pattern` is checked with exact substring match — NO regex, "
@@ -1069,16 +1069,30 @@ def run_agentic_planner(
     # Zero env-specific knowledge — SSM cat + inject as data section.
     file_ctx_msg: list[Any] = []
     import os as _os  # noqa: PLC0415
+
     if _os.getenv("SA3_DISABLE_FILE_FETCH", "").lower() not in ("1", "true", "yes"):
-        file_path_hint = user_payload.get("issue", {}).get("file_path") if isinstance(user_payload, dict) else None
+        file_path_hint = (
+            user_payload.get("issue", {}).get("file_path")
+            if isinstance(user_payload, dict)
+            else None
+        )
         if not file_path_hint:
             # Fall back to raw finding + working_dir composition
-            _wd = user_payload.get("issue", {}).get("working_directory") if isinstance(user_payload, dict) else None
-            _fp = user_payload.get("issue", {}).get("file_path") if isinstance(user_payload, dict) else None
+            _wd = (
+                user_payload.get("issue", {}).get("working_directory")
+                if isinstance(user_payload, dict)
+                else None
+            )
+            _fp = (
+                user_payload.get("issue", {}).get("file_path")
+                if isinstance(user_payload, dict)
+                else None
+            )
             file_path_hint = _fp or (_wd + "/main.tf" if _wd else None)
         if file_path_hint and isinstance(file_path_hint, str) and file_path_hint.startswith("/"):
             try:
                 from .tools.file_fetch import fetch_file  # noqa: PLC0415
+
                 prefetch = fetch_file(
                     file_path_hint,
                     budget,
@@ -1089,19 +1103,27 @@ def run_agentic_planner(
                 if prefetch.get("exists") and prefetch.get("content"):
                     content = prefetch["content"]
                     trunc_note = " (TRUNCATED)" if prefetch.get("truncated") else ""
-                    file_ctx_msg = [HumanMessage(content=(
-                        f"# GROUND TRUTH — actual current content of {file_path_hint}{trunc_note}\n"
-                        f"# When generating any edit / sed / grep / regex, use the EXACT SYNTAX below.\n"
-                        f"# Web sources are for concept understanding only — this file is authoritative.\n\n"
-                        f"{content}"
-                    ))]
+                    file_ctx_msg = [
+                        HumanMessage(
+                            content=(
+                                f"# GROUND TRUTH — actual current content of {file_path_hint}{trunc_note}\n"
+                                f"# When generating any edit / sed / grep / regex, use the EXACT SYNTAX below.\n"
+                                f"# Web sources are for concept understanding only — this file is authoritative.\n\n"
+                                f"{content}"
+                            )
+                        )
+                    ]
                     emit_fn(
-                        run_id, "sub-agent-3", "MESSAGE",
+                        run_id,
+                        "sub-agent-3",
+                        "MESSAGE",
                         f"📎 Pre-fetched {prefetch['content_length']} chars of {file_path_hint} into turn-1 context",
                     )
             except Exception as e:  # noqa: BLE001
                 emit_fn(
-                    run_id, "sub-agent-3", "MESSAGE",
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
                     f"⚠ file_fetch pre-inject skipped ({type(e).__name__}: {str(e)[:100]}) — LLM will work blind",
                 )
 

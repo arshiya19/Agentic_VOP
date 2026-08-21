@@ -91,19 +91,14 @@ def fetch_file(
 
     # Path safety — read-only tool, but still refuse metachars in the arg
     if any(c in _UNSAFE_PATH_CHARS for c in file_path):
-        raise RuntimeError(
-            f"file_fetch refused: path contains unsafe characters — {file_path!r}"
-        )
+        raise RuntimeError(f"file_fetch refused: path contains unsafe characters — {file_path!r}")
     if not file_path.startswith("/"):
-        raise RuntimeError(
-            f"file_fetch refused: path must be absolute — got {file_path!r}"
-        )
+        raise RuntimeError(f"file_fetch refused: path must be absolute — got {file_path!r}")
 
     instance_id = target_instance_id or settings.fixer_env2_instance_id
     if not instance_id:
         raise RuntimeError(
-            "file_fetch denied: no target_instance_id and "
-            "settings.fixer_env2_instance_id is empty"
+            "file_fetch denied: no target_instance_id and settings.fixer_env2_instance_id is empty"
         )
 
     if emit_fn and run_id:
@@ -156,9 +151,7 @@ cat "$FILE"
     invocation = None
     while time.time() < deadline:
         try:
-            invocation = ssm.get_command_invocation(
-                CommandId=command_id, InstanceId=instance_id
-            )
+            invocation = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
         except ssm.exceptions.InvocationDoesNotExist:
             time.sleep(1)
             continue
@@ -179,9 +172,7 @@ cat "$FILE"
                 "ERROR",
                 f"file_fetch SSM status={status}: {stderr[:200]}",
             )
-        raise RuntimeError(
-            f"file_fetch SSM invocation ended with status={status}: {stderr[:400]}"
-        )
+        raise RuntimeError(f"file_fetch SSM invocation ended with status={status}: {stderr[:400]}")
 
     stdout = invocation.get("StandardOutputContent") or ""
 

@@ -207,7 +207,9 @@ def run_demo_remediation(run_id: str) -> dict:
                     f"(primary issue={primary['id']}, related={[i['id'] for i in related]})",
                 )
             else:
-                pkg = _plan_and_enrich(run_id, prompt_row, primary, pattern, asset, family, sb_pub, _raw_for(primary))
+                pkg = _plan_and_enrich(
+                    run_id, prompt_row, primary, pattern, asset, family, sb_pub, _raw_for(primary)
+                )
             planned += 1
 
             _persist_to_demo(sb_demo, pkg, run_id)
@@ -294,12 +296,14 @@ def _select_primary(group: list[dict]) -> dict:
     """Pick the highest-risk finding in a file group as the primary.
     Others ride along in the payload as additional_findings. Highest
     derived_risk wins; ties broken by severity rank, then by earliest id."""
+
     def _score(iss: dict) -> tuple[float, int, int]:
         risk = iss.get("derived_risk")
         risk_val = float(risk) if risk is not None else -1.0
         sev_val = _SEVERITY_ORDER.get((iss.get("severity") or "").upper(), 0)
         # Negate id so lower id wins the tiebreak (stable ordering)
         return (risk_val, sev_val, -int(iss.get("id") or 0))
+
     return max(group, key=_score)
 
 
@@ -313,7 +317,7 @@ def _plan_and_enrich_batch(
     family: str,
     sb_pub,
     raw_for,
-) -> "RemediationPackage":  # noqa: F821
+) -> RemediationPackage:  # noqa: F821
     """Plan a batched fix package covering primary + related findings for one file.
 
     SA-3 sees the primary as the main issue and the related findings as
@@ -352,7 +356,9 @@ def _plan_and_enrich_batch(
     primary_with_batch = dict(primary)
     primary_with_batch["_batch_related_findings"] = related_payloads
     primary_with_batch["_batch_covered_ids"] = covered_ids
-    pkg = _plan_and_enrich(run_id, prompt_row, primary_with_batch, pattern, asset, family, sb_pub, raw)
+    pkg = _plan_and_enrich(
+        run_id, prompt_row, primary_with_batch, pattern, asset, family, sb_pub, raw
+    )
     # Persist the covered-issue list on the package pathway so master can
     # count real findings per fix_run without a DB schema change. The
     # `__batch_covered_ids__:` prefix is a machine-readable audit note in

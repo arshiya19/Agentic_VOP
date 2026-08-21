@@ -29,6 +29,11 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from ..config import settings
+from ..db import supabase_admin_demo
+from .remediation import planner_demo
+from .sample_from_real import sample_and_copy_ec2_issues
+from .sub_agent_2_demo import run_demo_enrich
+from .trace_demo import RunCancelledError, emit_trace_demo, is_cancellation_requested_demo
 
 
 # Regex helpers for honest per-check counting. A rescan is either NARROW
@@ -63,11 +68,6 @@ def _rescan_covers_check_ids(cmd: str, expected: str = "") -> tuple[set[str], bo
     narrow.update(_NARROW_GREP.findall(text))
     is_broad = bool(_BROAD_ASSERT.search(text)) and not narrow
     return narrow, is_broad
-from ..db import supabase_admin_demo
-from .remediation import planner_demo
-from .sample_from_real import sample_and_copy_ec2_issues
-from .sub_agent_2_demo import run_demo_enrich
-from .trace_demo import RunCancelledError, emit_trace_demo, is_cancellation_requested_demo
 
 
 class DemoMasterState(TypedDict, total=False):
@@ -268,14 +268,14 @@ def _fix_node(state: DemoMasterState) -> dict:
         try:
             pathways = pkg.get("pathways") or []
             for pathway in pathways:
-                for note in (pathway.get("considerations") or []):
+                for note in pathway.get("considerations") or []:
                     if isinstance(note, str) and note.startswith("__batch_covered_ids__:"):
                         ids_str = note.split(":", 1)[1]
                         pkg_findings = len([x for x in ids_str.split(",") if x.strip()])
                         break
                 if pkg_findings > 1:
                     break
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
         try:
@@ -324,32 +324,21 @@ def _fix_node(state: DemoMasterState) -> dict:
         # and the command was a structured edit — identified by the EDIT_PATH=
         # env-var prefix our base64 executor uses).
         successful_edits = sum(
-            1 for s in sresults
-            if s.get("status") == "success"
-            and "EDIT_PATH=" in (s.get("command") or "")
+            1
+            for s in sresults
+            if s.get("status") == "success" and "EDIT_PATH=" in (s.get("command") or "")
         )
         # Total structured edits attempted (regardless of outcome)
-        attempted_edits = sum(
-            1 for s in sresults
-            if "EDIT_PATH=" in (s.get("command") or "")
-        )
+        attempted_edits = sum(1 for s in sresults if "EDIT_PATH=" in (s.get("command") or ""))
 
         # Reclassify status. Priority order matters:
         #   1) partial_success — mixed re-scan outcomes (some fixed some not)
         #   2) no_fix_needed — 0 edits actually applied AND validation passes
         #      (KB adapter picked wrong literals OR file was already clean)
         #   3) success / rolled_back / failed — unchanged
-        if (
-            status_raw == "success"
-            and len(rescans) > 1
-            and 0 < len(passed_rescans) < len(rescans)
-        ):
+        if status_raw == "success" and len(rescans) > 1 and 0 < len(passed_rescans) < len(rescans):
             status = "partial_success"
-        elif (
-            status_raw == "success"
-            and attempted_edits > 0
-            and successful_edits == 0
-        ):
+        elif status_raw == "success" and attempted_edits > 0 and successful_edits == 0:
             status = "no_fix_needed"
         else:
             status = status_raw
@@ -429,12 +418,8 @@ def _fix_node(state: DemoMasterState) -> dict:
         "fix_runs": fix_runs,
     }
     # Trace summary — omit optional buckets when zero to keep it tight
-    _nfn_suffix = (
-        f", {findings_no_fix_needed} no-fix-needed" if findings_no_fix_needed else ""
-    )
-    _un_suffix = (
-        f", {findings_unaddressed} unaddressed" if findings_unaddressed else ""
-    )
+    _nfn_suffix = f", {findings_no_fix_needed} no-fix-needed" if findings_no_fix_needed else ""
+    _un_suffix = f", {findings_unaddressed} unaddressed" if findings_unaddressed else ""
     emit_trace_demo(
         run_id,
         "master",
