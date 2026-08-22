@@ -270,6 +270,7 @@ class CodeEditStrategy(BaseFixStrategy):
                 parse_edit_spec,
                 build_ssm_command,
                 summarize_spec,
+                sanity_check_version_edit,
                 is_verify_absent_step,
                 parse_verify_absent_spec,
                 build_verify_absent_ssm_command,
@@ -389,6 +390,24 @@ class CodeEditStrategy(BaseFixStrategy):
                     if _batch_mode:
                         continue
                     return results  # HALT — orchestrator triggers rollback
+
+                # Sanity-check version-pin edits BEFORE the SSM round-trip.
+                # Catches LLM hallucination classes (same-version no-op,
+                # downgrade, package-name swap) generically — any scanner
+                # whose fix is a `pkg==version` bump benefits. Non-version
+                # edits fall through with None. Always non-fatal — flagged
+                # edits become skipped steps, sibling edits keep going.
+                _sanity_skip = sanity_check_version_edit(spec)
+                if _sanity_skip:
+                    self._emit(
+                        ctx,
+                        "MESSAGE",
+                        f"⏭ Step {step_num} EDIT_FILE skipped by pre-dispatch sanity: {_sanity_skip}",
+                    )
+                    results.append(
+                        self._skipped_step(step_num, action_label, _sanity_skip)
+                    )
+                    continue
                 edit_cmd = build_ssm_command(spec)
                 self._emit(
                     ctx,

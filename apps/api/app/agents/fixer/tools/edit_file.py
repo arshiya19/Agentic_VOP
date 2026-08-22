@@ -70,7 +70,12 @@ except FileNotFoundError:
     sys.exit(2)
 count = content.count(old_text)
 if count == 0:
-    sys.stderr.write(f"EDIT_ERROR: old_text not found in {path}\n")
+    # Not necessarily an error — the file may already be at the desired
+    # state (prior edit landed, or scanner reported drift). Use SKIPPED
+    # phrasing so trace consumers can distinguish "we tried and old_text
+    # was gone" from "we tried and hit a genuine problem."
+    sys.stderr.write(f"EDIT_SKIPPED: old_text no longer present in {path} "
+                     f"(file may already be at desired state)\n")
     sys.stderr.write(f"  old_text preview: {old_text[:200]!r}\n")
     sys.exit(3)
 if count > 1:
@@ -326,3 +331,98 @@ def summarize_spec(spec: dict[str, str]) -> str:
 def is_edit_file_step(step_text: str) -> bool:
     """Cheap check — does this step text contain the EDIT_FILE marker?"""
     return EDIT_FILE_MARKER in (step_text or "")
+
+
+# =============================================================================
+# Version-bump sanity check
+# =============================================================================
+# When an EDIT_FILE is a dependency version pin bump (e.g. `flask==1.0` →
+# `flask==2.3.3`), catch a couple of common LLM hallucination classes BEFORE
+# dispatching to SSM. Fires generically for any `<pkg>==<version>` edit — no
+# scanner-specific logic, no rule-specific mapping. Non-version edits (source
+# code, HCL, etc.) fall through with `None` and are handled normally.
+# =============================================================================
+
+import re as _re  # noqa: E402
+# Matches "pkg==1.2.3", "pkg==1.2.3rc1", "pkg==1.2.3.post1", etc. The version
+# capture is deliberately permissive — we compare as opaque tuples, not per
+# any specific spec (PEP 440 / SemVer). Enough to catch the common
+# hallucination classes we've observed.
+_VERSION_PIN_RE = _re.compile(
+    r"^([A-Za-z0-9_.\-]+)\s*==\s*([A-Za-z0-9_.\-+!]+)\s*$"
+)
+
+
+def _parse_pin(text: str) -> tuple[str, str] | None:
+    """Return (pkg, version) if text looks like a single `pkg==version` pin,
+    else None. Strips surrounding whitespace/quotes so it handles both the
+    raw file line and JSON-encoded old_text."""
+    if not text:
+        return None
+    m = _VERSION_PIN_RE.match(text.strip().strip("\"'"))
+    if not m:
+        return None
+    return m.group(1).lower(), m.group(2)
+
+
+def _version_key(v: str) -> tuple:
+    """Split a version string into a comparable tuple. Integer parts sort
+    numerically, non-integer (rc/alpha/post/etc) parts sort lexicographically
+    AFTER integers of the same position. Good enough for detecting obvious
+    ordering issues without a full PEP 440 parser."""
+    parts = _re.split(r"[.\-+]", v)
+    key: list[tuple[int, int | str]] = []
+    for p in parts:
+        if p.isdigit():
+            key.append((0, int(p)))  # numeric first
+        else:
+            key.append((1, p))  # then string
+    return tuple(key)
+
+
+def sanity_check_version_edit(spec: dict[str, str]) -> str | None:
+    """Inspect an EDIT_FILE spec for common version-bump hallucinations.
+
+    Returns a human-readable skip reason if the edit should be skipped, or
+    `None` if the edit looks OK / isn't a version pin (fall through to
+    normal execution).
+
+    Detects:
+      - Same-version bump (`pkg==X → pkg==X`) — no-op, LLM hallucinated a
+        different-looking spec that means nothing.
+      - Downgrade attempt (`pkg==NEW → pkg==OLD`) — would REINTRODUCE the
+        vulnerability, not fix it.
+      - Package-name mismatch (`old_text: pkg-A==X → new_text: pkg-B==Y`) —
+        LLM swapped packages, definitely a hallucination for a version bump.
+
+    Non-detections (return None, execute normally):
+      - Non-version edits (source code, HCL, YAML, JSON, etc.)
+      - Version bumps that look plausible (upgrade to higher version)
+      - Any edit where either side isn't a clean single `pkg==version` line
+    """
+    old_pin = _parse_pin(spec.get("old_text") or "")
+    new_pin = _parse_pin(spec.get("new_text") or "")
+
+    # If either side isn't a version pin, this isn't a bump — skip check
+    if not old_pin or not new_pin:
+        return None
+
+    old_pkg, old_ver = old_pin
+    new_pkg, new_ver = new_pin
+
+    if old_pkg != new_pkg:
+        return (
+            f"package name changed ({old_pkg!r} → {new_pkg!r}) — "
+            f"unusual for a version bump, likely hallucination"
+        )
+
+    if old_ver == new_ver:
+        return f"same-version no-op ({old_pkg}=={old_ver})"
+
+    if _version_key(new_ver) < _version_key(old_ver):
+        return (
+            f"downgrade attempt ({old_pkg}: {old_ver} → {new_ver}) — "
+            f"would reintroduce the vulnerability, not fix it"
+        )
+
+    return None

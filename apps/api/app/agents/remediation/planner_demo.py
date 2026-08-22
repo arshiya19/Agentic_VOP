@@ -262,16 +262,27 @@ _SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "
 def _file_key_for(issue: dict, raw: dict | None) -> str:
     """Return the file path this issue targets. Empty string when unattributable
     (findings without a file path fall through as their own group, one per issue,
-    which preserves current per-finding behavior for OS/CVE-style findings)."""
-    raw = raw or {}
-    return (
-        raw.get("file_path")  # Checkov, Prisma
-        or raw.get("path")  # Semgrep
-        or raw.get("filename")  # Bandit
-        or raw.get("Target")  # Trivy (container/image target)
-        or (issue.get("asset_identity") or {}).get("file")
-        or ""
-    )
+    which preserves current per-finding behavior for OS/CVE-style findings).
+
+    Uses `_extract_iac_context` (the same file_path resolver SA-3 uses in
+    `_plan_and_enrich`) so batching-grouping and downstream planning agree on
+    which file each finding targets. Consequences of picking this over a
+    smaller ad-hoc field list:
+      - SCA (trivy-fs) findings whose raw uses `target` (lowercase, from
+        scan-server normalization) now batch instead of falling through.
+      - Relative paths get resolved to absolute (e.g. `requirements.txt` →
+        `/opt/vuln-labs/appsec-lab/requirements.txt`) so all findings on the
+        same file share ONE key regardless of how the scanner emitted the path.
+      - No scanner-specific logic here — any scanner _extract_iac_context
+        recognizes will batch consistently.
+    """
+    ctx = _extract_iac_context(issue, raw or {})
+    fp = ctx.get("file_path")
+    if isinstance(fp, str) and fp:
+        return fp
+    # Fallback for older shapes / no path (OS CVEs) — keep as singleton
+    identity_file = (issue.get("asset_identity") or {}).get("file")
+    return identity_file or ""
 
 
 def _group_issues_by_file(issues: list[dict], raw_for) -> dict:

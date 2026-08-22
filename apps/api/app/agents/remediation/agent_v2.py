@@ -745,6 +745,28 @@ def run_agentic_planner(
         "asset": asset,
         "family": family,
     }
+
+    # Hint the LLM with the scanner's OWN authoritative fix version(s) when
+    # the raw finding carries one. Scanners like Trivy/OSV/Snyk/GitHub
+    # Advisory Database all publish the exact patched version(s) they
+    # consider "fixed" for a given CVE. Without this hint the LLM guesses
+    # (from CVE advisory research → often picks a version that doesn't
+    # satisfy the scanner's DB) → rescan still flags the CVE → rollback.
+    # With this hint the LLM picks a version the scanner will accept.
+    # Generic — checks the common field names across scanner shapes; no
+    # scanner-specific branching.
+    _raw_for_hint = issue.get("source_raw") or issue.get("raw") or {}
+    if isinstance(_raw_for_hint, dict):
+        _fix_hint = (
+            _raw_for_hint.get("FixedVersion")  # Trivy (any subcommand)
+            or _raw_for_hint.get("fixed_version")  # OSV, some Snyk shapes
+            or _raw_for_hint.get("patchedVersions")  # Snyk vulnDB
+            or _raw_for_hint.get("patched_versions")  # GitHub Advisory DB
+            or (_raw_for_hint.get("Vulnerability") or {}).get("FixedVersion")  # Trivy nested
+        )
+        if _fix_hint:
+            user_payload["hint_fix_version"] = str(_fix_hint)
+
     _batch_related = issue.get("_batch_related_findings")
     _batch_covered = issue.get("_batch_covered_ids")
     if _batch_related:
