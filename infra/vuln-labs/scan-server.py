@@ -15,6 +15,7 @@ Endpoints:
   GET  /scan/trivy-image/java   — returns cached Trivy image results (Tomcat/JDK)
   GET  /scan/trivy-image/python — returns cached Trivy image results (Python/pip)
   GET  /scan/trivy-os           — returns cached Trivy OS results (host rootfs)
+  GET  /scan/serverless         — returns cached Semgrep serverless results (Lambda IaC + code)
   POST /trigger-scan            — re-runs all scanners and updates cache
   GET  /scan-status             — shows when each scan was last run
 """
@@ -30,6 +31,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 CSPM_PATH = os.environ.get("VULN_LABS_CSPM_PATH", "/opt/vuln-labs/cspm-lab/")
 SAST_PATH = os.environ.get("VULN_LABS_SAST_PATH", "/opt/vuln-labs/appsec-lab/")
 SCA_PATH = os.environ.get("VULN_LABS_SCA_PATH", "/opt/vuln-labs/appsec-lab/")
+SERVERLESS_PATH = os.environ.get(
+    "VULN_LABS_SERVERLESS_PATH", "/opt/vuln-labs/serverless-lab/"
+)
 INFRA_IMAGE = os.environ.get("VULN_LABS_INFRA_IMAGE", "vuln-lab-image:latest")
 JAVA_IMAGE = os.environ.get("VULN_LABS_JAVA_IMAGE", "vuln-java-image:latest")
 PYTHON_IMAGE = os.environ.get("VULN_LABS_PYTHON_IMAGE", "vuln-python-image:latest")
@@ -672,12 +676,449 @@ def run_trivy_os():
         scan_timestamps["trivy-os"] = datetime.utcnow().isoformat()
 
 
+def run_serverless_semgrep():
+    """Run Semgrep against the serverless lab (Lambda code + Terraform IaC) and cache results."""
+    if not os.path.isdir(SERVERLESS_PATH):
+        print(
+            f"[scan] Serverless Semgrep SKIPPED — path does not exist: {SERVERLESS_PATH}"
+        )
+        error_data = {
+            "findings": [],
+            "total": 0,
+            "error": f"Serverless path missing: {SERVERLESS_PATH}",
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
+        with open(os.path.join(RESULTS_DIR, "serverless.json"), "w") as f:
+            json.dump(error_data, f)
+        scan_timestamps["serverless"] = datetime.utcnow().isoformat()
+        return
+
+    try:
+        # Write serverless-specific rules (HCL for IaC + Python for Lambda code)
+        rules_file = os.path.join(RESULTS_DIR, "serverless-rules.yaml")
+        with open(rules_file, "w") as rf:
+            rf.write("""rules:
+  # =========================================================================
+  # HCL Rules — Terraform Lambda misconfigurations
+  # =========================================================================
+
+  # FINDING 1: Lambda with no VPC configuration
+  - id: lambda-no-vpc-config
+    patterns:
+      - pattern: |
+          resource "aws_lambda_function" $NAME {
+            ...
+          }
+      - pattern-not: |
+          resource "aws_lambda_function" $NAME {
+            ...
+            vpc_config {
+              ...
+            }
+            ...
+          }
+    message: >
+      Lambda function has no VPC configuration. Attach to a VPC for network isolation.
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-284"]
+      owasp: ["A01:2021 - Broken Access Control"]
+
+  # FINDING 2: Lambda with no dead letter queue
+  - id: lambda-no-dlq
+    patterns:
+      - pattern: |
+          resource "aws_lambda_function" $NAME {
+            ...
+          }
+      - pattern-not: |
+          resource "aws_lambda_function" $NAME {
+            ...
+            dead_letter_config {
+              ...
+            }
+            ...
+          }
+    message: >
+      Lambda function has no dead letter queue configured. Failed events will be lost.
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-392"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+
+  # FINDING 3: Hardcoded secrets in Lambda environment variables
+  - id: lambda-hardcoded-env-secret
+    patterns:
+      - pattern-either:
+          - pattern: |
+              environment {
+                variables = {
+                  ...
+                  DB_PASSWORD = "..."
+                  ...
+                }
+              }
+          - pattern: |
+              environment {
+                variables = {
+                  ...
+                  API_KEY = "..."
+                  ...
+                }
+              }
+    message: >
+      Hardcoded secret in Lambda environment variables. Use AWS Secrets Manager or SSM Parameter Store.
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      owasp: ["A07:2021 - Identification and Authentication Failures"]
+
+  # FINDING 4: Lambda with no X-Ray tracing
+  - id: lambda-no-tracing
+    patterns:
+      - pattern: |
+          resource "aws_lambda_function" $NAME {
+            ...
+          }
+      - pattern-not: |
+          resource "aws_lambda_function" $NAME {
+            ...
+            tracing_config {
+              ...
+            }
+            ...
+          }
+    message: >
+      Lambda function has no X-Ray tracing enabled. Enable tracing for observability.
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-778"]
+      owasp: ["A09:2021 - Security Logging and Monitoring Failures"]
+
+  # FINDING 5: Lambda with excessive timeout
+  - id: lambda-excessive-timeout
+    pattern: |
+      resource "aws_lambda_function" $NAME {
+        ...
+        timeout = 900
+        ...
+      }
+    message: >
+      Lambda function has maximum timeout (900s). Use a reasonable timeout value.
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-400"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+
+  # FINDING 6: Lambda with no reserved concurrency limit
+  - id: lambda-no-concurrency-limit
+    patterns:
+      - pattern: |
+          resource "aws_lambda_function" $NAME {
+            ...
+          }
+      - pattern-not: |
+          resource "aws_lambda_function" $NAME {
+            ...
+            reserved_concurrent_executions = $VAL
+            ...
+          }
+    message: >
+      Lambda function has no reserved concurrency limit. Set a limit to prevent runaway invocations.
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-770"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+
+  # FINDING 7: IAM role with overly permissive assume role (Principal: *)
+  - id: lambda-role-wildcard-assume
+    pattern: |
+      Principal = { Service = "*" }
+    message: >
+      IAM role allows any AWS service to assume it. Restrict to lambda.amazonaws.com.
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-269"]
+      owasp: ["A01:2021 - Broken Access Control"]
+
+  # FINDINGS 8 & 9: IAM policy with wildcard Action and Resource
+  - id: lambda-policy-wildcard
+    pattern-either:
+      - pattern: Action = "*"
+      - pattern: Resource = "*"
+    message: >
+      IAM policy uses wildcard Action or Resource. Scope to least-privilege permissions.
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-269"]
+      owasp: ["A01:2021 - Broken Access Control"]
+
+  # FINDING 10: Lambda Function URL with no authentication
+  - id: lambda-public-url-no-auth
+    pattern: |
+      resource "aws_lambda_function_url" $NAME {
+        ...
+        authorization_type = "NONE"
+        ...
+      }
+    message: >
+      Lambda Function URL has no authentication. Set authorization_type to AWS_IAM.
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-306"]
+      owasp: ["A07:2021 - Identification and Authentication Failures"]
+
+  # FINDING 11: CloudWatch Log Group with no KMS encryption
+  - id: lambda-logs-no-encryption
+    patterns:
+      - pattern: |
+          resource "aws_cloudwatch_log_group" $NAME {
+            ...
+          }
+      - pattern-not: |
+          resource "aws_cloudwatch_log_group" $NAME {
+            ...
+            kms_key_id = $VAL
+            ...
+          }
+    message: >
+      CloudWatch Log Group has no KMS encryption. Add kms_key_id for encryption at rest.
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-311"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+
+  # FINDING 12: CloudWatch Log Group with no retention period
+  - id: lambda-logs-no-retention
+    patterns:
+      - pattern: |
+          resource "aws_cloudwatch_log_group" $NAME {
+            ...
+          }
+      - pattern-not: |
+          resource "aws_cloudwatch_log_group" $NAME {
+            ...
+            retention_in_days = $VAL
+            ...
+          }
+    message: >
+      CloudWatch Log Group has no retention period. Set retention_in_days to avoid unbounded storage.
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-779"]
+      owasp: ["A09:2021 - Security Logging and Monitoring Failures"]
+
+  # =========================================================================
+  # Python Rules — Lambda code vulnerabilities
+  # =========================================================================
+
+  # Lambda hardcoded credentials
+  - id: serverless-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: AWS_ACCESS_KEY = "..."
+          - pattern: AWS_SECRET_KEY = "..."
+          - pattern: THIRD_PARTY_API_KEY = "..."
+    message: >
+      Hardcoded credential in Lambda source code. Use environment variables or Secrets Manager.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      owasp: ["A07:2021 - Identification and Authentication Failures"]
+
+  # Lambda logging sensitive event data
+  - id: serverless-log-sensitive-data
+    pattern: logger.info(f"...{json.dumps($EVENT)}...")
+    message: >
+      Logging full event payload which may contain sensitive data. Redact PII before logging.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-532"]
+      owasp: ["A09:2021 - Security Logging and Monitoring Failures"]
+
+  # Lambda bare except
+  - id: serverless-broad-exception
+    pattern: |
+      except:
+        ...
+    message: >
+      Bare except clause catches all exceptions including SystemExit and KeyboardInterrupt.
+      Catch specific exceptions instead.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-396"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+
+  # Lambda PartiQL injection
+  - id: serverless-sql-injection
+    patterns:
+      - pattern-either:
+          - pattern: $CLIENT.execute_statement(Statement=f"...{$VAR}...")
+          - pattern: |
+              $QUERY = f"...{$VAR}..."
+              ...
+              $CLIENT.execute_statement(Statement=$QUERY)
+    message: >
+      PartiQL injection via f-string. Use parameterized queries with Parameters argument.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      owasp: ["A03:2021 - Injection"]
+
+  # Lambda SSRF
+  - id: serverless-ssrf
+    pattern: requests.get($URL)
+    message: >
+      SSRF — user-controlled URL passed to requests.get in Lambda handler.
+      Validate against an allowlist of permitted URLs.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+      owasp: ["A10:2021 - Server-Side Request Forgery"]
+
+  # Lambda insecure deserialization
+  - id: serverless-insecure-deserialization
+    pattern: pickle.loads(...)
+    message: >
+      Insecure deserialization via pickle.loads on user-supplied Lambda event data.
+      Use json.loads or a safe format.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+      owasp: ["A08:2021 - Software and Data Integrity Failures"]
+
+  # Lambda command injection
+  - id: serverless-command-injection
+    pattern: os.system("..." + $VAR)
+    message: >
+      Command injection via os.system with concatenated user input in Lambda handler.
+      Use subprocess with a list of arguments.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      owasp: ["A03:2021 - Injection"]
+
+  # Lambda weak random
+  - id: serverless-weak-random
+    pattern: random.randint(...)
+    message: >
+      Weak randomness in Lambda handler. Use secrets module for security tokens.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-330"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+""")
+
+        # Scan both .tf and .py files in the serverless lab directory
+        result = subprocess.run(
+            [
+                "semgrep",
+                "scan",
+                "--config",
+                rules_file,
+                SERVERLESS_PATH,
+                "--json",
+                "--no-git-ignore",
+                "--timeout",
+                "60",
+                "--max-memory",
+                "256",
+                "-j",
+                "1",
+                "--optimizations",
+                "none",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.stderr:
+            print(f"[scan] Serverless Semgrep stderr: {result.stderr[:500]}")
+
+        if not result.stdout:
+            error_data = {
+                "findings": [],
+                "total": 0,
+                "error": f"No stdout. returncode={result.returncode}. stderr={result.stderr[:500]}",
+                "scanned_at": datetime.utcnow().isoformat(),
+            }
+            with open(os.path.join(RESULTS_DIR, "serverless.json"), "w") as f:
+                json.dump(error_data, f)
+            scan_timestamps["serverless"] = datetime.utcnow().isoformat()
+            print(
+                f"[scan] Serverless Semgrep produced no output. stderr: {result.stderr[:200]}"
+            )
+            return
+
+        data = json.loads(result.stdout)
+        results = data.get("results", [])
+        errors = data.get("errors", [])
+        findings = []
+        for r in results:
+            findings.append(
+                {
+                    "rule_id": r.get("check_id"),
+                    "message": r.get("extra", {}).get("message"),
+                    "severity": r.get("extra", {}).get("severity", "WARNING"),
+                    "path": r.get("path"),
+                    "start_line": r.get("start", {}).get("line"),
+                    "end_line": r.get("end", {}).get("line"),
+                    "metadata": r.get("extra", {}).get("metadata", {}),
+                }
+            )
+
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
+        if errors:
+            result_data["errors"] = errors[:5]
+        with open(os.path.join(RESULTS_DIR, "serverless.json"), "w") as f:
+            json.dump(result_data, f)
+        scan_timestamps["serverless"] = datetime.utcnow().isoformat()
+        print(
+            f"[scan] Serverless Semgrep complete: {len(findings)} findings, {len(errors)} errors"
+        )
+    except Exception as e:
+        print(f"[scan] Serverless Semgrep failed: {e}")
+        error_data = {
+            "findings": [],
+            "total": 0,
+            "error": str(e),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
+        with open(os.path.join(RESULTS_DIR, "serverless.json"), "w") as f:
+            json.dump(error_data, f)
+        scan_timestamps["serverless"] = datetime.utcnow().isoformat()
+
+
 def run_all_scans():
     """Run all scanners sequentially and cache results."""
     print("[scan] Running all scanners...")
     run_checkov()
     run_semgrep()
     run_trivy_fs()
+    run_serverless_semgrep()
     run_trivy_image()
     run_trivy_image_java()
     run_trivy_image_python()
@@ -706,6 +1147,8 @@ class ScanHandler(BaseHTTPRequestHandler):
             self._serve_cached("trivy-image.json")
         elif self.path == "/scan/trivy-os":
             self._serve_cached("trivy-os.json")
+        elif self.path == "/scan/serverless":
+            self._serve_cached("serverless.json")
         elif self.path == "/scan-status":
             self._respond(200, {"timestamps": scan_timestamps})
         else:
@@ -722,6 +1165,7 @@ class ScanHandler(BaseHTTPRequestHandler):
                         "/scan/trivy-image/java",
                         "/scan/trivy-image/python",
                         "/scan/trivy-os",
+                        "/scan/serverless",
                         "/scan-status",
                         "POST /trigger-scan",
                     ],
@@ -767,6 +1211,10 @@ class ScanHandler(BaseHTTPRequestHandler):
             thread = threading.Thread(target=run_trivy_image_python, daemon=True)
             thread.start()
             self._respond(202, {"status": "trivy-image-python scan triggered"})
+        elif self.path == "/trigger-scan/serverless":
+            thread = threading.Thread(target=run_serverless_semgrep, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "serverless scan triggered"})
         else:
             self._respond(404, {"error": "unknown endpoint"})
 
