@@ -178,6 +178,39 @@ cd /opt/vuln-labs/cspm-lab
 terraform init -backend-config=backend.hcl -input=false
 terraform apply -auto-approve -input=false || echo "WARNING: CSPM lab terraform apply failed. Resources may not exist."
 
+# =============================================================================
+# 4b. Serverless Lab — Vulnerable Lambda (applied as real AWS resources)
+#     Creates intentionally misconfigured Lambda + IAM + Function URL.
+#     Semgrep scans both the .tf (IaC misconfigs) and .py (code vulns).
+#     SA4 will later fix these by editing the files and re-applying.
+#     Files downloaded from GitHub to keep user-data under 16KB limit.
+# =============================================================================
+mkdir -p /opt/vuln-labs/serverless-lab
+
+SERVERLESS_BASE="https://raw.githubusercontent.com/arshiya19/Agentic_VOP/main/infra/vuln-labs"
+curl -fsSL "$SERVERLESS_BASE/serverless-lab-template.tf" \
+  -o /opt/vuln-labs/serverless-lab/main.tf
+curl -fsSL "$SERVERLESS_BASE/serverless-lab/lambda_function.py" \
+  -o /opt/vuln-labs/serverless-lab/lambda_function.py
+
+# Substitute placeholders in the Terraform template
+sed -i "s/NAME_PLACEHOLDER/${name_prefix}/g" /opt/vuln-labs/serverless-lab/main.tf
+sed -i "s/REGION_PLACEHOLDER/${aws_region}/g" /opt/vuln-labs/serverless-lab/main.tf
+
+# Create backend config for Serverless lab Terraform state
+cat > /opt/vuln-labs/serverless-lab/backend.hcl << 'BKEOF'
+bucket         = "${terraform_state_bucket}"
+key            = "vuln-labs/serverless-lab/${name_prefix}/terraform.tfstate"
+region         = "${aws_region}"
+encrypt        = true
+dynamodb_table = "${terraform_lock_table}"
+BKEOF
+
+# Initialize and apply the Serverless lab Terraform to create real resources
+cd /opt/vuln-labs/serverless-lab
+terraform init -backend-config=backend.hcl -input=false
+terraform apply -auto-approve -input=false || echo "WARNING: Serverless lab terraform apply failed. Resources may not exist."
+
 %{ if install_scanners ~}
 # =============================================================================
 # 5. Install Scanners
