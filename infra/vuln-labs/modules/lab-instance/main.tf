@@ -158,7 +158,8 @@ resource "aws_iam_role_policy" "terraform_state" {
         ]
         Resource = [
           "arn:aws:s3:::${var.terraform_state_bucket}",
-          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/cspm-lab/*"
+          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/cspm-lab/*",
+          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/serverless-lab/*"
         ]
       },
       {
