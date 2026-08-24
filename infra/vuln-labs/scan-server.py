@@ -839,9 +839,9 @@ def run_serverless_semgrep():
   # FINDING 7: IAM role with overly permissive assume role (Principal: *)
   - id: lambda-role-wildcard-assume
     pattern: |
-      Principal = { Service = "*" }
+      Principal = { AWS = "*" }
     message: >
-      IAM role allows any AWS service to assume it. Restrict to lambda.amazonaws.com.
+      IAM role allows any AWS principal to assume it. Restrict to lambda.amazonaws.com service.
     languages: [hcl]
     severity: ERROR
     metadata:

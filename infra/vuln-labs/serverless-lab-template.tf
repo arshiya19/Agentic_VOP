@@ -51,7 +51,7 @@ data "archive_file" "lambda_zip" {
 # -----------------------------------------------------------------------------
 # FINDING 7: IAM Role — overly permissive assume role policy
 # The Principal should be restricted to lambda.amazonaws.com only, but here
-# it allows any AWS service to assume this role.
+# it allows any AWS principal to assume this role.
 # -----------------------------------------------------------------------------
 
 resource "aws_iam_role" "lambda_role" {
@@ -62,7 +62,7 @@ resource "aws_iam_role" "lambda_role" {
     Statement = [
       {
         Effect    = "Allow"
-        Principal = { Service = "*" }
+        Principal = { AWS = "*" }
         Action    = "sts:AssumeRole"
       }
     ]
