@@ -207,6 +207,31 @@ dynamodb_table = "${terraform_lock_table}"
 BKEOF
 
 # Initialize and apply the Serverless lab Terraform to create real resources
+# First, clean up any orphaned resources from prior failed runs (makes deploy idempotent)
+LAMBDA_NAME="serverless-lab-${name_prefix}-vuln-handler"
+ROLE_NAME="serverless-lab-${name_prefix}-role"
+POLICY_NAME="serverless-lab-${name_prefix}-policy"
+POLICY_ARN="arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/$POLICY_NAME"
+LOG_GROUP="/aws/lambda/$LAMBDA_NAME"
+
+echo "[serverless-lab] Cleaning up any orphaned resources from prior failed runs..."
+# Delete function URL config (if exists)
+aws lambda delete-function-url-config --function-name "$LAMBDA_NAME" 2>/dev/null || true
+# Delete Lambda function (if exists)
+aws lambda delete-function --function-name "$LAMBDA_NAME" 2>/dev/null || true
+# Detach policy from role (if attached)
+aws iam detach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY_ARN" 2>/dev/null || true
+# Delete IAM policy (delete all non-default versions first)
+for v in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null); do
+  aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$v" 2>/dev/null || true
+done
+aws iam delete-policy --policy-arn "$POLICY_ARN" 2>/dev/null || true
+# Delete IAM role (if exists)
+aws iam delete-role --role-name "$ROLE_NAME" 2>/dev/null || true
+# Delete CloudWatch log group (if exists)
+aws logs delete-log-group --log-group-name "$LOG_GROUP" 2>/dev/null || true
+echo "[serverless-lab] Cleanup complete. Proceeding with terraform apply..."
+
 cd /opt/vuln-labs/serverless-lab
 terraform init -backend-config=backend.hcl -input=false
 terraform apply -auto-approve -input=false || echo "WARNING: Serverless lab terraform apply failed. Resources may not exist."
