@@ -109,7 +109,7 @@ def _lookup_check_ids(sb_demo, issue_ids: list[int]) -> dict[int, str]:
                 )
                 if cid:
                     result[int(row["id"])] = str(cid)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
     return result
@@ -544,9 +544,7 @@ def _fix_node(state: DemoMasterState) -> dict:
         sb_pub = supabase_admin()
 
         try:
-            prompt_row = load_sa3_prompt(
-                sb_pub, source=None, family=None, default_version="v1.4"
-            )
+            prompt_row = load_sa3_prompt(sb_pub, source=None, family=None, default_version="v1.4")
         except Exception as e:  # noqa: BLE001
             emit_trace_demo(
                 run_id,
@@ -558,9 +556,7 @@ def _fix_node(state: DemoMasterState) -> dict:
 
         if prompt_row is not None:
             # Load all patterns + demo assets once, reused across retries
-            pattern_rows = (
-                sb_pub.table("remediation_patterns").select("*").execute().data or []
-            )
+            pattern_rows = sb_pub.table("remediation_patterns").select("*").execute().data or []
             patterns_by_family = {r["family"]: r for r in pattern_rows}
             all_assets = sb.table("assets").select("*").execute().data or []
 
@@ -568,29 +564,16 @@ def _fix_node(state: DemoMasterState) -> dict:
             # in ONE query — cheap even at scale, ensures issue_by_id has
             # every id we might touch.
             combined_ids = list(dict.fromkeys(all_unaddressed_ids + all_rolled_back_ids))
-            issue_rows = (
-                sb.table("issues")
-                .select("*")
-                .in_("id", combined_ids)
-                .execute()
-                .data
-                or []
-            )
+            issue_rows = sb.table("issues").select("*").in_("id", combined_ids).execute().data or []
             issue_by_id = {int(r["id"]): r for r in issue_rows}
 
             raw_ids = [
-                r.get("raw_finding_id")
-                for r in issue_rows
-                if r.get("raw_finding_id") is not None
+                r.get("raw_finding_id") for r in issue_rows if r.get("raw_finding_id") is not None
             ]
             raw_by_id: dict[int, dict] = {}
             if raw_ids:
                 raw_rows = (
-                    sb_pub.table("raw_findings")
-                    .select("id, raw")
-                    .in_("id", raw_ids)
-                    .execute()
-                    .data
+                    sb_pub.table("raw_findings").select("id, raw").in_("id", raw_ids).execute().data
                     or []
                 )
                 raw_by_id = {r["id"]: (r.get("raw") or {}) for r in raw_rows}

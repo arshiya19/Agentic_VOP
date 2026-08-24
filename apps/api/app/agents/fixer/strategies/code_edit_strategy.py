@@ -404,9 +404,7 @@ class CodeEditStrategy(BaseFixStrategy):
                         "MESSAGE",
                         f"⏭ Step {step_num} EDIT_FILE skipped by pre-dispatch sanity: {_sanity_skip}",
                     )
-                    results.append(
-                        self._skipped_step(step_num, action_label, _sanity_skip)
-                    )
+                    results.append(self._skipped_step(step_num, action_label, _sanity_skip))
                     continue
                 edit_cmd = build_ssm_command(spec)
                 self._emit(

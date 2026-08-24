@@ -344,13 +344,12 @@ def is_edit_file_step(step_text: str) -> bool:
 # =============================================================================
 
 import re as _re  # noqa: E402
+
 # Matches "pkg==1.2.3", "pkg==1.2.3rc1", "pkg==1.2.3.post1", etc. The version
 # capture is deliberately permissive — we compare as opaque tuples, not per
 # any specific spec (PEP 440 / SemVer). Enough to catch the common
 # hallucination classes we've observed.
-_VERSION_PIN_RE = _re.compile(
-    r"^([A-Za-z0-9_.\-]+)\s*==\s*([A-Za-z0-9_.\-+!]+)\s*$"
-)
+_VERSION_PIN_RE = _re.compile(r"^([A-Za-z0-9_.\-]+)\s*==\s*([A-Za-z0-9_.\-+!]+)\s*$")
 
 
 def _parse_pin(text: str) -> tuple[str, str] | None:
