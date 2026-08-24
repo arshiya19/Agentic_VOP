@@ -16,7 +16,7 @@ for i in 1 2 3; do
   sleep 10
 done
 for i in 1 2 3; do
-  apt-get install -y --fix-missing git curl unzip python3 python3-pip python3-venv nodejs npm docker.io && break
+  apt-get install -y --fix-missing git curl unzip python3 python3-pip python3-venv nodejs npm docker.io awscli && break
   echo "apt-get install failed (attempt $i/3), retrying in 10s..."
   apt-get update -y
   sleep 10
@@ -211,26 +211,32 @@ BKEOF
 LAMBDA_NAME="serverless-lab-${name_prefix}-vuln-handler"
 ROLE_NAME="serverless-lab-${name_prefix}-role"
 POLICY_NAME="serverless-lab-${name_prefix}-policy"
-POLICY_ARN="arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/$POLICY_NAME"
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import json,sys;print(json.load(sys.stdin)['accountId'])" 2>/dev/null || echo "unknown")
+POLICY_ARN="arn:aws:iam::$AWS_ACCOUNT_ID:policy/$POLICY_NAME"
 LOG_GROUP="/aws/lambda/$LAMBDA_NAME"
 
-echo "[serverless-lab] Cleaning up any orphaned resources from prior failed runs..."
-# Delete function URL config (if exists)
-aws lambda delete-function-url-config --function-name "$LAMBDA_NAME" 2>/dev/null || true
-# Delete Lambda function (if exists)
-aws lambda delete-function --function-name "$LAMBDA_NAME" 2>/dev/null || true
-# Detach policy from role (if attached)
-aws iam detach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY_ARN" 2>/dev/null || true
-# Delete IAM policy (delete all non-default versions first)
-for v in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null); do
-  aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$v" 2>/dev/null || true
-done
-aws iam delete-policy --policy-arn "$POLICY_ARN" 2>/dev/null || true
-# Delete IAM role (if exists)
-aws iam delete-role --role-name "$ROLE_NAME" 2>/dev/null || true
-# Delete CloudWatch log group (if exists)
-aws logs delete-log-group --log-group-name "$LOG_GROUP" 2>/dev/null || true
-echo "[serverless-lab] Cleanup complete. Proceeding with terraform apply..."
+if [ "$AWS_ACCOUNT_ID" != "unknown" ]; then
+  echo "[serverless-lab] Cleaning up any orphaned resources from prior failed runs..."
+  # Delete function URL config (if exists)
+  aws lambda delete-function-url-config --function-name "$LAMBDA_NAME" 2>/dev/null || true
+  # Delete Lambda function (if exists)
+  aws lambda delete-function --function-name "$LAMBDA_NAME" 2>/dev/null || true
+  # Detach policy from role (if attached)
+  aws iam detach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY_ARN" 2>/dev/null || true
+  # Delete IAM policy (delete all non-default versions first)
+  for v in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null); do
+    aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$v" 2>/dev/null || true
+  done
+  aws iam delete-policy --policy-arn "$POLICY_ARN" 2>/dev/null || true
+  # Delete IAM role (if exists)
+  aws iam delete-role --role-name "$ROLE_NAME" 2>/dev/null || true
+  # Delete CloudWatch log group (if exists)
+  aws logs delete-log-group --log-group-name "$LOG_GROUP" 2>/dev/null || true
+  echo "[serverless-lab] Cleanup complete."
+else
+  echo "[serverless-lab] Skipping cleanup (could not determine AWS account ID)."
+fi
+echo "[serverless-lab] Proceeding with terraform apply..."
 
 cd /opt/vuln-labs/serverless-lab
 terraform init -backend-config=backend.hcl -input=false
