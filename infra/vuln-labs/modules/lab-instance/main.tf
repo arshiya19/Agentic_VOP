@@ -351,6 +351,7 @@ resource "aws_iam_role_policy" "serverless_lab" {
           "lambda:TagResource",
           "lambda:UntagResource",
           "lambda:ListTags",
+          "lambda:ListVersionsByFunction",
           "lambda:CreateFunctionUrlConfig",
           "lambda:DeleteFunctionUrlConfig",
           "lambda:GetFunctionUrlConfig",
