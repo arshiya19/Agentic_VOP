@@ -299,6 +299,70 @@ resource "aws_iam_role_policy" "cspm_extended" {
   })
 }
 
+# Serverless Lab — Lambda + IAM management permissions
+resource "aws_iam_role_policy" "serverless_lab" {
+  name = "${var.name_prefix}-serverless-lab"
+  role = aws_iam_role.lab.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ServerlessLabIAM"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:TagRole",
+          "iam:UntagRole",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:PassRole",
+          "iam:CreatePolicy",
+          "iam:DeletePolicy",
+          "iam:GetPolicy",
+          "iam:GetPolicyVersion",
+          "iam:ListPolicyVersions",
+          "iam:CreatePolicyVersion",
+          "iam:DeletePolicyVersion",
+          "iam:TagPolicy",
+          "iam:UntagPolicy"
+        ]
+        Resource = [
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/serverless-lab-*",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/serverless-lab-*"
+        ]
+      },
+      {
+        Sid    = "ServerlessLabLambda"
+        Effect = "Allow"
+        Action = [
+          "lambda:CreateFunction",
+          "lambda:DeleteFunction",
+          "lambda:GetFunction",
+          "lambda:GetFunctionConfiguration",
+          "lambda:UpdateFunctionCode",
+          "lambda:UpdateFunctionConfiguration",
+          "lambda:TagResource",
+          "lambda:UntagResource",
+          "lambda:ListTags",
+          "lambda:CreateFunctionUrlConfig",
+          "lambda:DeleteFunctionUrlConfig",
+          "lambda:GetFunctionUrlConfig",
+          "lambda:AddPermission",
+          "lambda:RemovePermission",
+          "lambda:GetPolicy"
+        ]
+        Resource = "arn:aws:lambda:*:${data.aws_caller_identity.current.account_id}:function:serverless-lab-*"
+      }
+    ]
+  })
+}
+
 # -----------------------------------------------------------------------------
 # Security Group — Properly secured for lab operation
 # Only opens ports actually needed for the instance role.
