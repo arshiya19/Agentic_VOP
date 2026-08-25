@@ -158,7 +158,8 @@ resource "aws_iam_role_policy" "terraform_state" {
         ]
         Resource = [
           "arn:aws:s3:::${var.terraform_state_bucket}",
-          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/cspm-lab/*"
+          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/cspm-lab/*",
+          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/serverless-lab/*"
         ]
       },
       {
@@ -294,6 +295,33 @@ resource "aws_iam_role_policy" "cspm_extended" {
           "sqs:ListQueueTags"
         ]
         Resource = "*"
+      }
+    ]
+  })
+}
+
+# Serverless Lab — Lambda + IAM management permissions
+resource "aws_iam_role_policy" "serverless_lab" {
+  name = "${var.name_prefix}-serverless-lab"
+  role = aws_iam_role.lab.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ServerlessLabIAM"
+        Effect = "Allow"
+        Action = "iam:*"
+        Resource = [
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/serverless-lab-*",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/serverless-lab-*"
+        ]
+      },
+      {
+        Sid      = "ServerlessLabLambda"
+        Effect   = "Allow"
+        Action   = "lambda:*"
+        Resource = "arn:aws:lambda:*:${data.aws_caller_identity.current.account_id}:function:serverless-lab-*"
       }
     ]
   })
