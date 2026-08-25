@@ -72,7 +72,26 @@ def _find_replay_candidate(
 
     resp = query.execute()
     rows = resp.data or []
-    return rows[0] if rows else None
+    if not rows:
+        return None
+
+    candidate = rows[0]
+
+    # Gap 2 gate: reject DISPROVEN recipes — entries that have been reused
+    # 3+ times but never succeeded. These are demonstrably bad recipes that
+    # will waste a full execution + rollback cycle if replayed.
+    #
+    # Three states:
+    #   - Brand new (times_reused=0): allow — untested, give it a chance
+    #   - Proven (times_succeeded>=1): allow — has worked before
+    #   - Disproven (times_reused>=3, times_succeeded=0): block
+    _DISPROVEN_THRESHOLD = 3
+    times_reused = candidate.get("times_reused") or 0
+    times_succeeded = candidate.get("times_succeeded") or 0
+    if times_reused >= _DISPROVEN_THRESHOLD and times_succeeded == 0:
+        return None
+
+    return candidate
 
 
 # =============================================================================
@@ -110,7 +129,10 @@ present with at least one entry, or the output will be rejected):
     "security_coverage": "complete",
     "remediation_steps": [{"step": "...", "source": "...", "source_url": "..."}],
     "rollback_plan": {"supported": true, "objective": "...", "preconditions": [],
-                      "steps": [...], "validation": [...], "limitations": [],
+                      "steps": [{"step": "...", "source": "...", "source_url": "..."}],
+                      "validation": [{"name": "...", "method": "cli", "command": "...",
+                                      "expected": "...", "source": "..."}],
+                      "limitations": [],
                       "explanation": "...", "recommended_recovery": null},
     "validation_tests": [{"name": "...", "method": "cli", "command": "...",
                           "expected": "...", "source": "..."}],
@@ -121,9 +143,25 @@ present with at least one entry, or the output will be rejected):
   }]
 }
 
-CRITICAL: emit ALL four top-level keys. Do NOT emit only finding/root_cause/impact
-without the pathways array — the pathways array is what carries the actual
-adapted steps and is what the parser reads. Emit ONLY the JSON. No prose.
+CRITICAL SHAPE RULES:
+- `remediation_steps` is an array of OBJECTS: {"step": "...", "source": "...", "source_url": "..."}
+- `rollback_plan.steps` is an array of OBJECTS: {"step": "...", "source": "...", "source_url": "..."}
+  NOT strings. Each entry MUST have all three keys: step, source, source_url.
+- `validation_tests` entries MUST have: name, method, command, expected, source.
+
+EXAMPLE of a correct rollback_plan.steps entry:
+  "steps": [
+    {
+      "step": "Restore the backup and re-apply to revert changes.\\n\\nCommand:\\n    cp /opt/vuln-labs/cspm-lab/main.tf.bak-20260825 /opt/vuln-labs/cspm-lab/main.tf && cd /opt/vuln-labs/cspm-lab && terraform apply -auto-approve\\n\\nWhy: Restoring from backup and re-applying ensures infrastructure returns to pre-fix state.",
+      "source": "HashiCorp Terraform Docs",
+      "source_url": "https://developer.hashicorp.com/terraform/tutorials/state/state-cli"
+    }
+  ]
+
+WRONG (will fail validation):
+  "steps": ["Restore and apply\\n\\n```bash\\ncp ... && terraform apply -auto-approve\\n```"]
+
+Emit ONLY the JSON. No prose.
 """
 
 
@@ -529,6 +567,82 @@ def _ensure_rescan_in_validation(
 
 
 # =============================================================================
+# Structural repair — coerce common LLM output malformations pre-parse
+# =============================================================================
+def _structural_repair(text: str) -> str:
+    """Fix known structural issues in the adaptation LLM's JSON output BEFORE
+    Pydantic validation. Deterministic string transforms — no LLM calls.
+
+    The most common failure (observed repeatedly in traces): the LLM emits
+    rollback_plan.steps as an array of STRINGS instead of objects with
+    {step, source, source_url}. Same issue occasionally hits remediation_steps.
+
+    This repair pass converts:
+        "steps": ["Restore and apply\n\n```bash\n...```"]
+    into:
+        "steps": [{"step": "Restore and apply\n\n```bash\n...```",
+                   "source": "Knowledge Base", "source_url": ""}]
+
+    Scanner-agnostic: operates on JSON structure, not content.
+    """
+    import json as _json  # noqa: PLC0415
+
+    try:
+        data = _json.loads(text)
+    except (ValueError, TypeError):
+        # Not valid JSON — can't repair structurally, let the parser handle it
+        return text
+
+    if not isinstance(data, dict):
+        return text
+
+    def _coerce_step_array(steps):
+        """Convert a list of strings into list of step objects."""
+        if not isinstance(steps, list):
+            return steps
+        repaired = []
+        for item in steps:
+            if isinstance(item, str):
+                repaired.append(
+                    {
+                        "step": item,
+                        "source": "Knowledge Base",
+                        "source_url": "",
+                    }
+                )
+            elif isinstance(item, dict) and "step" in item:
+                # Already an object but might be missing source/source_url
+                item.setdefault("source", "Knowledge Base")
+                item.setdefault("source_url", "")
+                repaired.append(item)
+            else:
+                repaired.append(item)
+        return repaired
+
+    # Walk pathways → each pathway's rollback_plan.steps + remediation_steps
+    pathways = data.get("pathways")
+    if isinstance(pathways, list):
+        for pathway in pathways:
+            if not isinstance(pathway, dict):
+                continue
+            # Repair rollback_plan.steps (the most frequent failure)
+            rp = pathway.get("rollback_plan")
+            if isinstance(rp, dict):
+                if "steps" in rp:
+                    rp["steps"] = _coerce_step_array(rp["steps"])
+                # Also repair rollback_plan.validation if present
+                if "validation" in rp and isinstance(rp["validation"], list):
+                    for v in rp["validation"]:
+                        if isinstance(v, dict):
+                            v.setdefault("source", "Knowledge Base")
+            # Repair remediation_steps (less common but same class of bug)
+            if "remediation_steps" in pathway:
+                pathway["remediation_steps"] = _coerce_step_array(pathway["remediation_steps"])
+
+    return _json.dumps(data)
+
+
+# =============================================================================
 # Parse adaptation LLM output
 # =============================================================================
 def _parse_adaptation_output(
@@ -577,10 +691,21 @@ def _parse_adaptation_output(
 
     last_err = None
     for candidate in candidates:
+        # Apply structural repair before Pydantic validation — fixes the
+        # recurring "rollback_plan.steps should be an object" error where
+        # the LLM emits steps as strings instead of {step, source, source_url}
+        repaired = _structural_repair(candidate)
         try:
-            return LLMRemediationOutput.model_validate_json(candidate)
+            return LLMRemediationOutput.model_validate_json(repaired)
         except Exception as e:  # noqa: BLE001
             last_err = e
+            # If repair didn't help, try the original too (in case repair
+            # itself broke something — belt and suspenders)
+            if repaired != candidate:
+                try:
+                    return LLMRemediationOutput.model_validate_json(candidate)
+                except Exception:  # noqa: BLE001, S110
+                    pass
             continue
 
     if capture_error is not None and last_err is not None:
