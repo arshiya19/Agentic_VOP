@@ -248,6 +248,7 @@ _SOURCE_HINT: dict[str, Family] = {
     "sonarqube": "injection",
     "semgrep-appsec": "injection",
     "semgrep": "injection",
+    "serverless": "injection",  # Semgrep-run rules over Lambda source; -ec2 suffix stripped by _canonical_source
     "burp-suite": "injection",
     "burp": "injection",
     "zap": "injection",
