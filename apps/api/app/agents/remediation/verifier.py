@@ -616,7 +616,23 @@ def verify_output(
                     candidates.append((p_idx, step_num, original_url, cmd))
 
     # ---- 2. Cross-source verify up to N unique commands ----
-    to_verify = candidates[:max_commands_to_verify]
+    # LOCAL knob (SA3_DISABLE_VERIFICATION_PASS=1) — skip the expensive web-search
+    # loop that cross-checks each command against 2+ sources. Section 1 (destructive
+    # + placeholder scans) and section 3 (depth checks) still run. Saves ~10-15s
+    # per package + ~4 tool calls; the scanner-provided guideline URL is already
+    # authoritative for these fixes.
+    import os as _os  # noqa: PLC0415
+
+    _skip_xverify = _os.getenv("SA3_DISABLE_VERIFICATION_PASS", "").lower() in ("1", "true", "yes")
+    to_verify = [] if _skip_xverify else candidates[:max_commands_to_verify]
+    if _skip_xverify and candidates:
+        emit_fn(
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"Cross-source verification skipped (SA3_DISABLE_VERIFICATION_PASS=1) — "
+            f"would have verified {min(len(candidates), max_commands_to_verify)} command(s)",
+        )
     for _p_idx, step_num, original_url, cmd in to_verify:
         allowed, _ = budget.can_call()
         if not allowed:

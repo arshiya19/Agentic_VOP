@@ -45,6 +45,11 @@ from .planner import (
 )
 
 
+# Hard cap on packages generated per demo run. Belt-and-suspenders with the
+# sample_from_real cap — trims here even if upstream loosens later.
+_MAX_PACKAGES = 20
+
+
 def run_demo_remediation(run_id: str) -> dict:
     """Generate + persist RemediationPackages for every demo issue in this run.
 
@@ -129,15 +134,48 @@ def run_demo_remediation(run_id: str) -> dict:
 
     planned = persisted = failed = 0
 
-    for issue in issues:
+    # --- Per-file batching ---
+    # Group issues by the file they target. Multi-finding files get ONE
+    # package with N edit_file steps composed against a single view of the
+    # file (eliminates within-run state drift). Single-finding files keep
+    # current behavior. Universal — same code path for any scanner that
+    # emits file paths (semgrep, bandit, sonarqube, checkov, tfsec, trivy IaC).
+    file_groups = _group_issues_by_file(issues, _raw_for)
+    grouped_count = sum(1 for g in file_groups.values() if len(g) > 1)
+    if grouped_count:
+        emit_trace_demo(
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"📦 Per-file batching: {len(issues)} finding(s) → {len(file_groups)} package(s) "
+            f"({grouped_count} file(s) with multiple findings will be batched)",
+        )
+
+    for file_key, group in file_groups.items():
+        if persisted >= _MAX_PACKAGES:
+            emit_trace_demo(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                f"Package cap reached ({_MAX_PACKAGES}) — skipping remaining "
+                f"{len(file_groups) - persisted - failed} file group(s) this run",
+            )
+            break
+
+        # Use the highest-severity finding in the group as the "primary"
+        # (for issue_id / family / pattern / asset lookup) — other findings
+        # in the group ride along in the payload as additional_findings.
+        primary = _select_primary(group)
+        related = [i for i in group if i.get("id") != primary.get("id")]
+
         try:
-            family = classify_finding(issue, raw=_raw_for(issue))
+            family = classify_finding(primary, raw=_raw_for(primary))
             if family == "unknown":
                 emit_trace_demo(
                     run_id,
                     "sub-agent-3",
                     "ERROR",
-                    f"Issue {issue.get('id')} did not classify — skipping",
+                    f"Primary issue {primary.get('id')} in file group did not classify — skipping",
                 )
                 failed += 1
                 continue
@@ -148,15 +186,30 @@ def run_demo_remediation(run_id: str) -> dict:
                     run_id,
                     "sub-agent-3",
                     "ERROR",
-                    f"No pattern for family='{family}' — skipping issue {issue.get('id')}",
+                    f"No pattern for family='{family}' — skipping file={file_key}",
                 )
                 failed += 1
                 continue
 
-            asset = _lookup_demo_asset(all_assets, issue)
+            asset = _lookup_demo_asset(all_assets, primary)
 
-            raw = _raw_for(issue)
-            pkg = _plan_and_enrich(run_id, prompt_row, issue, pattern, asset, family, sb_pub, raw)
+            if related:
+                # Multi-finding batch — SA-3 sees primary + related, emits
+                # ONE package with edit_file steps for each
+                pkg = _plan_and_enrich_batch(
+                    run_id, prompt_row, primary, related, pattern, asset, family, sb_pub, _raw_for
+                )
+                emit_trace_demo(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"🧩 Batched {1 + len(related)} finding(s) for {file_key} into 1 package "
+                    f"(primary issue={primary['id']}, related={[i['id'] for i in related]})",
+                )
+            else:
+                pkg = _plan_and_enrich(
+                    run_id, prompt_row, primary, pattern, asset, family, sb_pub, _raw_for(primary)
+                )
             planned += 1
 
             _persist_to_demo(sb_demo, pkg, run_id)
@@ -166,7 +219,7 @@ def run_demo_remediation(run_id: str) -> dict:
                 run_id,
                 "sub-agent-3",
                 "MESSAGE",
-                f"Package generated for issue {issue['id']} "
+                f"Package generated for issue {primary['id']} "
                 f"(family={family}, confidence={pkg.pathways[pkg.recommended_pathway_index].confidence_score})",
             )
         except Exception as e:  # noqa: BLE001
@@ -175,8 +228,8 @@ def run_demo_remediation(run_id: str) -> dict:
                 run_id,
                 "sub-agent-3",
                 "ERROR",
-                f"Package generation failed for issue {issue.get('id')} "
-                f"({type(e).__name__}): {str(e)[:250]}",
+                f"Package generation failed for file={file_key} "
+                f"(primary issue={primary.get('id')}, {type(e).__name__}): {str(e)[:250]}",
             )
 
     emit_trace_demo(
@@ -193,6 +246,164 @@ def run_demo_remediation(run_id: str) -> dict:
         },
     )
     return {"planned": planned, "persisted": persisted, "failed": failed}
+
+
+# =============================================================================
+# Per-file batching helpers
+# =============================================================================
+# Group findings by the file they target so a single package can fix multiple
+# vulnerabilities in one place — eliminates within-run state drift AND matches
+# how enterprise coding agents (Cursor, Aider, Copilot Workspaces) work.
+# Universal — no scanner-specific logic, works for any tool that emits a file.
+
+_SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "": 0}
+
+
+def _file_key_for(issue: dict, raw: dict | None) -> str:
+    """Return the file path this issue targets. Empty string when unattributable
+    (findings without a file path fall through as their own group, one per issue,
+    which preserves current per-finding behavior for OS/CVE-style findings).
+
+    For file-based scanners (SAST, SCA, IaC): uses `_extract_iac_context` so
+    batching agrees with SA-3's downstream file_path resolution. Same
+    consequences noted for SCA (`raw.target` lowercase + relative-path
+    resolution → all findings on same file batch together).
+
+    For container-image scanners (trivy-image, grype-image, snyk-container):
+    returns an EMPTY string so each image finding falls through to a singleton
+    `__no_file__:<issue_id>` key — one package per CVE, not one batched package
+    covering the whole image.
+
+    Rationale: image fixes edit a Dockerfile line per CVE (e.g. add / bump a
+    `RUN apt-get install --only-upgrade` for that specific package). Batching
+    N CVEs into one package puts N Dockerfile edits into one LLM composition,
+    where a single bad edit takes down the whole batch — and the ONE rescan
+    the LLM emits typically covers only one check_id, so the honest counting
+    layer only credits 1 fix even when N landed. Per-CVE packages (as
+    historically worked) match the natural unit of work: one CVE → one edit
+    → one docker rebuild → one rescan for that specific CVE.
+
+    Per-file batching is genuinely helpful for SAST (all findings on one
+    source file share a plan/apply cycle) and SCA (all pip pins in one
+    requirements.txt). Image fixes don't share that "one file, N cheap edits"
+    property — every fix triggers a full docker rebuild anyway.
+    """
+    raw = raw or {}
+    src = (issue.get("source") or "").lower()
+    if "trivy-image" in src or "grype-image" in src or "snyk-container" in src:
+        return ""
+
+    ctx = _extract_iac_context(issue, raw)
+    fp = ctx.get("file_path")
+    if isinstance(fp, str) and fp:
+        return fp
+    # Fallback for older shapes / no path (OS CVEs) — keep as singleton
+    identity_file = (issue.get("asset_identity") or {}).get("file")
+    return identity_file or ""
+
+
+def _group_issues_by_file(issues: list[dict], raw_for) -> dict:
+    """Group issues by target file. Preserves insertion order (dict).
+
+    Returns dict[file_key, list[issues]]. Files sharing a path get one entry
+    with all their findings. Findings without a file path get a unique key
+    per issue (fall through as singletons) so we don't accidentally batch
+    unrelated no-path findings together.
+    """
+    groups: dict = {}
+    for iss in issues:
+        key = _file_key_for(iss, raw_for(iss))
+        if not key:
+            # Unattributable — synthesize a unique key so it stays a singleton
+            key = f"__no_file__:{iss.get('id')}"
+        groups.setdefault(key, []).append(iss)
+    return groups
+
+
+def _select_primary(group: list[dict]) -> dict:
+    """Pick the highest-risk finding in a file group as the primary.
+    Others ride along in the payload as additional_findings. Highest
+    derived_risk wins; ties broken by severity rank, then by earliest id."""
+
+    def _score(iss: dict) -> tuple[float, int, int]:
+        risk = iss.get("derived_risk")
+        risk_val = float(risk) if risk is not None else -1.0
+        sev_val = _SEVERITY_ORDER.get((iss.get("severity") or "").upper(), 0)
+        # Negate id so lower id wins the tiebreak (stable ordering)
+        return (risk_val, sev_val, -int(iss.get("id") or 0))
+
+    return max(group, key=_score)
+
+
+def _plan_and_enrich_batch(
+    run_id: str,
+    prompt_row: dict,
+    primary: dict,
+    related: list[dict],
+    pattern: dict,
+    asset: dict,
+    family: str,
+    sb_pub,
+    raw_for,
+) -> RemediationPackage:  # noqa: F821
+    """Plan a batched fix package covering primary + related findings for one file.
+
+    SA-3 sees the primary as the main issue and the related findings as
+    `additional_findings` in the user_payload. The SAST execution_context
+    guidance (in agent_v2) tells the LLM to emit ONE pathway containing
+    ONE backup step + N #EDIT_FILE steps (one per finding) + verify_absent
+    checks for each + a single re-scan at the end.
+    """
+    raw = raw_for(primary)
+    related_payloads = [
+        {
+            "id": r.get("id"),
+            "source_vuln_id": r.get("source_vuln_id"),
+            "cve_id": r.get("cve_id"),
+            "cwe_id": r.get("cwe_id"),
+            "title": r.get("title"),
+            "severity": r.get("severity"),
+            "description": r.get("description"),
+            "solution": r.get("solution"),
+            "remediation_suggestion": r.get("remediation_suggestion"),
+            # Include raw finding line-range hint if scanner provided one
+            "raw_hint": {
+                "check_id": (raw_for(r) or {}).get("check_id"),
+                "start_line": (raw_for(r) or {}).get("start", {}).get("line"),
+                "end_line": (raw_for(r) or {}).get("end", {}).get("line"),
+            },
+        }
+        for r in related
+    ]
+    # Delegate to the same LLM path used for single-issue planning. Batch
+    # context is attached to the issue dict itself (no signature churn) —
+    # downstream _issue_payload / remediate_agentic pick it up and surface
+    # `additional_findings` in the user_payload so SA-3 composes ONE
+    # package covering all.
+    covered_ids = [primary["id"]] + [r["id"] for r in related]
+    primary_with_batch = dict(primary)
+    primary_with_batch["_batch_related_findings"] = related_payloads
+    primary_with_batch["_batch_covered_ids"] = covered_ids
+    pkg = _plan_and_enrich(
+        run_id, prompt_row, primary_with_batch, pattern, asset, family, sb_pub, raw
+    )
+    # Persist the covered-issue list on the package pathway so master can
+    # count real findings per fix_run without a DB schema change. The
+    # `__batch_covered_ids__:` prefix is a machine-readable audit note in
+    # pathway.considerations (a list[str] the schema already supports).
+    try:
+        marker = f"__batch_covered_ids__:{','.join(str(i) for i in covered_ids)}"
+        for pathway in pkg.pathways:
+            existing = list(pathway.considerations or [])
+            existing.append(marker)
+            # Cap at schema max (15) — batch marker is important, drop oldest
+            # (informational) items if we exceed
+            if len(existing) > 15:
+                existing = existing[:14] + [marker]
+            pathway.considerations = existing
+    except Exception:  # noqa: BLE001, S110 — audit best-effort, never blocks
+        pass
+    return pkg
 
 
 def _lookup_demo_asset(all_assets: list[dict], issue: dict) -> dict:
@@ -329,8 +540,20 @@ def _plan_and_enrich(
             # For container-image scanners, resolve dockerfile_path dynamically
             # from connection_registry metadata (same lookup SA4 does). This gives
             # SA3's LLM the correct paths to generate commands against.
+            #
+            # Always override (not just when file_path is empty) because
+            # `_extract_iac_context` above populates file_path with a mangled
+            # image-reference-as-path for image findings (e.g. it prepends
+            # `settings.fixer_env2_path_prefix` to `vuln-java-image:latest`
+            # producing `/opt/vuln-labs/cspm-lab/vuln-java-image:latest`,
+            # which downstream `test -f` correctly reports as non-existent
+            # and fails the fix run at pre-flight). Overriding with the real
+            # Dockerfile path fixes that.
             source = (issue.get("source") or "").lower()
-            if not agent_issue.get("file_path") and "trivy-image" in source:
+            _is_image_scanner = (
+                "trivy-image" in source or "grype-image" in source or "snyk-container" in source
+            )
+            if _is_image_scanner:
                 try:
                     reg_row = (
                         sb_pub.table("connection_registry")
@@ -347,6 +570,27 @@ def _plan_and_enrich(
                             reg_meta.get("build_directory")
                             or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
                         )
+                        emit_trace_demo(
+                            run_id,
+                            "sub-agent-3",
+                            "MESSAGE",
+                            f"🖼 Image finding: overrode file_path with dockerfile_path="
+                            f"{reg_meta['dockerfile_path']} (from connection_registry)",
+                        )
+                    else:
+                        # Registry row exists but no dockerfile_path — clear the
+                        # mangled path so downstream `test -f` doesn't fail on it.
+                        # Fixer will still know it's a container_image finding
+                        # via execution_context, but won't try to grep a file.
+                        agent_issue["file_path"] = None
+                        emit_trace_demo(
+                            run_id,
+                            "sub-agent-3",
+                            "MESSAGE",
+                            f"⚠ Image finding: no dockerfile_path in connection_registry "
+                            f"for tool={issue.get('source')!r} — cleared mangled file_path "
+                            f"(fixer needs registry row with dockerfile_path)",
+                        )
                     # Also set resource_name to image ref from raw target
                     if not agent_issue.get("resource_name") and raw:
                         target = raw.get("target") or raw.get("Target") or ""
@@ -356,8 +600,17 @@ def _plan_and_enrich(
                     # Inject fix_pattern so SA3 knows the correct fix shape for this image type
                     if reg_meta.get("fix_pattern"):
                         agent_issue["fix_pattern"] = reg_meta["fix_pattern"]
-                except Exception:  # noqa: BLE001, S110
-                    pass
+                except Exception as _e:  # noqa: BLE001
+                    # Registry lookup failed entirely — clear mangled path so
+                    # pre-flight doesn't fail on it.
+                    agent_issue["file_path"] = None
+                    emit_trace_demo(
+                        run_id,
+                        "sub-agent-3",
+                        "MESSAGE",
+                        f"⚠ Image finding: connection_registry lookup failed "
+                        f"({type(_e).__name__}) — cleared mangled file_path",
+                    )
 
             agent_result = run_agentic_planner(
                 issue=agent_issue,

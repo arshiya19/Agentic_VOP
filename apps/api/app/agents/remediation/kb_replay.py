@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ...models import LLMRemediationOutput
 from ..llm import get_chat_llm
@@ -99,11 +99,12 @@ RULES:
 5. Keep all source/source_url fields from the recipe unchanged.
 6. Emit valid JSON matching the OUTPUT SCHEMA exactly.
 
-OUTPUT SCHEMA:
+OUTPUT SCHEMA (all four top-level keys REQUIRED — `pathways` array MUST be
+present with at least one entry, or the output will be rejected):
 {
-  "finding": "<1-2 sentences>",
-  "root_cause": "<1-2 sentences>",
-  "impact": "<1-2 sentences>",
+  "finding": "<1-2 sentences, 20-400 chars>",
+  "root_cause": "<1-2 sentences, 20-400 chars>",
+  "impact": "<1-2 sentences, 20-400 chars>",
   "pathways": [{
     "objective": "<1 sentence>",
     "security_coverage": "complete",
@@ -120,7 +121,9 @@ OUTPUT SCHEMA:
   }]
 }
 
-Emit ONLY the JSON. No prose, no explanation.
+CRITICAL: emit ALL four top-level keys. Do NOT emit only finding/root_cause/impact
+without the pathways array — the pathways array is what carries the actual
+adapted steps and is what the parser reads. Emit ONLY the JSON. No prose.
 """
 
 
@@ -129,8 +132,17 @@ def _build_adaptation_messages(
     issue: dict,
     family: str,
     iac_context: dict,
+    target_file_content: str | None = None,
+    target_file_truncated: bool = False,
 ) -> list:
-    """Build the LLM messages for the adaptation call."""
+    """Build the LLM messages for the adaptation call.
+
+    When `target_file_content` is provided, it's injected as a GROUND TRUTH
+    message BEFORE the recipe payload. The LLM composes old_text against the
+    NEW file's real content instead of blindly copying literals from the KB
+    recipe's source file. This eliminates the cross-file phantom-success
+    class of bug (KB recipe from config.py applied blind to auth.py).
+    """
     # Parse recipe steps
     recipe_steps = recipe_row.get("remediation_steps") or []
     if isinstance(recipe_steps, str):
@@ -173,10 +185,25 @@ def _build_adaptation_messages(
         default=str,
     )
 
-    return [
-        SystemMessage(content=_ADAPTATION_SYSTEM_PROMPT),
-        HumanMessage(content=user_content),
-    ]
+    messages = [SystemMessage(content=_ADAPTATION_SYSTEM_PROMPT)]
+    if target_file_content:
+        target_file = iac_context.get("file_path") or "<unknown>"
+        trunc_note = " (TRUNCATED)" if target_file_truncated else ""
+        messages.append(
+            HumanMessage(
+                content=(
+                    f"# GROUND TRUTH — actual current content of {target_file}{trunc_note}\n"
+                    f"# The proven_recipe below was captured from a DIFFERENT file. Its\n"
+                    f"# `remediation_steps` contain literal old_text values from THAT file.\n"
+                    f"# When you emit adapted steps, compose old_text from the actual\n"
+                    f"# bytes below — DO NOT copy the recipe's literals verbatim if this\n"
+                    f"# file uses different variable names / strings / positions.\n\n"
+                    f"{target_file_content}"
+                )
+            )
+        )
+    messages.append(HumanMessage(content=user_content))
+    return messages
 
 
 # =============================================================================
@@ -250,9 +277,57 @@ def try_kb_replay(
         f"Adapting proven recipe via constrained LLM call...",
     )
 
-    # 3. Build adaptation messages and call LLM
+    # 3. Pre-fetch the target file content so the adaptation LLM can compose
+    #    old_text against real bytes (Fix A). Prevents cross-file phantom
+    #    successes where a KB recipe's literals from file X get blindly
+    #    reused on file Y that doesn't contain them. Best-effort — if fetch
+    #    fails, adaptation still runs blind (falls back to prior behavior).
+    target_content: str | None = None
+    target_truncated = False
+    target_path = iac_context.get("file_path")
+    if target_path and isinstance(target_path, str) and target_path.startswith("/"):
+        try:
+            from .tools.file_fetch import fetch_file  # noqa: PLC0415
+            from .tools.budget import AgentBudget  # noqa: PLC0415
+
+            # Small budget just for this one fetch — we're not doing web research
+            _kb_budget = AgentBudget(max_calls=2, max_cost_usd=0.10)
+            _prefetch = fetch_file(
+                target_path,
+                _kb_budget,
+                target_instance_id=None,  # falls back to settings.fixer_env2_instance_id
+                run_id=run_id,
+                emit_fn=emit_fn,
+            )
+            if _prefetch.get("exists") and _prefetch.get("content"):
+                target_content = _prefetch["content"]
+                target_truncated = bool(_prefetch.get("truncated"))
+                emit_fn(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"📎 KB adapter pre-fetched {_prefetch['content_length']} chars of "
+                    f"{target_path} — recipe will be adapted to actual file bytes",
+                )
+        except Exception as _e:  # noqa: BLE001
+            emit_fn(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                f"⚠ KB adapter file_fetch skipped ({type(_e).__name__}: {str(_e)[:100]}) "
+                f"— falling back to blind adaptation",
+            )
+
+    # 4. Build adaptation messages and call LLM
     try:
-        messages = _build_adaptation_messages(candidate, issue, family, iac_context)
+        messages = _build_adaptation_messages(
+            candidate,
+            issue,
+            family,
+            iac_context,
+            target_file_content=target_content,
+            target_file_truncated=target_truncated,
+        )
 
         llm = get_chat_llm(
             run_id=run_id,
@@ -269,18 +344,78 @@ def try_kb_replay(
         )
 
         # Parse the response as LLMRemediationOutput
-        # Try direct parse first, then extract JSON from fences
-        output = _parse_adaptation_output(text)
+        # Try direct parse first, then extract JSON from fences.
+        # capture_error collects the pydantic ValidationError so we can feed
+        # the EXACT missing/wrong field back to the LLM on retry.
+        first_errors: list = []
+        output = _parse_adaptation_output(text, capture_error=first_errors)
 
         if output is None:
+            # ONE retry with the parse error fed back. Costs 1 extra LLM call
+            # (~$0.02, ~5s) vs falling through to full agentic path (~5-15 calls,
+            # ~60-90s, ~$0.10). We now pass the EXACT pydantic validation error
+            # to the LLM so it knows precisely which field is missing/wrong,
+            # rather than a generic "shape wrong" hint that it may not act on.
+            first_err = first_errors[0] if first_errors else "unknown parse error"
             emit_fn(
                 run_id,
                 "sub-agent-3",
-                "ERROR",
-                f"📚 KB replay: adaptation LLM returned unparseable output "
-                f"(first 200 chars: {text[:200]!r}) — falling through to agentic path.",
+                "MESSAGE",
+                f"📚 KB replay: first adaptation attempt failed to parse — "
+                f"validation error: {first_err[:220]}. Retrying with feedback...",
             )
-            return None, None
+            retry_messages = messages + [
+                AIMessage(content=text),
+                HumanMessage(
+                    content=(
+                        "Your previous response failed strict schema validation with this "
+                        f"EXACT pydantic error:\n\n{first_err}\n\n"
+                        "Fix ONLY the specific field(s) named in the error above. Preserve "
+                        "every other value you already emitted. The schema requires: "
+                        "top-level `finding`/`root_cause`/`impact` (each 20-400 chars) plus "
+                        "`pathways` (array of 1-3 entries). Each pathway needs objective, "
+                        "security_coverage, remediation_steps, rollback_plan (with supported, "
+                        "objective, steps, validation, explanation), validation_tests, "
+                        "test_scripts, execution_strategy, advantages, considerations. "
+                        "Emit ONLY the corrected JSON, no prose."
+                    )
+                ),
+            ]
+            retry_errors: list = []
+            try:
+                retry_response = llm.invoke(retry_messages)
+                retry_text = (
+                    retry_response.content
+                    if isinstance(retry_response.content, str)
+                    else json.dumps(retry_response.content)
+                )
+                output = _parse_adaptation_output(retry_text, capture_error=retry_errors)
+            except Exception as retry_err:  # noqa: BLE001
+                emit_fn(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"📚 KB replay: retry LLM call raised "
+                    f"({type(retry_err).__name__}: {str(retry_err)[:100]})",
+                )
+                output = None
+
+            if output is None:
+                retry_err_msg = retry_errors[0] if retry_errors else "no retry error captured"
+                emit_fn(
+                    run_id,
+                    "sub-agent-3",
+                    "ERROR",
+                    f"📚 KB replay: adaptation output unparseable after 1 retry — "
+                    f"retry validation error: {retry_err_msg[:220]}. Falling through to agentic.",
+                )
+                return None, None
+            emit_fn(
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
+                "📚 KB replay: retry succeeded — proceeding with adapted recipe.",
+            )
 
         # 4. Ensure validation_tests include the re-scan from the KB entry.
         # The adaptation LLM sometimes drops or truncates validation_tests.
@@ -396,17 +531,26 @@ def _ensure_rescan_in_validation(
 # =============================================================================
 # Parse adaptation LLM output
 # =============================================================================
-def _parse_adaptation_output(text: str) -> LLMRemediationOutput | None:
+def _parse_adaptation_output(
+    text: str, capture_error: list | None = None
+) -> LLMRemediationOutput | None:
     """Parse the adaptation LLM's output as LLMRemediationOutput.
 
     Handles:
         - Bare JSON
         - JSON inside ```json ... ``` fences
         - JSON with leading/trailing prose
+
+    If `capture_error` is a list, the last pydantic ValidationError message is
+    appended to it so callers can surface the exact reason parsing failed
+    (missing required field, wrong type, etc.). Only errors from the FINAL
+    parse attempt survive — earlier attempt errors are overwritten.
     """
     import re  # noqa: PLC0415
 
     if not text or not text.strip():
+        if capture_error is not None:
+            capture_error.append("empty or whitespace-only response")
         return None
 
     # Try bare parse
@@ -431,10 +575,18 @@ def _parse_adaptation_output(text: str) -> LLMRemediationOutput | None:
                     candidates.append(text[start : i + 1])
                     break
 
+    last_err = None
     for candidate in candidates:
         try:
             return LLMRemediationOutput.model_validate_json(candidate)
-        except Exception:  # noqa: BLE001, S112
+        except Exception as e:  # noqa: BLE001
+            last_err = e
             continue
 
+    if capture_error is not None and last_err is not None:
+        # Compact the pydantic error to a single line — usually the first 2-3
+        # error entries are the most informative (missing required field name,
+        # wrong type at path). Full traces are enormous.
+        err_str = str(last_err).replace("\n", " ")[:400]
+        capture_error.append(err_str)
     return None

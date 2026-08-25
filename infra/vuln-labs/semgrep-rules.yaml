@@ -1,0 +1,221 @@
+rules:
+  # --- SQL Injection (CWE-89) ---
+  - id: sql-injection-format-string
+    patterns:
+      - pattern-either:
+          - pattern: $CONN.execute(f"...{$VAR}...")
+          - pattern: $CONN.execute("..." + $VAR + "...")
+    message: >
+      SQL injection via string formatting. Use parameterized queries instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  - id: sql-injection-fstring-variable
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $QUERY = f"...{$VAR}..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+          - pattern: |
+              $QUERY = "..." + $VAR + "..."
+              ...
+              $CURSOR = $CONN.execute($QUERY)
+    message: >
+      SQL injection via string formatting in variable. Use parameterized queries.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  # --- XSS / Reflected Input (CWE-79) ---
+  - id: xss-render-template-string
+    patterns:
+      - pattern-either:
+          - pattern: render_template_string("..." + $VAR + "...")
+          - pattern: render_template_string(f"...{$VAR}...")
+    message: >
+      XSS via unsanitized user input in render_template_string. Escape user input.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  - id: xss-formatted-html-response
+    pattern: |
+      $HTML = f"...{$VAR}..."
+      ...
+      return render_template_string($HTML)
+    message: >
+      XSS via user input embedded in HTML string passed to render_template_string.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  # --- Flask Debug Mode (CWE-489) ---
+  - id: flask-debug-enabled
+    pattern: $APP.run(..., debug=True, ...)
+    message: Flask debug mode enabled in production.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-489"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+
+  # --- Hardcoded Secrets (CWE-798) ---
+  - id: hardcoded-secret-key
+    patterns:
+      - pattern-either:
+          - pattern: SECRET_KEY = "..."
+          - pattern: API_TOKEN = "..."
+          - pattern: DB_PASSWORD = "..."
+          - pattern: AWS_ACCESS_KEY_ID = "..."
+          - pattern: AWS_SECRET_ACCESS_KEY = "..."
+    message: >
+      Hardcoded credential or secret in source code. Use environment variables.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-798"]
+      owasp: ["A07:2021 - Identification and Authentication Failures"]
+
+  # --- Weak Hashing (CWE-328) ---
+  - id: weak-hash-md5
+    pattern: hashlib.md5(...)
+    message: >
+      Weak hash algorithm MD5 used. Use SHA-256 or bcrypt for password hashing.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-328"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+
+  - id: weak-hash-sha1
+    pattern: hashlib.sha1(...)
+    message: >
+      Weak hash algorithm SHA1 used. Use SHA-256 or stronger for security tokens.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-328"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+
+  # --- Path Traversal (CWE-22) ---
+  - id: path-traversal-open
+    patterns:
+      - pattern-either:
+          - pattern: open(os.path.join($DIR, $USERINPUT), ...)
+          - pattern: send_file(open(os.path.join($DIR, $USERINPUT), ...), ...)
+    message: >
+      Path traversal — user-controlled filename passed to os.path.join + open.
+      Validate that the resolved path stays within the intended directory.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-22"]
+      owasp: ["A01:2021 - Broken Access Control"]
+
+  # --- Unrestricted File Upload (CWE-434) ---
+  - id: unrestricted-file-upload
+    pattern: $FILE.save(os.path.join($DIR, $FILE.filename))
+    message: >
+      Unrestricted file upload — file saved with user-supplied filename without
+      extension or content-type validation.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-434"]
+      owasp: ["A04:2021 - Insecure Design"]
+
+  # --- SSRF (CWE-918) ---
+  - id: ssrf-requests-get
+    pattern: requests.get($URL)
+    message: >
+      SSRF — user-controlled URL passed to requests.get. Validate against an allowlist.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+      owasp: ["A10:2021 - Server-Side Request Forgery"]
+
+  - id: ssrf-urllib-urlopen
+    pattern: urllib.request.urlopen($URL)
+    message: >
+      SSRF — user-controlled URL passed to urllib.request.urlopen.
+      Validate against an allowlist.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+      owasp: ["A10:2021 - Server-Side Request Forgery"]
+
+  # --- Command Injection (CWE-78) ---
+  - id: command-injection-os-system
+    pattern: os.system("..." + $VAR)
+    message: >
+      Command injection via os.system with concatenated user input.
+      Use subprocess with a list of arguments instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      owasp: ["A03:2021 - Injection"]
+      confidence: HIGH
+
+  - id: command-injection-subprocess-shell
+    pattern: subprocess.run($CMD, shell=True, ...)
+    message: >
+      Command injection risk — subprocess.run with shell=True.
+      Use shell=False and pass arguments as a list.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      owasp: ["A03:2021 - Injection"]
+
+  # --- Insecure Deserialization (CWE-502) ---
+  - id: insecure-deserialization-pickle
+    pattern: pickle.loads(...)
+    message: >
+      Insecure deserialization — pickle.loads on potentially untrusted data.
+      Use json.loads or a safe serialization format.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+      owasp: ["A08:2021 - Software and Data Integrity Failures"]
+
+  # --- Weak Random (CWE-330) ---
+  - id: weak-random-token
+    pattern: random.randint(...)
+    message: >
+      Weak randomness — random.randint used for security-sensitive token.
+      Use secrets.token_hex() or secrets.randbelow() instead.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-330"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+
+  # --- Dangerous Eval (CWE-95) ---
+  - id: dangerous-eval
+    pattern: eval($EXPR)
+    message: >
+      Dangerous eval() on potentially untrusted input. Use ast.literal_eval()
+      for safe expression evaluation.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-95"]
+      owasp: ["A03:2021 - Injection"]

@@ -211,7 +211,11 @@ class StrategyOutcome(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["success", "failed", "rolled_back"]
+    # "partial_success" — batch mode outcome when SOME of the file's re-scan
+    # tests pass and SOME fail. File is KEPT as-is (good edits preserved),
+    # unfixed findings remain. Reported honestly instead of rolling everything
+    # back to zero fixes.
+    status: Literal["success", "partial_success", "failed", "rolled_back"]
     step_results: list[StepResult] = Field(default_factory=list)
     validation_results: list[ValidationResult] = Field(default_factory=list)
     rollback_results: list[RollbackResult] = Field(default_factory=list)

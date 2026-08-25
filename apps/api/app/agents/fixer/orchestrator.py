@@ -33,6 +33,8 @@ from .persistence import (
     set_terraform_plan_output,
 )
 from .strategies.base import BaseFixStrategy
+from .strategies.code_edit_strategy import CodeEditStrategy
+from .strategies.dependency_strategy import DependencyStrategy
 from .strategies.iac_strategy import IaCStrategy
 from .strategies.image_strategy import ImageStrategy
 from .strategies.os_strategy import OSStrategy
@@ -46,9 +48,9 @@ _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
     "iac": IaCStrategy,
     "image": ImageStrategy,  # trivy-image (container image OS pkgs)
     "os": OSStrategy,  # trivy-os / tenable / qualys (host apt/yum)
-    # Phase-2 additions land here:
-    # "dependency": DependencyStrategy,   # trivy-fs / snyk-appsec (app pkgs)
-    # "code_edit":  CodeEditStrategy,     # semgrep / bandit (source edits)
+    "code_edit": CodeEditStrategy,  # semgrep / bandit / sonarqube (source edits)
+    "dependency": DependencyStrategy,  # trivy-fs / snyk-appsec (manifest edits)
+    # Phase-3 additions land here:
     # "cli":        CliStrategy,          # aws-cli direct cloud fixes
 }
 
@@ -166,7 +168,13 @@ def run_fixer(
     if not FixerConfig.allow_concurrent_runs:
         import time  # noqa: PLC0415 — local import; keeps top-of-file clean
 
-        LOCK_WAIT_MAX_S = 300  # 5 min total wait
+        # 30 min total wait (was 5). Sized to survive a slow SA-4 fix chain
+        # (~90s each × 20 packages = 30 min worst case) so a legitimately
+        # long-running fix upstream doesn't cause downstream package casualties.
+        # Trace we saw: 6 packages of 20 timed out at 300s while a stuck fix_run
+        # from a prior killed uvicorn held the lock. 1800s gives comfortable
+        # headroom even if a real (not stuck) fix run takes its full time.
+        LOCK_WAIT_MAX_S = 1800
         LOCK_POLL_INTERVAL_S = 10
         waited_s = 0
         other = any_concurrent_run(sb)
@@ -239,8 +247,25 @@ def run_fixer(
     # 3b. For container-image scanners, resolve dockerfile_path dynamically
     #     from connection_registry metadata. Avoids hardcoding per-image paths
     #     in ImageStrategy — any new scanner just needs metadata filled in Supabase.
+    #
+    #     Always override (not just when file_path is empty) — `_extract_iac_context`
+    #     populates file_path with a mangled image-reference-as-path for image
+    #     findings (e.g. prepends `settings.fixer_env2_path_prefix` to
+    #     `vuln-java-image:latest` producing `/opt/vuln-labs/cspm-lab/vuln-java-image:latest`,
+    #     a fake path that fails ImageStrategy's pre-flight `test -f`). Override with
+    #     the real Dockerfile path, or clear to None so ImageStrategy uses its
+    #     _DEFAULT_DOCKERFILE fallback.
+    #
+    #     Sibling image scanners (grype-image, snyk-container) get the same treatment
+    #     — category-based, not rule-specific.
     source = issue_row.get("source") or ""
-    if not iac_ctx.get("file_path") and "trivy-image" in source.lower():
+    _source_lower = source.lower()
+    _is_image_scanner = (
+        "trivy-image" in _source_lower
+        or "grype-image" in _source_lower
+        or "snyk-container" in _source_lower
+    )
+    if _is_image_scanner:
         try:
             from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
 
@@ -259,8 +284,13 @@ def run_fixer(
                 iac_ctx["working_directory"] = (
                     reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
                 )
-        except Exception:  # noqa: BLE001, S110
-            pass  # Fall through to hardcoded default in ImageStrategy
+            else:
+                # Registry lookup succeeded but no dockerfile_path — clear the
+                # mangled path so ImageStrategy falls back to its _DEFAULT_DOCKERFILE.
+                iac_ctx["file_path"] = None
+        except Exception:  # noqa: BLE001
+            # Registry lookup failed entirely — same fallback, clear mangled path.
+            iac_ctx["file_path"] = None
         # Also set resource_name to the image ref from raw target (e.g. "vuln-java-image:latest")
         if not iac_ctx.get("resource_name") and raw:
             target = raw.get("target") or raw.get("Target") or ""
@@ -683,10 +713,25 @@ def _run_lifecycle(
     #     check failure defeats the whole point of the closed loop.
     #   - Absent a scanner re-scan (SA3 v2.4 hard rule 17 violation), fall
     #     back to strict mode: any non-rescan failure triggers rollback.
-    rescan = next((v for v in validation_results if v.is_rescan), None)
+    # Collect ALL re-scan tests (batch mode emits one per finding — the old
+    # `next()` only picked the first, losing signal for the others).
+    all_rescans = [v for v in validation_results if v.is_rescan]
+    passed_rescans = [v for v in all_rescans if v.passed]
+    failed_rescans = [v for v in all_rescans if not v.passed]
+    # Primary rescan (for ancillary-vs-authoritative comparison downstream):
+    # the FIRST re-scan test. Kept for backward compat with single-fix packages.
+    rescan = all_rescans[0] if all_rescans else None
     non_rescan_failures = [v for v in validation_results if not v.is_rescan and not v.passed]
 
-    if rescan is not None and not rescan.passed:
+    # Rollback decision (updated 2026-08-21):
+    #   - ALL re-scans failed → rollback (nothing worked)
+    #   - SOME re-scans passed, SOME failed → PARTIAL SUCCESS
+    #     (keep the file — good edits stay applied. Unfixed findings noted
+    #     in error_message. This preserves the value of batching: one bad
+    #     LLM composition doesn't undo the good ones.)
+    #   - ALL re-scans passed → success (as before)
+    if all_rescans and not passed_rescans:
+        # Complete re-scan failure — rollback
         rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
         return StrategyOutcome(
             status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
@@ -695,7 +740,37 @@ def _run_lifecycle(
             rollback_results=rollback,
             backup_reference=backup.backup_reference,
             terraform_plan_output=plan_out,
-            error_message=f"Scanner re-scan still reports the finding: {rescan.actual[:300]}",
+            error_message=(
+                f"Scanner re-scan still reports the finding{'s' if len(failed_rescans) > 1 else ''}: "
+                f"{len(failed_rescans)} of {len(all_rescans)} re-scan(s) failed. "
+                f"First: {failed_rescans[0].actual[:200]}"
+            ),
+        )
+
+    if failed_rescans and passed_rescans:
+        # Batch mode with mixed re-scan outcomes: keep the file as-is,
+        # good edits stay applied. In master's report each finding shows
+        # up as "fixed" or "rolled back" individually — no new status
+        # vocabulary needed at the user layer.
+        emit_fn(
+            ctx.agent_run_id,
+            "sub-agent-4",
+            "MESSAGE",
+            f"🟡 Mixed outcome — {len(passed_rescans)} finding(s) fixed, "
+            f"{len(failed_rescans)} finding(s) rolled back. "
+            f"File kept as-is (good edits preserved). "
+            f"First unfixed: {failed_rescans[0].test_name}",
+        )
+        return StrategyOutcome(
+            status="partial_success",  # internal marker — persistence translates → "success" for DB
+            step_results=step_results,
+            validation_results=validation_results,
+            backup_reference=backup.backup_reference,
+            terraform_plan_output=plan_out,
+            error_message=(
+                f"{len(passed_rescans)} finding(s) fixed, {len(failed_rescans)} rolled back. "
+                f"Unfixed re-scans: {[r.test_name for r in failed_rescans][:5]}"
+            ),
         )
 
     if non_rescan_failures:

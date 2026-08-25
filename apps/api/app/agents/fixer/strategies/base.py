@@ -23,6 +23,8 @@ returning results with status=failed / passed=False.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
+from collections.abc import Callable
 
 from ..models import (
     BackupResult,
@@ -32,6 +34,57 @@ from ..models import (
     StepResult,
     ValidationResult,
 )
+
+
+# =============================================================================
+# Shared pre-flight: tool availability
+# =============================================================================
+def verify_tools(
+    executor: Any,
+    tools: list[str],
+    *,
+    emit: Callable[[str, str], None] | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Probe each tool with `<tool> --version 2>&1`. Return (checks, blocking_reason).
+
+    Generic — no per-tool special-casing. Any CLI that responds to `--version`
+    (pip, npm, docker, terraform, checkov, kubectl, mvn, ...) works. First
+    tool that exits non-zero produces a blocking_reason; caller returns
+    PreFlightResult(ready=False, ...) with it.
+
+    Purpose: distinguish a broken execution environment (pip corrupt, docker
+    daemon down) from a bad remediation plan. When a required tool is
+    missing, the fix_run is marked failed at pre-flight with a clear
+    error_message instead of running the whole plan and rolling back at
+    Step 4 with a generic "exit status 1".
+    """
+    checks: list[dict[str, Any]] = []
+    for tool in tools:
+        try:
+            r = executor.run_command(f"{tool} --version 2>&1", timeout_s=30)
+            exit_code = r.exit_code
+            output = ((r.stdout or "") + (r.stderr or "")).strip()
+        except Exception as e:  # noqa: BLE001 — treat any probe error as tool-unavailable
+            exit_code = -1
+            output = f"probe raised {type(e).__name__}: {str(e)[:200]}"
+
+        ok = exit_code == 0 and bool(output)
+        checks.append(
+            {"check": "tool_available", "tool": tool, "passed": ok, "exit_code": exit_code}
+        )
+        if emit is not None:
+            if ok:
+                first_line = output.splitlines()[0][:120]
+                emit("MESSAGE", f"✓ Pre-flight: {tool} available ({first_line})")
+            else:
+                emit("ERROR", f"✗ Pre-flight: {tool} unavailable — {output[:180] or 'no output'}")
+        if not ok:
+            return checks, (
+                f"Required tool {tool!r} is not usable on the target instance "
+                f"(exit={exit_code}). Output: {output[:400] or '(empty)'}. "
+                f"Fix the environment before re-running this remediation."
+            )
+    return checks, None
 
 
 # =============================================================================
