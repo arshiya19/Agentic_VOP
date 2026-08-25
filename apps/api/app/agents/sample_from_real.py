@@ -80,9 +80,9 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 # Each entry: source (matches issues.source exactly) → N issues to pick.
 _SOURCE_SCOOPS: dict[str, int] = {
     "checkov-ec2": 20,  # IaC misconfigurations (env2 focus — pinned picks land first, scoop fills to 20)
-    "trivy-image-ec2": 20,  # container image OS-package CVEs
-    "trivy-image-java-ec2": 4,  # Java image CVEs
-    "trivy-image-python-ec2": 4,  # Python image CVEs
+    "trivy-image-ec2": 20,  # container image OS-package CVEs (per-finding — no batching)
+    "trivy-image-java-ec2": 20,  # Java image CVEs (per-finding — no batching)
+    "trivy-image-python-ec2": 20,  # Python image CVEs (per-finding — no batching)
     "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
     "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
     "trivy-fs-ec2": 20,  # app-level dep CVEs (DependencyStrategy)

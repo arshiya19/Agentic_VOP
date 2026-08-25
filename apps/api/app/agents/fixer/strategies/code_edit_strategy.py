@@ -527,6 +527,19 @@ class CodeEditStrategy(BaseFixStrategy):
                 results.append(self._blocked_step(step_num, action_label, combined, safety.reason))
                 return results  # HALT — orchestrator triggers rollback
 
+            # Strategy policy hook — subclasses may skip runtime-mutating or
+            # env-dependent commands that a file-based scanner doesn't need.
+            # Returns None to run, or a reason string to skip.
+            skip_reason = self._should_skip_shell_step(combined, ctx)
+            if skip_reason:
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"⏭ Step {step_num} skipped by strategy policy: {skip_reason}",
+                )
+                results.append(self._skipped_step(step_num, action_label, skip_reason))
+                continue
+
             # Determine timeout
             timeout_s = self._per_step_timeout(combined)
 
@@ -802,6 +815,19 @@ class CodeEditStrategy(BaseFixStrategy):
             f"{'Source file restored.' if succeeded_ct == len(results) else 'Manual verification recommended.'}",
         )
         return results
+
+    # =========================================================================
+    # Strategy policy hook (subclasses override)
+    # =========================================================================
+    def _should_skip_shell_step(self, command: str, ctx: FixContext) -> str | None:  # noqa: ARG002
+        """Policy hook — return a reason string to skip this shell step, or None to run it.
+
+        Base = no policy (run everything that passes safety). Subclasses
+        override to enforce family-specific invariants (e.g. DependencyStrategy
+        skips runtime-mutating installs because a file-based scanner only
+        needs the manifest edited).
+        """
+        return None
 
     # =========================================================================
     # Helpers

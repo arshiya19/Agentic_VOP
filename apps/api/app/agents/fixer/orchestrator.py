@@ -247,8 +247,25 @@ def run_fixer(
     # 3b. For container-image scanners, resolve dockerfile_path dynamically
     #     from connection_registry metadata. Avoids hardcoding per-image paths
     #     in ImageStrategy — any new scanner just needs metadata filled in Supabase.
+    #
+    #     Always override (not just when file_path is empty) — `_extract_iac_context`
+    #     populates file_path with a mangled image-reference-as-path for image
+    #     findings (e.g. prepends `settings.fixer_env2_path_prefix` to
+    #     `vuln-java-image:latest` producing `/opt/vuln-labs/cspm-lab/vuln-java-image:latest`,
+    #     a fake path that fails ImageStrategy's pre-flight `test -f`). Override with
+    #     the real Dockerfile path, or clear to None so ImageStrategy uses its
+    #     _DEFAULT_DOCKERFILE fallback.
+    #
+    #     Sibling image scanners (grype-image, snyk-container) get the same treatment
+    #     — category-based, not rule-specific.
     source = issue_row.get("source") or ""
-    if not iac_ctx.get("file_path") and "trivy-image" in source.lower():
+    _source_lower = source.lower()
+    _is_image_scanner = (
+        "trivy-image" in _source_lower
+        or "grype-image" in _source_lower
+        or "snyk-container" in _source_lower
+    )
+    if _is_image_scanner:
         try:
             from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
 
@@ -267,8 +284,13 @@ def run_fixer(
                 iac_ctx["working_directory"] = (
                     reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
                 )
-        except Exception:  # noqa: BLE001, S110
-            pass  # Fall through to hardcoded default in ImageStrategy
+            else:
+                # Registry lookup succeeded but no dockerfile_path — clear the
+                # mangled path so ImageStrategy falls back to its _DEFAULT_DOCKERFILE.
+                iac_ctx["file_path"] = None
+        except Exception:  # noqa: BLE001
+            # Registry lookup failed entirely — same fallback, clear mangled path.
+            iac_ctx["file_path"] = None
         # Also set resource_name to the image ref from raw target (e.g. "vuln-java-image:latest")
         if not iac_ctx.get("resource_name") and raw:
             target = raw.get("target") or raw.get("Target") or ""

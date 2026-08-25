@@ -264,19 +264,36 @@ def _file_key_for(issue: dict, raw: dict | None) -> str:
     (findings without a file path fall through as their own group, one per issue,
     which preserves current per-finding behavior for OS/CVE-style findings).
 
-    Uses `_extract_iac_context` (the same file_path resolver SA-3 uses in
-    `_plan_and_enrich`) so batching-grouping and downstream planning agree on
-    which file each finding targets. Consequences of picking this over a
-    smaller ad-hoc field list:
-      - SCA (trivy-fs) findings whose raw uses `target` (lowercase, from
-        scan-server normalization) now batch instead of falling through.
-      - Relative paths get resolved to absolute (e.g. `requirements.txt` →
-        `/opt/vuln-labs/appsec-lab/requirements.txt`) so all findings on the
-        same file share ONE key regardless of how the scanner emitted the path.
-      - No scanner-specific logic here — any scanner _extract_iac_context
-        recognizes will batch consistently.
+    For file-based scanners (SAST, SCA, IaC): uses `_extract_iac_context` so
+    batching agrees with SA-3's downstream file_path resolution. Same
+    consequences noted for SCA (`raw.target` lowercase + relative-path
+    resolution → all findings on same file batch together).
+
+    For container-image scanners (trivy-image, grype-image, snyk-container):
+    returns an EMPTY string so each image finding falls through to a singleton
+    `__no_file__:<issue_id>` key — one package per CVE, not one batched package
+    covering the whole image.
+
+    Rationale: image fixes edit a Dockerfile line per CVE (e.g. add / bump a
+    `RUN apt-get install --only-upgrade` for that specific package). Batching
+    N CVEs into one package puts N Dockerfile edits into one LLM composition,
+    where a single bad edit takes down the whole batch — and the ONE rescan
+    the LLM emits typically covers only one check_id, so the honest counting
+    layer only credits 1 fix even when N landed. Per-CVE packages (as
+    historically worked) match the natural unit of work: one CVE → one edit
+    → one docker rebuild → one rescan for that specific CVE.
+
+    Per-file batching is genuinely helpful for SAST (all findings on one
+    source file share a plan/apply cycle) and SCA (all pip pins in one
+    requirements.txt). Image fixes don't share that "one file, N cheap edits"
+    property — every fix triggers a full docker rebuild anyway.
     """
-    ctx = _extract_iac_context(issue, raw or {})
+    raw = raw or {}
+    src = (issue.get("source") or "").lower()
+    if "trivy-image" in src or "grype-image" in src or "snyk-container" in src:
+        return ""
+
+    ctx = _extract_iac_context(issue, raw)
     fp = ctx.get("file_path")
     if isinstance(fp, str) and fp:
         return fp
@@ -523,8 +540,22 @@ def _plan_and_enrich(
             # For container-image scanners, resolve dockerfile_path dynamically
             # from connection_registry metadata (same lookup SA4 does). This gives
             # SA3's LLM the correct paths to generate commands against.
+            #
+            # Always override (not just when file_path is empty) because
+            # `_extract_iac_context` above populates file_path with a mangled
+            # image-reference-as-path for image findings (e.g. it prepends
+            # `settings.fixer_env2_path_prefix` to `vuln-java-image:latest`
+            # producing `/opt/vuln-labs/cspm-lab/vuln-java-image:latest`,
+            # which downstream `test -f` correctly reports as non-existent
+            # and fails the fix run at pre-flight). Overriding with the real
+            # Dockerfile path fixes that.
             source = (issue.get("source") or "").lower()
-            if not agent_issue.get("file_path") and "trivy-image" in source:
+            _is_image_scanner = (
+                "trivy-image" in source
+                or "grype-image" in source
+                or "snyk-container" in source
+            )
+            if _is_image_scanner:
                 try:
                     reg_row = (
                         sb_pub.table("connection_registry")
@@ -541,6 +572,27 @@ def _plan_and_enrich(
                             reg_meta.get("build_directory")
                             or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
                         )
+                        emit_trace_demo(
+                            run_id,
+                            "sub-agent-3",
+                            "MESSAGE",
+                            f"🖼 Image finding: overrode file_path with dockerfile_path="
+                            f"{reg_meta['dockerfile_path']} (from connection_registry)",
+                        )
+                    else:
+                        # Registry row exists but no dockerfile_path — clear the
+                        # mangled path so downstream `test -f` doesn't fail on it.
+                        # Fixer will still know it's a container_image finding
+                        # via execution_context, but won't try to grep a file.
+                        agent_issue["file_path"] = None
+                        emit_trace_demo(
+                            run_id,
+                            "sub-agent-3",
+                            "MESSAGE",
+                            f"⚠ Image finding: no dockerfile_path in connection_registry "
+                            f"for tool={issue.get('source')!r} — cleared mangled file_path "
+                            f"(fixer needs registry row with dockerfile_path)",
+                        )
                     # Also set resource_name to image ref from raw target
                     if not agent_issue.get("resource_name") and raw:
                         target = raw.get("target") or raw.get("Target") or ""
@@ -550,8 +602,17 @@ def _plan_and_enrich(
                     # Inject fix_pattern so SA3 knows the correct fix shape for this image type
                     if reg_meta.get("fix_pattern"):
                         agent_issue["fix_pattern"] = reg_meta["fix_pattern"]
-                except Exception:  # noqa: BLE001, S110
-                    pass
+                except Exception as _e:  # noqa: BLE001
+                    # Registry lookup failed entirely — clear mangled path so
+                    # pre-flight doesn't fail on it.
+                    agent_issue["file_path"] = None
+                    emit_trace_demo(
+                        run_id,
+                        "sub-agent-3",
+                        "MESSAGE",
+                        f"⚠ Image finding: connection_registry lookup failed "
+                        f"({type(_e).__name__}) — cleared mangled file_path",
+                    )
 
             agent_result = run_agentic_planner(
                 issue=agent_issue,

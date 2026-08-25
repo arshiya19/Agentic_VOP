@@ -379,6 +379,73 @@ def _version_key(v: str) -> tuple:
     return tuple(key)
 
 
+# =============================================================================
+# Dockerfile-path correction for image-strategy shell commands
+# =============================================================================
+# LLMs sometimes compose Dockerfile-editing shell commands with a wrong path
+# (e.g. `cp /opt/vuln-labs/cspm-lab/Python/Dockerfile ...` when the real path
+# is `/opt/vuln-labs/python-image-lab/Dockerfile`). Our planner + orchestrator
+# fixes correctly set ctx.file_path from connection_registry, but the LLM's
+# shell composition ignores that field and hallucinates from prompt examples.
+#
+# This helper detects Dockerfile path references in a shell command and, if
+# any point at a different absolute path than the known-correct one AND
+# share the same basename (e.g. both are `Dockerfile`), substitutes the
+# correct path. Basename-match guard prevents accidentally rewriting
+# intentionally-different files (Dockerfile.dev, Dockerfile.prod, etc.).
+#
+# Generic — no image-name or CVE-specific logic. Works for any image
+# strategy where ctx.file_path is known and shell commands reference a
+# Dockerfile with the same basename.
+# =============================================================================
+
+_DOCKERFILE_REF_RE = _re.compile(
+    r"""(['"]?)(/[\w./\-]*Dockerfile[\w.\-]*)\1"""
+)
+
+
+def fix_dockerfile_path_in_command(
+    command: str,
+    correct_path: str | None,
+) -> tuple[str, list[str]]:
+    """Substitute wrong Dockerfile paths in a shell command with the known-
+    correct path. Returns (possibly-modified command, list of substitutions
+    made — empty if no changes).
+
+    Substitution rules:
+      - Only fires if `correct_path` is a non-empty absolute path.
+      - Only substitutes when the wrong path's basename matches the correct
+        path's basename (e.g. both `Dockerfile`). Different basenames
+        (`Dockerfile.dev` vs `Dockerfile`) are left alone — the LLM may
+        have picked a different file intentionally.
+      - Preserves surrounding quotes (single/double/none) around the path.
+
+    Called by image_strategy before dispatching each shell block. Substitutions
+    are logged so the trace shows what was corrected and why.
+    """
+    if not correct_path or not correct_path.startswith("/") or not command:
+        return command, []
+    if "Dockerfile" not in command:
+        return command, []
+
+    correct_basename = correct_path.rsplit("/", 1)[-1]
+    subs: list[str] = []
+
+    def _replace(m: "_re.Match[str]") -> str:
+        quote = m.group(1)
+        path = m.group(2)
+        if path == correct_path:
+            return m.group(0)  # already correct
+        wrong_basename = path.rsplit("/", 1)[-1]
+        if wrong_basename != correct_basename:
+            return m.group(0)  # different file, don't touch
+        subs.append(f"{path} → {correct_path}")
+        return f"{quote}{correct_path}{quote}"
+
+    new_command = _DOCKERFILE_REF_RE.sub(_replace, command)
+    return new_command, subs
+
+
 def sanity_check_version_edit(spec: dict[str, str]) -> str | None:
     """Inspect an EDIT_FILE spec for common version-bump hallucinations.
 

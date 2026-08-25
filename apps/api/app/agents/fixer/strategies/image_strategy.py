@@ -760,6 +760,24 @@ class ImageStrategy(BaseFixStrategy):
                 return results
             self._emit(ctx, "MESSAGE", "   🛡 Safety check passed (no destructive patterns)")
 
+            # Auto-correct hallucinated Dockerfile paths — LLM sometimes emits
+            # `cp /opt/vuln-labs/cspm-lab/Python/Dockerfile ...` when the real
+            # dockerfile_path (from connection_registry) is
+            # `/opt/vuln-labs/python-image-lab/Dockerfile`. Only substitutes
+            # when basenames match (won't touch Dockerfile.dev if target is
+            # Dockerfile). Generic — no image/CVE-specific logic.
+            from ..tools.edit_file import fix_dockerfile_path_in_command  # noqa: PLC0415
+
+            _real_df = self._dockerfile_path(ctx)
+            combined, _df_subs = fix_dockerfile_path_in_command(combined, _real_df)
+            for _sub in _df_subs:
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"   🔧 Auto-corrected Dockerfile path in Step {i}: {_sub} "
+                    f"(LLM hallucinated a wrong path; real path from ctx.file_path used)",
+                )
+
             # Timeout chosen by command shape
             timeout = self._timeout_for(combined)
             self._emit(ctx, "MESSAGE", f"   ⏱ Timeout: {timeout}s (chosen based on command shape)")
