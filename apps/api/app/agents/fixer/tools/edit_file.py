@@ -399,9 +399,7 @@ def _version_key(v: str) -> tuple:
 # Dockerfile with the same basename.
 # =============================================================================
 
-_DOCKERFILE_REF_RE = _re.compile(
-    r"""(['"]?)(/[\w./\-]*Dockerfile[\w.\-]*)\1"""
-)
+_DOCKERFILE_REF_RE = _re.compile(r"""(['"]?)(/[\w./\-]*Dockerfile[\w.\-]*)\1""")
 
 
 def fix_dockerfile_path_in_command(
@@ -431,7 +429,7 @@ def fix_dockerfile_path_in_command(
     correct_basename = correct_path.rsplit("/", 1)[-1]
     subs: list[str] = []
 
-    def _replace(m: "_re.Match[str]") -> str:
+    def _replace(m: _re.Match[str]) -> str:
         quote = m.group(1)
         path = m.group(2)
         if path == correct_path:

@@ -75,7 +75,10 @@ _RUNTIME_IMPORT_CHECK_RE = re.compile(
 # behavior as before this helper existed.
 _MANIFEST_TOOLS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     # Python: requirements.txt / requirements-*.in / pyproject.toml / Pipfile / poetry.lock
-    (("requirements", ".txt", ".in", "pyproject.toml", "pipfile", "poetry.lock"), ("python3", "pip")),
+    (
+        ("requirements", ".txt", ".in", "pyproject.toml", "pipfile", "poetry.lock"),
+        ("python3", "pip"),
+    ),
     # Node: package.json / package-lock.json / yarn.lock / pnpm-lock.yaml
     (("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"), ("npm",)),
     # Ruby

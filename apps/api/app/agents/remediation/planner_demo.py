@@ -551,9 +551,7 @@ def _plan_and_enrich(
             # Dockerfile path fixes that.
             source = (issue.get("source") or "").lower()
             _is_image_scanner = (
-                "trivy-image" in source
-                or "grype-image" in source
-                or "snyk-container" in source
+                "trivy-image" in source or "grype-image" in source or "snyk-container" in source
             )
             if _is_image_scanner:
                 try:
