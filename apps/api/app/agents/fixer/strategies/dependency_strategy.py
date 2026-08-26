@@ -130,8 +130,11 @@ class DependencyStrategy(CodeEditStrategy):
             return PreFlightResult(ready=False, checks=checks, blocking_reason=blocking)
         return PreFlightResult(ready=True, checks=checks)
 
-    def _should_skip_shell_step(self, command: str, ctx: FixContext) -> str | None:  # noqa: ARG002
+    def _should_skip_shell_step(self, command: str, ctx: FixContext) -> str | None:
         """Skip runtime-mutating installs and runtime version checks.
+
+        Extends CodeEditStrategy's shared policy (cloud deploys, runtime
+        lookups) with dep-specific package-manager skips.
 
         Trivy-fs / snyk-appsec / dependabot / osv all scan the manifest file.
         A corrected pin in requirements.txt satisfies the re-scan; actually
@@ -139,8 +142,14 @@ class DependencyStrategy(CodeEditStrategy):
         break the shared sandbox (observed 2026-08-24: cryptography install
         broke pyOpenSSL, cascading rollbacks across every subsequent dep run).
 
-        The scanner re-scan step still runs (doesn't match either regex).
+        The scanner re-scan step still runs (doesn't match any of the skip regexes).
         """
+        # Delegate to CodeEditStrategy's parent policy first — cloud deploys,
+        # runtime lookups. If parent decides skip, honor it.
+        parent_reason = super()._should_skip_shell_step(command, ctx)
+        if parent_reason is not None:
+            return parent_reason
+
         # Don't touch the re-scan step — it must always run
         if self._looks_like_rescan(command):
             return None

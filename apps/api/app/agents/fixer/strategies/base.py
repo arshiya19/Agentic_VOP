@@ -22,9 +22,10 @@ returning results with status=failed / passed=False.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 from ..models import (
     BackupResult,
@@ -33,6 +34,70 @@ from ..models import (
     RollbackResult,
     StepResult,
     ValidationResult,
+)
+
+
+# =============================================================================
+# Shared skip-policy regexes — enforce the "static remediation" contract.
+#
+# The remediation service handles STATIC fixes (edit source, satisfy scanner).
+# It does NOT deploy, mutate cloud resources, or perform runtime verification.
+# Those belong to CI/CD and QA pipelines downstream. Every enterprise
+# remediation platform (Snyk, Kenna, Seemplicity, Armorcode) enforces this
+# separation — mixing them causes deploy failures to cascade as fix failures
+# and forces the fix env to hold prod-tier IAM permissions.
+#
+# When a plan step matches either regex, the strategy SKIPS it. The scanner
+# re-scan step (semgrep/checkov/trivy against the local file) is exempted by
+# strategies via their own _looks_like_rescan check before consulting these.
+# =============================================================================
+CLOUD_DEPLOY_RE = re.compile(
+    r"\b("
+    # AWS CLI — mutations & deploys across compute / secrets / IAM / net
+    r"aws\s+lambda\s+(update|create|delete|publish|add|remove)-|"
+    r"aws\s+secretsmanager\s+(create|update|put|delete|restore|rotate)-|"
+    r"aws\s+ssm\s+(put|delete|update)-parameter|"
+    r"aws\s+iam\s+(create|delete|attach|detach|put|update|add|remove)-|"
+    r"aws\s+ec2\s+(run|terminate|stop|start|create|delete|modify|attach|detach)-|"
+    r"aws\s+ecs\s+(update|create|delete|register|deregister)-|"
+    r"aws\s+eks\s+(update|create|delete|associate|disassociate)-|"
+    r"aws\s+cloudformation\s+(deploy|update-stack|create-stack|delete-stack|execute-change-set)|"
+    r"aws\s+s3api\s+(put|delete|create)-|"
+    # IaC deploy
+    r"terraform\s+(apply|destroy|import|taint)|"
+    r"serverless\s+(deploy|remove)|"
+    r"sam\s+(deploy|build|sync)|"
+    r"cdk\s+(deploy|destroy|bootstrap)|"
+    r"pulumi\s+(up|destroy|refresh)|"
+    # Container / K8s deploy
+    r"docker\s+(push|build|run|start)|"
+    r"kubectl\s+(apply|create|delete|patch|edit|replace|rollout|scale)|"
+    r"helm\s+(install|upgrade|uninstall|rollback)|"
+    r"kustomize\s+(build|edit)|"
+    # GCP & Azure equivalents
+    r"gcloud\s+(functions|run|compute|iam|kms)\s+(deploy|create|update|delete)|"
+    r"az\s+(functionapp|webapp|deployment|role|keyvault)\s+(create|update|deploy|delete)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+CLOUD_RUNTIME_LOOKUP_RE = re.compile(
+    r"\b("
+    # Runtime secret / config retrieval — meaningful only after deploy
+    r"aws\s+secretsmanager\s+get-secret-value|"
+    r"aws\s+ssm\s+get-parameter|"
+    # Any Lambda invoke/inspect on a deployed function.
+    # `aws lambda get-function` and its `-configuration`/`-code`/`-policy`
+    # variants all query deployed state — no signal for a static file fix.
+    r"aws\s+lambda\s+(invoke|get-function(-code|-configuration|-policy|-url-config)?)|"
+    r"aws\s+lambda\s+list-|"
+    # GCP/Azure equivalents
+    r"gcloud\s+secrets\s+versions\s+access|"
+    r"gcloud\s+functions\s+call|"
+    r"az\s+keyvault\s+secret\s+show|"
+    r"az\s+functionapp\s+function\s+invoke"
+    r")\b",
+    re.IGNORECASE,
 )
 
 
