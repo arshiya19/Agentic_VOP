@@ -53,7 +53,7 @@ from ..tools.terraform import (
     terraform_plan,
     terraform_version,
 )
-from .base import BaseFixStrategy
+from .base import BaseFixStrategy, runtime_lookup_skip_reason
 
 
 # =============================================================================
@@ -512,6 +512,33 @@ class IaCStrategy(BaseFixStrategy):
                     )
                 )
                 continue
+
+            # Universal validate-phase skip: runtime-lookup commands
+            # (aws lambda invoke, aws secretsmanager get-secret-value, aws
+            # ssm get-parameter, etc.) can't verify a static-file remediation
+            # and typically fail with AccessDenied on env2. Mark as passed=True
+            # with a clear note so they don't rollback a real fix.
+            skip_reason = runtime_lookup_skip_reason(command)
+            if skip_reason:
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"   ⏭ Test {idx} skipped by strategy policy: {skip_reason[:150]}",
+                )
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual="",
+                        passed=True,
+                        is_rescan=is_rescan,
+                        comparison_note=f"SKIPPED by validate policy — not executed: {skip_reason}",
+                    )
+                )
+                continue
+
             try:
                 cmd_result = executor.run_command(
                     command,

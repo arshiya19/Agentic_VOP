@@ -101,6 +101,40 @@ CLOUD_RUNTIME_LOOKUP_RE = re.compile(
 )
 
 
+def runtime_lookup_skip_reason(command: str) -> str | None:
+    """Return a skip reason if `command` matches a runtime-lookup pattern
+    that any strategy's validate() phase should suppress.
+
+    Runtime lookups (aws lambda invoke, aws secretsmanager get-secret-value,
+    aws ssm get-parameter, aws lambda get-function-configuration, etc.)
+    query the DEPLOYED state of AWS resources. They can never verify a
+    static-file remediation:
+
+      * They typically fail with AccessDenied on env2's locked-down role.
+      * When they succeed, they measure the deployed runtime, not the
+        edited source file — orthogonal to what SAST/IaC scanners judge.
+
+    Applies universally across every strategy's validate() phase (iac,
+    image, os, code_edit, dependency). Deploy verbs (terraform apply, aws
+    lambda update-*, kubectl apply, etc.) are NOT skipped here because
+    IaCStrategy legitimately runs them in execute() — that's a different
+    hook (`_should_skip_shell_step` on CodeEditStrategy, applied to
+    file-only strategies).
+
+    Returns:
+        str reason (LLM's plan wrote a runtime-lookup test — skip it)
+        None (command isn't a runtime lookup — run it)
+    """
+    if CLOUD_RUNTIME_LOOKUP_RE.search(command):
+        return (
+            "validate phase skips runtime-lookup commands (aws secretsmanager "
+            "get-secret-value, aws lambda invoke, aws ssm get-parameter, "
+            "aws lambda get-function*, ...) — they query the DEPLOYED runtime, "
+            "not the edited source file; scanner re-scan is authoritative"
+        )
+    return None
+
+
 # =============================================================================
 # Shared pre-flight: tool availability
 # =============================================================================
