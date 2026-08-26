@@ -16,7 +16,7 @@ for i in 1 2 3; do
   sleep 10
 done
 for i in 1 2 3; do
-  apt-get install -y --fix-missing git curl unzip python3 python3-pip python3-venv nodejs npm docker.io awscli && break
+  apt-get install -y --fix-missing git curl unzip python3 python3-pip python3-venv nodejs npm docker.io && break
   echo "apt-get install failed (attempt $i/3), retrying in 10s..."
   apt-get update -y
   sleep 10
@@ -28,7 +28,16 @@ systemctl start docker
 usermod -aG docker ubuntu
 
 # =============================================================================
-# 0. Install Terraform (needed to apply CSPM lab resources)
+# 0a. Install AWS CLI v2 (self-contained, no system Python dependency conflicts)
+# =============================================================================
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -o /tmp/awscliv2.zip -d /tmp/
+/tmp/aws/install --update 2>/dev/null || /tmp/aws/install
+rm -rf /tmp/awscliv2.zip /tmp/aws
+aws --version
+
+# =============================================================================
+# 0b. Install Terraform (needed to apply CSPM lab resources)
 # =============================================================================
 curl -fsSL https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip -o /tmp/terraform.zip
 unzip -o /tmp/terraform.zip -d /usr/local/bin/
@@ -255,6 +264,8 @@ pip3 install semgrep --break-system-packages 2>/dev/null || pip3 install semgrep
 
 # Install Checkov
 # Pin argcomplete<3.6 to avoid Python 3.8 incompatibility with argcomplete 3.7+
+# Remove stale system botocore/boto3 that conflict with checkov's requirements
+rm -rf /usr/lib/python3/dist-packages/botocore /usr/lib/python3/dist-packages/boto3 /usr/lib/python3/dist-packages/s3transfer 2>/dev/null || true
 pip3 install "argcomplete<3.6" --break-system-packages 2>/dev/null || pip3 install "argcomplete<3.6"
 pip3 install checkov --break-system-packages 2>/dev/null || pip3 install checkov
 %{ endif ~}
