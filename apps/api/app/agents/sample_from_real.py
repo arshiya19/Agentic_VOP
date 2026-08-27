@@ -87,7 +87,7 @@ _SOURCE_SCOOPS: dict[str, int] = {
     "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
     "trivy-fs-ec2": 20,  # app-level dep CVEs (DependencyStrategy)
     "semgrep-ec2": 20,  # SAST findings (CodeEditStrategy)
-    "serverless-ec2": 2,  # Semgrep on Lambda source — small while we shakedown the shape; bump to 20 after
+    "serverless-ec2": 20,  # Semgrep on Lambda source — full-pool run (pool ≈ 21) to stress .py + .tf mix
 }
 
 # Hard cap on final sample size — trims picks after pinned + scoops + fallback.

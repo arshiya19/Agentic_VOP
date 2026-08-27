@@ -1059,7 +1059,13 @@ def run_agentic_planner(
                     "4. terraform apply -auto-approve (reconcile deployed state — required "
                     "so downstream re-scans see the file that matches deployed reality). "
                     "The scanner re-scan belongs EXCLUSIVELY in validation_tests with "
-                    "is_rescan=true."
+                    "is_rescan=true.\n\n"
+                    "CRITICAL — terraform apply syntax: NEVER pass the config directory as a "
+                    "positional argument. `terraform apply -auto-approve` (no path) is correct "
+                    "because cwd is already set. `terraform apply -auto-approve /opt/vuln-labs/"
+                    "serverless-lab` FAILS with 'Failed to load ... as a plan file' — that "
+                    "positional slot expects a saved plan file from `terraform plan -out=X`, "
+                    "NOT a config directory."
                 ),
                 "prohibited_commands": [
                     "#EDIT_FILE marker (IaCStrategy does not interpret it — use sed -i)",
@@ -1071,6 +1077,8 @@ def run_agentic_planner(
                     "rm or unlink on .tf files (edit in place, never delete)",
                     "semgrep --config <dotted.rule.id> (--config takes a FILE PATH "
                     "like /opt/vuln-labs/results/serverless-rules.yaml)",
+                    "terraform apply <path> (positional path = saved plan file only. Use "
+                    "`terraform apply -auto-approve` with no path — cwd is already set)",
                 ],
             }
         else:
@@ -1132,7 +1140,21 @@ def run_agentic_planner(
                 "CRITICAL — new_text must FULLY REMOVE the vulnerable pattern.\n"
                 "After the edit, a #VERIFY_ABSENT check runs against the vulnerable "
                 "substring. If ANY occurrence of the vulnerable pattern remains in "
-                "new_text, verification FAILS and the fix rolls back. Replace, don't wrap."
+                "new_text, verification FAILS and the fix rolls back. Replace, don't wrap.\n\n"
+                "Common mistakes that cause the wrap trap:\n"
+                "  ✗ Vulnerable: `response = requests.get(target_url)`\n"
+                "    Wrong fix : `if is_safe(target_url): response = requests.get(target_url)` "
+                "— `requests.get(target_url)` STILL PRESENT, verify_absent will fail\n"
+                "  ✓ Right fix : `p = urlparse(target_url); "
+                "if p.netloc in ALLOWLIST: response = requests.get(p.geturl())` "
+                "— original literal is gone\n\n"
+                "  ✗ Vulnerable: `hashlib.md5(x)`\n"
+                "    Wrong fix : `hashlib.sha256(hashlib.md5(x).hexdigest())` "
+                "— `hashlib.md5(` still there\n"
+                "  ✓ Right fix : `hashlib.sha256(x)`\n\n"
+                "Rule of thumb: if the vulnerable identifier (function name, call, literal) "
+                "appears anywhere in new_text, redesign the fix. Wrappers, comments, string "
+                "concatenations that include the vulnerable token all fail verify_absent."
             ),
             "verify_absent_marker": (
                 "For verify steps that check a vulnerable pattern is GONE from a file "
