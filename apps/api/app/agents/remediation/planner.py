@@ -429,6 +429,21 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
         or identity.get("file")  # canonical fallback
     )
 
+    # Container-image scanners: raw.Target / raw.target is an IMAGE REFERENCE
+    # (e.g. "vuln-lab-image:latest (ubuntu 20.04)"), NOT a file path. If left
+    # in place, the prefix resolution below mangles it into a fake path like
+    # "/opt/vuln-labs/cspm-lab/vuln-lab-image:latest (ubuntu 20.04)" which
+    # contaminates SA-3's output. Clear it — the real Dockerfile path comes
+    # from connection_registry.metadata (resolved by the orchestrator and
+    # injected via execution_context).
+    source_lower = (issue.get("source") or "").lower()
+    if (
+        "trivy-image" in source_lower
+        or "snyk-container" in source_lower
+        or "grype-image" in source_lower
+    ):
+        file_path = None
+
     # Translate raw-finding path to env2's real filesystem layout, if a
     # prefix is configured. Scanners often emit paths relative to their
     # scan root (Checkov shows `/main.tf` when scanning `/opt/lab/`), so
