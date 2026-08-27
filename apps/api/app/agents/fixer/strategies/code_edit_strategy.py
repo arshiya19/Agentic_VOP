@@ -47,7 +47,7 @@ from ..tools.remote_exec import (
     RemoteExecError,
     RemoteExecutor,
 )
-from .base import BaseFixStrategy
+from .base import CLOUD_DEPLOY_RE, CLOUD_RUNTIME_LOOKUP_RE, BaseFixStrategy
 
 
 # Scanner CLI markers — used to detect which validation_test is the re-scan.
@@ -682,6 +682,32 @@ class CodeEditStrategy(BaseFixStrategy):
                 )
                 continue
 
+            # Strategy policy hook — same policy as execute(). Runtime-lookup
+            # tests (`aws lambda invoke`, `aws secretsmanager get-secret-value`)
+            # can't verify a static remediation and require prod-tier IAM the
+            # sandbox doesn't have. Mark as passed=True with a clear note so
+            # they neither block the run nor pretend to have verified anything.
+            skip_reason = self._should_skip_shell_step(command, ctx)
+            if skip_reason:
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"   ⏭ Test {idx} skipped by strategy policy: {skip_reason[:150]}",
+                )
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual="",
+                        passed=True,
+                        is_rescan=is_rescan,
+                        comparison_note=f"SKIPPED by strategy policy — not executed: {skip_reason}",
+                    )
+                )
+                continue
+
             # Execute the validation command
             timeout_s = (
                 self.config.rescan_timeout_s if is_rescan else self.config.ssm_command_timeout_s
@@ -708,7 +734,19 @@ class CodeEditStrategy(BaseFixStrategy):
                 continue
 
             actual = (cmd_result.stdout or "") + (cmd_result.stderr or "")
-            passed = self._compare_expected(expected, actual, exit_code=cmd_result.exit_code)
+            if is_rescan:
+                passed, note = self._evaluate_rescan_result(
+                    stdout=cmd_result.stdout or "",
+                    stderr=cmd_result.stderr or "",
+                    exit_code=cmd_result.exit_code,
+                )
+            else:
+                passed = self._compare_expected(expected, actual, exit_code=cmd_result.exit_code)
+                note = (
+                    "string-contains + exit-zero match"
+                    if passed
+                    else "expected not found in actual OR non-zero exit"
+                )
 
             results.append(
                 ValidationResult(
@@ -720,11 +758,7 @@ class CodeEditStrategy(BaseFixStrategy):
                     passed=passed,
                     duration_ms=cmd_result.duration_ms,
                     is_rescan=is_rescan,
-                    comparison_note=(
-                        "string-contains + exit-zero match"
-                        if passed
-                        else "expected not found in actual OR non-zero exit"
-                    ),
+                    comparison_note=note,
                 )
             )
 
@@ -822,11 +856,37 @@ class CodeEditStrategy(BaseFixStrategy):
     def _should_skip_shell_step(self, command: str, ctx: FixContext) -> str | None:  # noqa: ARG002
         """Policy hook — return a reason string to skip this shell step, or None to run it.
 
-        Base = no policy (run everything that passes safety). Subclasses
-        override to enforce family-specific invariants (e.g. DependencyStrategy
-        skips runtime-mutating installs because a file-based scanner only
-        needs the manifest edited).
+        CodeEditStrategy (and every subclass — DependencyStrategy inherits)
+        enforces the STATIC REMEDIATION contract: the strategy edits source
+        files and re-runs the scanner. It does NOT deploy the change to a
+        runtime or fetch runtime state. Those are downstream CI/CD concerns.
+
+        This deterministic guard makes the guarantee independent of whatever
+        the LLM plan happens to include — the plan may still emit deploy
+        commands, but they never execute.
+
+        The scanner re-scan step (semgrep/checkov/trivy/etc.) is exempted
+        because it IS the authoritative validator of a static fix.
         """
+        # Never skip the re-scan — it's how we know the fix worked.
+        if self._looks_like_rescan(command):
+            return None
+
+        if CLOUD_DEPLOY_RE.search(command):
+            return (
+                "static remediation is file-only — cloud-deploy commands "
+                "(aws lambda update-*, terraform apply, kubectl apply, "
+                "helm install, docker push, serverless deploy, ...) belong "
+                "to CI/CD, not the remediation service. The scanner re-scan "
+                "reads the FILE, so file edits alone satisfy it."
+            )
+        if CLOUD_RUNTIME_LOOKUP_RE.search(command):
+            return (
+                "static remediation is file-only — runtime-lookup commands "
+                "(aws secretsmanager get-secret-value, aws lambda invoke, "
+                "aws ssm get-parameter, ...) aren't needed. The scanner "
+                "reads source code, not runtime values."
+            )
         return None
 
     # =========================================================================
@@ -899,9 +959,98 @@ class CodeEditStrategy(BaseFixStrategy):
         return expected.strip() in actual
 
     @staticmethod
+    def _evaluate_rescan_result(*, stdout: str, stderr: str, exit_code: int) -> tuple[bool, str]:
+        """Judge a scanner re-scan by scanner semantics, not by the LLM's `expected` string.
+
+        Every mainstream SAST/SCA scanner shares a common exit-code contract:
+          exit=0 → no findings (fix landed ✓)
+          exit=1 → findings present (fix didn't land ✗)
+          exit=2+ → scanner error (fix undecidable ✗)
+
+        This holds for semgrep, bandit, gosec, checkov, trivy (default),
+        sonar-scanner, eslint. The LLM's `expected` field ("no results",
+        "0 findings", etc.) is IGNORED because it's guessed text that never
+        matches raw scanner JSON output.
+
+        When output is JSON, we double-check: a well-formed `"results":[]`
+        (Semgrep/Checkov/Bandit) or `"Results":[{"Vulnerabilities": null}]`
+        (Trivy) definitively says PASSED regardless of exit code — some
+        scanners return non-zero even on success depending on flags.
+
+        Returns (passed, comparison_note) so the trace shows why.
+        """
+        import json as _json  # noqa: PLC0415
+
+        # First check the JSON body — most authoritative signal.
+        # Some scanners emit an ASCII banner or progress bar to stdout
+        # before/around the JSON payload (e.g. Semgrep without --quiet), so
+        # we scan for a balanced-brace object rather than requiring the
+        # first character to be `{`. We look at stdout and stderr both.
+        def _extract_json_candidates(text: str) -> list[str]:
+            candidates: list[str] = []
+            for start in range(len(text)):
+                if text[start] not in "{[":
+                    continue
+                open_ch = text[start]
+                close_ch = "}" if open_ch == "{" else "]"
+                depth = 0
+                for i in range(start, len(text)):
+                    if text[i] == open_ch:
+                        depth += 1
+                    elif text[i] == close_ch:
+                        depth -= 1
+                        if depth == 0:
+                            candidates.append(text[start : i + 1])
+                            break
+                if candidates:
+                    break  # only the first top-level object matters here
+            return candidates
+
+        for text in (stdout, stderr):
+            text = text or ""
+            for candidate in _extract_json_candidates(text):
+                try:
+                    data = _json.loads(candidate)
+                except (ValueError, TypeError):
+                    continue
+
+                # Semgrep / Bandit / Checkov shape: top-level "results" list
+                results = data.get("results") if isinstance(data, dict) else None
+                if isinstance(results, list):
+                    if not results:
+                        return True, "scanner JSON reports empty results — no findings"
+                    return (
+                        False,
+                        f"scanner JSON reports {len(results)} finding(s) — fix did not land",
+                    )
+
+                # Trivy shape: top-level "Results" list, each with "Vulnerabilities"
+                results = data.get("Results") if isinstance(data, dict) else None
+                if isinstance(results, list):
+                    total_vulns = 0
+                    for r in results:
+                        if not isinstance(r, dict):
+                            continue
+                        total_vulns += len(r.get("Vulnerabilities") or [])
+                        total_vulns += len(r.get("Misconfigurations") or [])
+                    if total_vulns == 0:
+                        return True, "scanner JSON (Trivy shape) reports no vulnerabilities"
+                    return False, f"scanner JSON (Trivy shape) reports {total_vulns} finding(s)"
+
+        # No parseable JSON — fall back to exit-code semantics
+        if exit_code == 0:
+            return True, "scanner exited 0 — no findings"
+        if exit_code == 1:
+            return False, f"scanner exited {exit_code} — findings present"
+        return False, (
+            f"scanner exited {exit_code} — likely error, not a fix verdict "
+            f"(stderr: {(stderr or '')[:200]})"
+        )
+
+    @staticmethod
     def _detect_scanner_binary(source: str) -> str | None:
         """Map source name to the scanner binary for pre-flight probing."""
-        if "semgrep" in source:
+        if "semgrep" in source or "serverless" in source:
             return "semgrep"
         if "bandit" in source:
             return "bandit"

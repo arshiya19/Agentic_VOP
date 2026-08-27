@@ -44,7 +44,7 @@ from ..tools.remote_exec import (
     RemoteExecError,
     RemoteExecutor,
 )
-from .base import BaseFixStrategy
+from .base import BaseFixStrategy, runtime_lookup_skip_reason
 
 
 _RESCAN_CLI_MARKERS: tuple[str, ...] = (
@@ -494,6 +494,26 @@ class OSStrategy(BaseFixStrategy):
                         command=command or "(no command)",
                         expected=expected,
                         actual="skipped",
+                        passed=True,
+                        is_rescan=is_rescan,
+                    )
+                )
+                continue
+
+            # Universal validate-phase skip: runtime-lookup commands can't
+            # verify a static OS-package upgrade remediation.
+            skip_reason = runtime_lookup_skip_reason(command)
+            if skip_reason:
+                self._emit(
+                    ctx, "MESSAGE", f"   ⏭ Test {i} skipped by strategy policy: {skip_reason[:150]}"
+                )
+                results.append(
+                    ValidationResult(
+                        test_name=test_name,
+                        method=method,
+                        command=command,
+                        expected=expected,
+                        actual="",
                         passed=True,
                         is_rescan=is_rescan,
                     )

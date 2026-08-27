@@ -77,19 +77,36 @@ def _find_replay_candidate(
 
     candidate = rows[0]
 
-    # Gap 2 gate: reject DISPROVEN recipes — entries that have been reused
-    # 3+ times but never succeeded. These are demonstrably bad recipes that
-    # will waste a full execution + rollback cycle if replayed.
+    # Disproven-recipe gates — block replay of entries that have demonstrated
+    # they don't work. Two complementary gates:
     #
-    # Three states:
-    #   - Brand new (times_reused=0): allow — untested, give it a chance
-    #   - Proven (times_succeeded>=1): allow — has worked before
-    #   - Disproven (times_reused>=3, times_succeeded=0): block
-    _DISPROVEN_THRESHOLD = 3
+    # Gate 1 (never-succeeded, existing Nikhil gate):
+    #   times_reused >= 3 AND times_succeeded == 0 → block.
+    #   Brand-new entries (times_reused=0) still get their first chance.
+    #
+    # Gate 2 (low-success-rate, added 2026-08-26):
+    #   times_reused >= 10 AND success_rate < 10% → block.
+    #   Catches entries that slip past Gate 1 via one lucky success but then
+    #   fail 90%+ of the time. Real-data snapshot (2026-08-26): 40+ KB
+    #   entries had 50-244 reuses at <10% success rate, wasting an LLM call
+    #   + rollback cycle every replay. `times_reused >= 10` requires enough
+    #   data to be confident before quarantining.
+    _DISPROVEN_ZERO_THRESHOLD = 3
+    _DISPROVEN_LOW_RATE_MIN_ATTEMPTS = 10
+    _DISPROVEN_LOW_RATE_MAX = 0.10
+
     times_reused = candidate.get("times_reused") or 0
     times_succeeded = candidate.get("times_succeeded") or 0
-    if times_reused >= _DISPROVEN_THRESHOLD and times_succeeded == 0:
+
+    # Gate 1: never-succeeded
+    if times_reused >= _DISPROVEN_ZERO_THRESHOLD and times_succeeded == 0:
         return None
+
+    # Gate 2: consistently-failing after enough attempts
+    if times_reused >= _DISPROVEN_LOW_RATE_MIN_ATTEMPTS:
+        rate = times_succeeded / times_reused
+        if rate < _DISPROVEN_LOW_RATE_MAX:
+            return None
 
     return candidate
 

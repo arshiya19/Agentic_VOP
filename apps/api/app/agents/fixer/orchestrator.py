@@ -63,19 +63,74 @@ _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
 # a mutable direct-cloud bucket would go 'cli'. So we prefer scanner_type
 # (from IaC context) with family as a secondary hint.
 # =============================================================================
+_SOURCE_CODE_EXTENSIONS: tuple[str, ...] = (
+    # Interpreted / dynamic
+    ".py",
+    ".rb",
+    ".php",
+    ".pl",
+    ".lua",
+    ".groovy",
+    # JS / TS family
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    # JVM
+    ".java",
+    ".kt",
+    ".kts",
+    ".scala",
+    # Native / systems
+    ".go",
+    ".rs",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hpp",
+    # .NET / Apple / other
+    ".cs",
+    ".swift",
+    ".m",
+    ".mm",
+)
+
+# Terraform/HCL config files — always IacStrategy regardless of family.
+# Fixes the case where a finding on `main.tf` classifies as `injection`
+# (via CWE-778/770/392 code-oriented CWEs on Lambda infra rules) and would
+# otherwise misroute to CodeEditStrategy. Universal — future IaC scanners
+# (tfsec, kics, terrascan) get correct routing for free.
+_IAC_EXTENSIONS: tuple[str, ...] = (
+    ".tf",
+    ".tf.json",
+    ".hcl",
+    ".tfvars",
+)
+
+
 def _select_strategy_key(
     *,
     family: str,
     scanner_type: str | None,
     source: str | None = None,
+    file_path: str | None = None,
 ) -> str:
-    """Pick the fix strategy key based on source + scanner_type + family.
+    """Pick the fix strategy key based on source + scanner_type + family + file extension.
 
     Priority order (most specific → least specific):
       1. Source name — deterministic when we know the scanner. Container
          image scanners → image; host OS scanners → os.
-      2. scanner_type from SA-3's extractor (iac / sast / sca / os_pkg).
-      3. Family as a final fallback.
+      2. Target file's extension — a `.py`/`.js`/etc. source file always
+         means edit the source (CodeEditStrategy), never terraform-apply
+         it. Prevents IacStrategy from being chosen for SAST findings that
+         happened to classify as public_exposure (e.g. CWE-798 hardcoded
+         credentials in Lambda source).
+      3. scanner_type from SA-3's extractor (iac / sast / sca / os_pkg).
+      4. Family as a final fallback.
 
     Returns an unregistered key when no strategy is wired for the shape;
     run_fixer's dispatch check will surface a clean "no strategy registered"
@@ -97,6 +152,19 @@ def _select_strategy_key(
     # SAST scanners → CodeEditStrategy — not yet registered
     if "semgrep" in src or "bandit" in src or "sonarqube" in src:
         return "code_edit"
+
+    # ---- File-extension override ----
+    # File type is a stronger signal than family for choosing the strategy.
+    # A finding on `main.tf` must go to IacStrategy even when its CWE
+    # (e.g. CWE-778, CWE-770) pushed the family classifier toward
+    # `injection`. Symmetric for source-code files. Both branches keep
+    # future scanners routing correctly with no per-source rule needed.
+    if file_path:
+        fp = file_path.lower()
+        if fp.endswith(_IAC_EXTENSIONS):
+            return "iac"
+        if fp.endswith(_SOURCE_CODE_EXTENSIONS):
+            return "code_edit"
 
     # ---- Family-based routing when source didn't decide ----
     if family == "os_vulnerability":
@@ -306,6 +374,7 @@ def run_fixer(
         family=family,
         scanner_type=iac_ctx.get("scanner_type"),
         source=issue_row.get("source"),
+        file_path=iac_ctx.get("file_path"),
     )
     strategy_cls = _STRATEGY_BY_KEY.get(strategy_key)
     if strategy_cls is None:
