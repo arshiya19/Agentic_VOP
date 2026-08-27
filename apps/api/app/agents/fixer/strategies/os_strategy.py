@@ -504,7 +504,9 @@ class OSStrategy(BaseFixStrategy):
             # verify a static OS-package upgrade remediation.
             skip_reason = runtime_lookup_skip_reason(command)
             if skip_reason:
-                self._emit(ctx, "MESSAGE", f"   ⏭ Test {i} skipped by strategy policy: {skip_reason[:150]}")
+                self._emit(
+                    ctx, "MESSAGE", f"   ⏭ Test {i} skipped by strategy policy: {skip_reason[:150]}"
+                )
                 results.append(
                     ValidationResult(
                         test_name=test_name,

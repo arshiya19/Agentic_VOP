@@ -65,15 +65,38 @@ _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
 # =============================================================================
 _SOURCE_CODE_EXTENSIONS: tuple[str, ...] = (
     # Interpreted / dynamic
-    ".py", ".rb", ".php", ".pl", ".lua", ".groovy",
+    ".py",
+    ".rb",
+    ".php",
+    ".pl",
+    ".lua",
+    ".groovy",
     # JS / TS family
-    ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".jsx",
+    ".tsx",
     # JVM
-    ".java", ".kt", ".kts", ".scala",
+    ".java",
+    ".kt",
+    ".kts",
+    ".scala",
     # Native / systems
-    ".go", ".rs", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp",
+    ".go",
+    ".rs",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hpp",
     # .NET / Apple / other
-    ".cs", ".swift", ".m", ".mm",
+    ".cs",
+    ".swift",
+    ".m",
+    ".mm",
 )
 
 # Terraform/HCL config files — always IacStrategy regardless of family.
@@ -82,7 +105,10 @@ _SOURCE_CODE_EXTENSIONS: tuple[str, ...] = (
 # otherwise misroute to CodeEditStrategy. Universal — future IaC scanners
 # (tfsec, kics, terrascan) get correct routing for free.
 _IAC_EXTENSIONS: tuple[str, ...] = (
-    ".tf", ".tf.json", ".hcl", ".tfvars",
+    ".tf",
+    ".tf.json",
+    ".hcl",
+    ".tfvars",
 )
 
 

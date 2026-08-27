@@ -98,7 +98,7 @@ def emit_trace_demo(
     if per_run is not None:
         try:
             per_run.info(line)
-        except Exception:  # noqa: BLE001 — file write hiccup shouldn't kill trace
+        except Exception:  # noqa: BLE001, S110 — file write hiccup shouldn't kill trace
             pass
 
     sb = supabase_admin_demo()

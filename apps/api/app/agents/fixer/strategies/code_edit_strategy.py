@@ -959,9 +959,7 @@ class CodeEditStrategy(BaseFixStrategy):
         return expected.strip() in actual
 
     @staticmethod
-    def _evaluate_rescan_result(
-        *, stdout: str, stderr: str, exit_code: int
-    ) -> tuple[bool, str]:
+    def _evaluate_rescan_result(*, stdout: str, stderr: str, exit_code: int) -> tuple[bool, str]:
         """Judge a scanner re-scan by scanner semantics, not by the LLM's `expected` string.
 
         Every mainstream SAST/SCA scanner shares a common exit-code contract:
@@ -1002,7 +1000,7 @@ class CodeEditStrategy(BaseFixStrategy):
                     elif text[i] == close_ch:
                         depth -= 1
                         if depth == 0:
-                            candidates.append(text[start:i + 1])
+                            candidates.append(text[start : i + 1])
                             break
                 if candidates:
                     break  # only the first top-level object matters here
@@ -1021,7 +1019,10 @@ class CodeEditStrategy(BaseFixStrategy):
                 if isinstance(results, list):
                     if not results:
                         return True, "scanner JSON reports empty results — no findings"
-                    return False, f"scanner JSON reports {len(results)} finding(s) — fix did not land"
+                    return (
+                        False,
+                        f"scanner JSON reports {len(results)} finding(s) — fix did not land",
+                    )
 
                 # Trivy shape: top-level "Results" list, each with "Vulnerabilities"
                 results = data.get("Results") if isinstance(data, dict) else None
@@ -1058,7 +1059,6 @@ class CodeEditStrategy(BaseFixStrategy):
         if "gosec" in source:
             return "gosec"
         return None
-
 
     @staticmethod
     def _skipped_step(step_num: int, action: str, reason: str) -> StepResult:

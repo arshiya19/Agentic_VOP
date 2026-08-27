@@ -1045,7 +1045,7 @@ def run_agentic_planner(
                     "markers. Emitting those markers here causes exit=127 ('{path:: not found') "
                     "because the shell sees the JSON payload as a command.\n\n"
                     "Preferred sed pattern:\n"
-                    "  sed -i 's|DB_PASSWORD *= *\"[^\"]*\"|DB_PASSWORD = var.db_password|' "
+                    '  sed -i \'s|DB_PASSWORD *= *"[^"]*"|DB_PASSWORD = var.db_password|\' '
                     "/opt/vuln-labs/serverless-lab/main.tf\n"
                     "Verify with:\n"
                     "  grep -c 'DB_PASSWORD.*=.*\"' /opt/vuln-labs/serverless-lab/main.tf || true "
@@ -1084,119 +1084,119 @@ def run_agentic_planner(
         else:
             user_payload["execution_context"] = {
                 "target_type": "source_code",
-            "fix_approach": (
-                "Edit the Lambda handler source file to replace the vulnerable code "
-                "pattern with the secure equivalent. The source file IS the artifact. "
-                "Fix the code directly: os.environ.get() or Secrets Manager lookup for "
-                "hardcoded secrets, parameterized queries for SQLi, subprocess with list "
-                "args for command injection, strong algorithms for weak hashing, etc. "
-                "The specific secure pattern should be derived from the CWE classification "
-                "in the finding and the ground-truth file content provided."
-            ),
-            "file_base_path": "/opt/vuln-labs/serverless-lab",
-            "rescan_command": (
-                "semgrep scan --config /opt/vuln-labs/results/serverless-rules.yaml "
-                "{file_path} --json --no-git-ignore"
-            ),
-            "rescan_filter_note": (
-                "The re-scan must check for the ABSENCE of the specific rule_id that fired, "
-                "NOT for zero total findings. Other rules may still fire on the same file. "
-                "Use: semgrep scan --config /opt/vuln-labs/results/serverless-rules.yaml "
-                "{file_path} --json --no-git-ignore 2>&1 | grep -c '<rule_id>' || true "
-                "with expected='0'.\n\n"
-                "CRITICAL: --config takes a FILE PATH "
-                "(/opt/vuln-labs/results/serverless-rules.yaml), NOT a dotted rule ID "
-                "(e.g. opt.vuln-labs.results.serverless-hardcoded-secret). Passing the "
-                "rule ID makes semgrep exit 7 with 'unable to find a config' — the "
-                "re-scan then always 'fails' and rolls back an otherwise-successful fix."
-            ),
-            "syntax_check": "python3 -m py_compile {file_path}",
-            "edit_guidance": (
-                "PREFERRED: use the #EDIT_FILE structured tool for ALL source-code edits. "
-                "Emit it as a step's Command block (see edit_file_marker spec below). "
-                "The executor does exact-string replace with no shell parsing of the "
-                "payload — so f-strings, quotes, curly braces, backslashes, and any "
-                "regex metacharacters pass through untouched. This eliminates the "
-                "entire class of sed/quoting failures. Use #EDIT_FILE for both "
-                "single-line and multi-line edits.\n\n"
-                "DO NOT use `cat >> file << EOF` to APPEND new code — it leaves the "
-                "vulnerable code in place and adds an unused function below it. "
-                "Always replace the vulnerable lines in-place via #EDIT_FILE so the "
-                "callers of the original code path actually change."
-            ),
-            "edit_file_marker": (
-                "To emit a structured edit, put this in the step's Command block:\n"
-                "  #EDIT_FILE\n"
-                '  {"path": "<absolute file path>",\n'
-                '   "old_text": "<exact substring currently in the file — must match ONCE>",\n'
-                '   "new_text": "<what it becomes after edit>"}\n\n'
-                "CRITICAL — old_text composition rules:\n"
-                "  - The GROUND TRUTH file content is provided to you at the top of "
-                "this conversation. Copy old_text VERBATIM byte-for-byte from that "
-                "content. Do NOT add characters that aren't in the file.\n"
-                "  - old_text must uniquely locate the edit — include surrounding "
-                "lines if the vulnerable pattern appears multiple times.\n"
-                "  - old_text and new_text cannot be identical (no-op rejected).\n\n"
-                "CRITICAL — new_text must FULLY REMOVE the vulnerable pattern.\n"
-                "After the edit, a #VERIFY_ABSENT check runs against the vulnerable "
-                "substring. If ANY occurrence of the vulnerable pattern remains in "
-                "new_text, verification FAILS and the fix rolls back. Replace, don't wrap.\n\n"
-                "Common mistakes that cause the wrap trap:\n"
-                "  ✗ Vulnerable: `response = requests.get(target_url)`\n"
-                "    Wrong fix : `if is_safe(target_url): response = requests.get(target_url)` "
-                "— `requests.get(target_url)` STILL PRESENT, verify_absent will fail\n"
-                "  ✓ Right fix : `p = urlparse(target_url); "
-                "if p.netloc in ALLOWLIST: response = requests.get(p.geturl())` "
-                "— original literal is gone\n\n"
-                "  ✗ Vulnerable: `hashlib.md5(x)`\n"
-                "    Wrong fix : `hashlib.sha256(hashlib.md5(x).hexdigest())` "
-                "— `hashlib.md5(` still there\n"
-                "  ✓ Right fix : `hashlib.sha256(x)`\n\n"
-                "Rule of thumb: if the vulnerable identifier (function name, call, literal) "
-                "appears anywhere in new_text, redesign the fix. Wrappers, comments, string "
-                "concatenations that include the vulnerable token all fail verify_absent."
-            ),
-            "verify_absent_marker": (
-                "For verify steps that check a vulnerable pattern is GONE from a file "
-                "after the edit, PREFER the structured #VERIFY_ABSENT marker over "
-                "shell grep. Shell grep is brittle: quoting the pattern is error-prone, "
-                "grep exits 1 when zero matches are found (which is the SUCCESS state "
-                "for absence checks), and `|| true` is easy to forget.\n\n"
-                "To emit a structured absence check:\n"
-                "  #VERIFY_ABSENT\n"
-                '  {"path": "<absolute file path>",\n'
-                '   "pattern": "<vulnerable substring that must NOT appear in the file>"}\n\n'
-                "Rules:\n"
-                "  - Exit 0 = pattern absent (success). Exit 3 = still present (fail).\n"
-                "  - `pattern` is checked with exact substring match — NO regex.\n"
-                "  - Include enough of the vulnerable line to avoid false positives "
-                "from unrelated code with the same substring (e.g., prefer "
-                "`AWS_ACCESS_KEY = \"AKIA` over the bare `AWS_ACCESS_KEY`, which "
-                "matches both hardcoded values AND the fixed code's dict lookup "
-                "`secret['AWS_ACCESS_KEY']`)."
-            ),
-            "structural_constraint": (
-                "Step order MUST be: "
-                "1. Backup (cp file file.bak-timestamp), "
-                "2. Edit source (#EDIT_FILE), "
-                "3. Verify edit (#VERIFY_ABSENT the vulnerable substring), "
-                "4. Syntax check (python3 -m py_compile). "
-                "The re-scan belongs EXCLUSIVELY in validation_tests with is_rescan=true."
-            ),
-            "prohibited_commands": [
-                "terraform (no IaC layer for this target — Lambda code, not infra)",
-                "docker build (source code fix, not container rebuild)",
-                "sudo reboot",
-                "apt-get / yum (not a package vulnerability)",
-                "pip install (fix the source code, not dependencies)",
-                "aws lambda update-function-code (deploy belongs to CI/CD)",
-                "cat >> file (APPEND leaves the vulnerable code in place — use #EDIT_FILE)",
-                "grep -c without || true (grep returns exit 1 on zero matches)",
-                "rm or unlink on source files (edit in place, never delete)",
-                "semgrep --config <dotted.rule.id> (--config takes a FILE PATH like "
-                "/opt/vuln-labs/results/serverless-rules.yaml, not the rule ID)",
-            ],
-        }
+                "fix_approach": (
+                    "Edit the Lambda handler source file to replace the vulnerable code "
+                    "pattern with the secure equivalent. The source file IS the artifact. "
+                    "Fix the code directly: os.environ.get() or Secrets Manager lookup for "
+                    "hardcoded secrets, parameterized queries for SQLi, subprocess with list "
+                    "args for command injection, strong algorithms for weak hashing, etc. "
+                    "The specific secure pattern should be derived from the CWE classification "
+                    "in the finding and the ground-truth file content provided."
+                ),
+                "file_base_path": "/opt/vuln-labs/serverless-lab",
+                "rescan_command": (
+                    "semgrep scan --config /opt/vuln-labs/results/serverless-rules.yaml "
+                    "{file_path} --json --no-git-ignore"
+                ),
+                "rescan_filter_note": (
+                    "The re-scan must check for the ABSENCE of the specific rule_id that fired, "
+                    "NOT for zero total findings. Other rules may still fire on the same file. "
+                    "Use: semgrep scan --config /opt/vuln-labs/results/serverless-rules.yaml "
+                    "{file_path} --json --no-git-ignore 2>&1 | grep -c '<rule_id>' || true "
+                    "with expected='0'.\n\n"
+                    "CRITICAL: --config takes a FILE PATH "
+                    "(/opt/vuln-labs/results/serverless-rules.yaml), NOT a dotted rule ID "
+                    "(e.g. opt.vuln-labs.results.serverless-hardcoded-secret). Passing the "
+                    "rule ID makes semgrep exit 7 with 'unable to find a config' — the "
+                    "re-scan then always 'fails' and rolls back an otherwise-successful fix."
+                ),
+                "syntax_check": "python3 -m py_compile {file_path}",
+                "edit_guidance": (
+                    "PREFERRED: use the #EDIT_FILE structured tool for ALL source-code edits. "
+                    "Emit it as a step's Command block (see edit_file_marker spec below). "
+                    "The executor does exact-string replace with no shell parsing of the "
+                    "payload — so f-strings, quotes, curly braces, backslashes, and any "
+                    "regex metacharacters pass through untouched. This eliminates the "
+                    "entire class of sed/quoting failures. Use #EDIT_FILE for both "
+                    "single-line and multi-line edits.\n\n"
+                    "DO NOT use `cat >> file << EOF` to APPEND new code — it leaves the "
+                    "vulnerable code in place and adds an unused function below it. "
+                    "Always replace the vulnerable lines in-place via #EDIT_FILE so the "
+                    "callers of the original code path actually change."
+                ),
+                "edit_file_marker": (
+                    "To emit a structured edit, put this in the step's Command block:\n"
+                    "  #EDIT_FILE\n"
+                    '  {"path": "<absolute file path>",\n'
+                    '   "old_text": "<exact substring currently in the file — must match ONCE>",\n'
+                    '   "new_text": "<what it becomes after edit>"}\n\n'
+                    "CRITICAL — old_text composition rules:\n"
+                    "  - The GROUND TRUTH file content is provided to you at the top of "
+                    "this conversation. Copy old_text VERBATIM byte-for-byte from that "
+                    "content. Do NOT add characters that aren't in the file.\n"
+                    "  - old_text must uniquely locate the edit — include surrounding "
+                    "lines if the vulnerable pattern appears multiple times.\n"
+                    "  - old_text and new_text cannot be identical (no-op rejected).\n\n"
+                    "CRITICAL — new_text must FULLY REMOVE the vulnerable pattern.\n"
+                    "After the edit, a #VERIFY_ABSENT check runs against the vulnerable "
+                    "substring. If ANY occurrence of the vulnerable pattern remains in "
+                    "new_text, verification FAILS and the fix rolls back. Replace, don't wrap.\n\n"
+                    "Common mistakes that cause the wrap trap:\n"
+                    "  ✗ Vulnerable: `response = requests.get(target_url)`\n"
+                    "    Wrong fix : `if is_safe(target_url): response = requests.get(target_url)` "
+                    "— `requests.get(target_url)` STILL PRESENT, verify_absent will fail\n"
+                    "  ✓ Right fix : `p = urlparse(target_url); "
+                    "if p.netloc in ALLOWLIST: response = requests.get(p.geturl())` "
+                    "— original literal is gone\n\n"
+                    "  ✗ Vulnerable: `hashlib.md5(x)`\n"
+                    "    Wrong fix : `hashlib.sha256(hashlib.md5(x).hexdigest())` "
+                    "— `hashlib.md5(` still there\n"
+                    "  ✓ Right fix : `hashlib.sha256(x)`\n\n"
+                    "Rule of thumb: if the vulnerable identifier (function name, call, literal) "
+                    "appears anywhere in new_text, redesign the fix. Wrappers, comments, string "
+                    "concatenations that include the vulnerable token all fail verify_absent."
+                ),
+                "verify_absent_marker": (
+                    "For verify steps that check a vulnerable pattern is GONE from a file "
+                    "after the edit, PREFER the structured #VERIFY_ABSENT marker over "
+                    "shell grep. Shell grep is brittle: quoting the pattern is error-prone, "
+                    "grep exits 1 when zero matches are found (which is the SUCCESS state "
+                    "for absence checks), and `|| true` is easy to forget.\n\n"
+                    "To emit a structured absence check:\n"
+                    "  #VERIFY_ABSENT\n"
+                    '  {"path": "<absolute file path>",\n'
+                    '   "pattern": "<vulnerable substring that must NOT appear in the file>"}\n\n'
+                    "Rules:\n"
+                    "  - Exit 0 = pattern absent (success). Exit 3 = still present (fail).\n"
+                    "  - `pattern` is checked with exact substring match — NO regex.\n"
+                    "  - Include enough of the vulnerable line to avoid false positives "
+                    "from unrelated code with the same substring (e.g., prefer "
+                    '`AWS_ACCESS_KEY = "AKIA` over the bare `AWS_ACCESS_KEY`, which '
+                    "matches both hardcoded values AND the fixed code's dict lookup "
+                    "`secret['AWS_ACCESS_KEY']`)."
+                ),
+                "structural_constraint": (
+                    "Step order MUST be: "
+                    "1. Backup (cp file file.bak-timestamp), "
+                    "2. Edit source (#EDIT_FILE), "
+                    "3. Verify edit (#VERIFY_ABSENT the vulnerable substring), "
+                    "4. Syntax check (python3 -m py_compile). "
+                    "The re-scan belongs EXCLUSIVELY in validation_tests with is_rescan=true."
+                ),
+                "prohibited_commands": [
+                    "terraform (no IaC layer for this target — Lambda code, not infra)",
+                    "docker build (source code fix, not container rebuild)",
+                    "sudo reboot",
+                    "apt-get / yum (not a package vulnerability)",
+                    "pip install (fix the source code, not dependencies)",
+                    "aws lambda update-function-code (deploy belongs to CI/CD)",
+                    "cat >> file (APPEND leaves the vulnerable code in place — use #EDIT_FILE)",
+                    "grep -c without || true (grep returns exit 1 on zero matches)",
+                    "rm or unlink on source files (edit in place, never delete)",
+                    "semgrep --config <dotted.rule.id> (--config takes a FILE PATH like "
+                    "/opt/vuln-labs/results/serverless-rules.yaml, not the rule ID)",
+                ],
+            }
     elif "semgrep" in source or "bandit" in source or "sonarqube" in source or "gosec" in source:
         user_payload["execution_context"] = {
             "target_type": "source_code",
