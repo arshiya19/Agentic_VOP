@@ -410,6 +410,195 @@ echo "=== DONE ==="
     }
 
 
+@app.post("/admin/env2/reset-images")
+def reset_env2_images() -> dict:
+    """Reset all 3 trivy-image Dockerfiles on env2 to their vulnerable baseline.
+
+    Restores:
+      1. infra-lab  → vuln-lab-image:latest     (Ubuntu 20.04 + pinned openssl)
+      2. java-lab   → vuln-java-image:latest    (Tomcat 9.0.30 + JDK 8)
+      3. python-lab → vuln-python-image:latest  (Python 3.8 + pinned pip pkgs)
+
+    Rebuilds each image with --no-cache so Trivy will report findings again.
+    Blocks until all 3 rebuilds complete (~2-3 minutes total).
+
+    No impact on CSPM lab (Terraform/Checkov) or any other scanner.
+    """
+    import base64
+    import time
+
+    import boto3
+
+    instance_id = settings.fixer_env2_instance_id
+    if not instance_id:
+        raise HTTPException(
+            status_code=500,
+            detail="fixer_env2_instance_id not configured — set it in .env",
+        )
+
+    reset_script = r"""#!/bin/bash
+set -e
+echo "=== Resetting Trivy Image Labs to vulnerable baseline ==="
+
+# 1. Infra Lab
+echo "--- [1/3] infra-lab ---"
+cat > /opt/vuln-labs/infra-lab/Dockerfile << 'DKREOF'
+# Intentionally outdated base image with known CVEs
+FROM ubuntu:20.04
+
+RUN apt-get update && apt-get install -y \
+    openssl=1.1.1f-1ubuntu2 \
+    curl \
+    wget \
+    nginx \
+    && rm -rf /var/lib/apt/lists/*
+
+ADD app.py /app/app.py
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+DKREOF
+rm -f /opt/vuln-labs/infra-lab/Dockerfile.bak-* /opt/vuln-labs/infra-lab/CHANGELOG.md
+cd /opt/vuln-labs/infra-lab && docker build --no-cache -t vuln-lab-image:latest . 2>&1 | tail -3
+echo "  OK: vuln-lab-image:latest"
+
+# 2. Java Lab
+echo "--- [2/3] java-image-lab ---"
+cat > /opt/vuln-labs/java-image-lab/Dockerfile << 'JDKREOF'
+FROM tomcat:9.0.30-jdk8-openjdk
+
+RUN mkdir -p /usr/local/tomcat/webapps/ROOT
+RUN echo '<html><body><h1>Vulnerable Java App</h1></body></html>' > /usr/local/tomcat/webapps/ROOT/index.html
+
+EXPOSE 8080
+CMD ["catalina.sh", "run"]
+JDKREOF
+rm -f /opt/vuln-labs/java-image-lab/Dockerfile.bak-*
+cd /opt/vuln-labs/java-image-lab && docker build --no-cache -t vuln-java-image:latest . 2>&1 | tail -3
+echo "  OK: vuln-java-image:latest"
+
+# 3. Python Lab
+echo "--- [3/3] python-image-lab ---"
+cat > /opt/vuln-labs/python-image-lab/Dockerfile << 'PYDKREOF'
+FROM python:3.8-slim-buster
+
+RUN pip install --no-cache-dir \
+    flask==2.0.0 \
+    jinja2==3.0.0 \
+    requests==2.25.0 \
+    cryptography==3.3.2 \
+    pyyaml==5.3.1 \
+    urllib3==1.26.4 \
+    werkzeug==2.0.0 \
+    setuptools==58.0.0 \
+    pillow==8.1.0 \
+    certifi==2020.12.5
+
+RUN mkdir -p /app
+RUN echo 'from flask import Flask; app = Flask(__name__)' > /app/main.py
+
+WORKDIR /app
+EXPOSE 5000
+CMD ["python", "main.py"]
+PYDKREOF
+rm -f /opt/vuln-labs/python-image-lab/Dockerfile.bak-*
+cd /opt/vuln-labs/python-image-lab && docker build --no-cache -t vuln-python-image:latest . 2>&1 | tail -3
+echo "  OK: vuln-python-image:latest"
+
+# 4. Cleanup backup tags
+docker images --format '{{.Repository}}:{{.Tag}}' | grep 'pre-fix' | xargs -r docker rmi 2>/dev/null || true
+
+# 5. Verify + scan counts
+echo "=== Verification ==="
+OPENSSL_VER=$(docker run --rm vuln-lab-image:latest dpkg -l openssl 2>/dev/null | grep openssl | awk '{print $3}')
+echo "  infra-lab openssl: $OPENSSL_VER"
+
+echo ""
+echo "=== Post-reset scan counts ==="
+trivy image vuln-lab-image:latest --format json --scanners vuln 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f'  Trivy Image (infra): {sum(len(r.get(\"Vulnerabilities\",[])) for r in d.get(\"Results\",[]))} findings')"
+trivy image vuln-java-image:latest --format json --scanners vuln 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f'  Trivy Image (java): {sum(len(r.get(\"Vulnerabilities\",[])) for r in d.get(\"Results\",[]))} findings')"
+trivy image vuln-python-image:latest --format json --scanners vuln 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f'  Trivy Image (python): {sum(len(r.get(\"Vulnerabilities\",[])) for r in d.get(\"Results\",[]))} findings')"
+echo "=== Reset complete ==="
+"""
+
+    b64 = base64.b64encode(reset_script.encode()).decode()
+    started = datetime.now(UTC)
+
+    try:
+        ssm = boto3.client("ssm", region_name=settings.aws_region)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"Failed to create SSM client: {type(e).__name__}: {e}"
+        ) from e
+
+    try:
+        resp = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            TimeoutSeconds=600,
+            Parameters={"commands": [f"echo {b64} | base64 -d | bash"]},
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"SSM send_command failed: {type(e).__name__}: {e}"
+        ) from e
+
+    command_id = resp["Command"]["CommandId"]
+
+    # Poll — rebuilds take ~2-3 min total
+    deadline = time.time() + 300
+    invocation = None
+    while time.time() < deadline:
+        try:
+            invocation = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        except ssm.exceptions.InvocationDoesNotExist:
+            time.sleep(2)
+            continue
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=f"SSM get_command_invocation failed: {type(e).__name__}: {e}",
+            ) from e
+        if invocation["Status"] not in ("InProgress", "Pending", "Delayed"):
+            break
+        time.sleep(5)
+    else:
+        raise HTTPException(
+            status_code=504,
+            detail=f"env2 image reset exceeded 300s (command_id={command_id})",
+        )
+
+    status = invocation["Status"]
+    stdout = invocation.get("StandardOutputContent") or ""
+    stderr = invocation.get("StandardErrorContent") or ""
+    duration_s = int((datetime.now(UTC) - started).total_seconds())
+
+    if status != "Success":
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": f"env2 image reset failed with SSM status {status}",
+                "command_id": command_id,
+                "stderr_tail": stderr[-1500:],
+                "stdout_tail": stdout[-1500:],
+                "duration_s": duration_s,
+            },
+        )
+
+    return {
+        "status": "success",
+        "command_id": command_id,
+        "duration_s": duration_s,
+        "instance_id": instance_id,
+        "images_reset": [
+            "vuln-lab-image:latest",
+            "vuln-java-image:latest",
+            "vuln-python-image:latest",
+        ],
+        "stdout_tail": stdout[-800:],
+    }
+
+
 @app.get("/agents/demo/runs")
 def list_demo_runs(limit: int = 20) -> dict:
     """List demo pipeline runs — newest first."""
