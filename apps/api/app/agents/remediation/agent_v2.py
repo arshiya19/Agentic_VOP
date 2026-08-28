@@ -829,22 +829,52 @@ def run_agentic_planner(
     # category gets the same context automatically.
     source = (issue.get("source") or "").lower()
     if "trivy-image" in source or "snyk-container" in source or "grype-image" in source:
+        # Per-lab metadata (populated upstream by planner_demo from
+        # connection_registry.metadata). Same block handles all image
+        # scanners; each lab gets its own paths + fix_pattern via the
+        # registry, so this file has NO per-lab hardcoding.
+        #
+        # Fallback to infra-lab defaults ONLY when the registry has no row
+        # for this scanner (real deploys always register the scanner —
+        # fallback exists so a fresh dev checkout with no registry doesn't
+        # break at pre-flight).
+        _reg_dockerfile = issue.get("file_path")
+        _reg_build_dir = issue.get("working_directory")
+        _reg_image_ref = issue.get("resource_name") or ""
+        _reg_fix_pattern = issue.get("fix_pattern") or ""
+        _reg_pkg_filter = issue.get("pkg_name_filter") or ""
+
+        _dockerfile_path = _reg_dockerfile or "/opt/vuln-labs/infra-lab/Dockerfile"
+        _build_directory = _reg_build_dir or "/opt/vuln-labs/infra-lab"
+        _image_ref = _reg_image_ref or "vuln-lab-image:latest"
+
         user_payload["execution_context"] = {
             "target_type": "container_image",
-            "fix_approach": (
+            # Prefer the per-scanner fix_pattern from connection_registry — it
+            # encodes the CORRECT fix shape for THIS lab (apt-unpin for infra,
+            # FROM-bump for java tomcat, pip-upgrade for python). Falls back
+            # to the generic apt-unpin advice only if no pattern is registered.
+            "fix_approach": _reg_fix_pattern
+            or (
                 "Edit the Dockerfile to REMOVE the vulnerable package version pin entirely "
                 "(e.g. change 'openssl=1.1.1f-1ubuntu2' to just 'openssl'). "
                 "This lets apt-get install the latest available patched version at build time. "
                 "Do NOT specify a target version — just remove the =X.Y.Z pin. "
                 "Then rebuild with docker build --no-cache."
             ),
-            "dockerfile_path": "/opt/vuln-labs/infra-lab/Dockerfile",
-            "build_directory": "/opt/vuln-labs/infra-lab",
-            "image_ref": "vuln-lab-image:latest",
-            "rebuild_command": "cd /opt/vuln-labs/infra-lab && docker build --no-cache -t vuln-lab-image:latest .",
-            "sed_pattern_example": "sed -i 's/<pkg>=<any_version>/<pkg>/' /opt/vuln-labs/infra-lab/Dockerfile",
-            "rescan_command": "trivy image vuln-lab-image:latest --scanners vuln --severity HIGH,CRITICAL --format json",
-            "rescan_target": "vuln-lab-image:latest (the rebuilt image, NOT ubuntu:20.04)",
+            "dockerfile_path": _dockerfile_path,
+            "build_directory": _build_directory,
+            "image_ref": _image_ref,
+            "rebuild_command": (
+                f"cd {_build_directory} && docker build --no-cache -t {_image_ref} ."
+            ),
+            "sed_pattern_example": (f"sed -i 's/<pkg>=<any_version>/<pkg>/' {_dockerfile_path}"),
+            "rescan_command": (
+                f"trivy image {_image_ref} --scanners vuln --severity HIGH,CRITICAL --format json"
+            ),
+            "rescan_target": (
+                f"{_image_ref} (the rebuilt image — NOT the base image tag it inherits from)"
+            ),
             "validation_guidance": (
                 "IMPORTANT: The re-scan validation must check for the ABSENCE of the SPECIFIC CVE being fixed, "
                 "NOT for zero total vulnerabilities. The image has OTHER packages with their own CVEs — "
@@ -877,6 +907,12 @@ def run_agentic_planner(
                 "grep -c without || true (grep returns exit 1 on zero matches, which breaks execution)",
             ],
         }
+        # Python-lab specific: registry can list which pip package names in
+        # the Dockerfile are in scope for this scanner. When present, SA-3
+        # scopes edits to those packages only (avoids touching OS packages
+        # like gcc-8-base that aren't in the Dockerfile).
+        if _reg_pkg_filter:
+            user_payload["execution_context"]["pkg_name_filter"] = _reg_pkg_filter
     elif "trivy-os" in source or "tenable" in source or "qualys" in source or "rapid7" in source:
         user_payload["execution_context"] = {
             "target_type": "host_os",
