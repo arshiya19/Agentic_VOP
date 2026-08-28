@@ -269,28 +269,40 @@ def _file_key_for(issue: dict, raw: dict | None) -> str:
     consequences noted for SCA (`raw.target` lowercase + relative-path
     resolution → all findings on same file batch together).
 
-    For container-image scanners (trivy-image, grype-image, snyk-container):
-    returns an EMPTY string so each image finding falls through to a singleton
-    `__no_file__:<issue_id>` key — one package per CVE, not one batched package
-    covering the whole image.
+    For container-image scanners (trivy-image, grype-image, snyk-container)
+    AND host-OS scanners (trivy-os, tenable-nessus, qualys-vmdr, rapid7):
+    returns an EMPTY string so each finding falls through to a singleton
+    `__no_file__:<issue_id>` key — one package per CVE, not one batched
+    package covering everything on the image / host.
 
     Rationale: image fixes edit a Dockerfile line per CVE (e.g. add / bump a
-    `RUN apt-get install --only-upgrade` for that specific package). Batching
-    N CVEs into one package puts N Dockerfile edits into one LLM composition,
-    where a single bad edit takes down the whole batch — and the ONE rescan
-    the LLM emits typically covers only one check_id, so the honest counting
-    layer only credits 1 fix even when N landed. Per-CVE packages (as
-    historically worked) match the natural unit of work: one CVE → one edit
-    → one docker rebuild → one rescan for that specific CVE.
+    `RUN apt-get install --only-upgrade` for that specific package). OS fixes
+    run `apt-get install --only-upgrade <pkg>` per package on the host. Both
+    have the same "no shared file, no shared edit" property — batching N CVEs
+    into one package puts N independent commands into one LLM composition,
+    where a single bad step takes down the whole batch. Meanwhile the ONE
+    rescan the LLM emits typically covers only one check_id, so the honest
+    counting layer only credits 1 fix even when N landed. Per-CVE packages
+    match the natural unit of work: one CVE → one package upgrade → one
+    rescan for that specific CVE.
 
     Per-file batching is genuinely helpful for SAST (all findings on one
     source file share a plan/apply cycle) and SCA (all pip pins in one
-    requirements.txt). Image fixes don't share that "one file, N cheap edits"
-    property — every fix triggers a full docker rebuild anyway.
+    requirements.txt). Image + OS fixes don't share that "one file, N cheap
+    edits" property — every fix triggers its own build or its own apt
+    transaction anyway.
     """
     raw = raw or {}
     src = (issue.get("source") or "").lower()
-    if "trivy-image" in src or "grype-image" in src or "snyk-container" in src:
+    if (
+        "trivy-image" in src
+        or "grype-image" in src
+        or "snyk-container" in src
+        or "trivy-os" in src
+        or "tenable-nessus" in src
+        or "qualys-vmdr" in src
+        or "rapid7" in src
+    ):
         return ""
 
     ctx = _extract_iac_context(issue, raw)
