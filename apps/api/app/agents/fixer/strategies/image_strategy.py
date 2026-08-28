@@ -31,6 +31,8 @@ Design principles held here (mirror IaCStrategy):
 
 from __future__ import annotations
 
+import re
+
 from ...remediation.verifier import _extract_shell_blocks
 from ..config import FixerConfig
 from ..models import (
@@ -60,6 +62,29 @@ from .base import BaseFixStrategy, runtime_lookup_skip_reason
 _DEFAULT_DOCKERFILE = "/opt/vuln-labs/infra-lab/Dockerfile"
 _DEFAULT_BUILD_DIR = "/opt/vuln-labs/infra-lab"
 _DEFAULT_IMAGE_REF = "vuln-lab-image:latest"
+
+
+# =============================================================================
+# LLM tag-hallucination guard
+# =============================================================================
+# Extracts `<image>:<tag>` refs from a sed replacement (or plain command) so
+# we can verify the target tag actually exists on Docker Hub before running
+# `docker build`. Scoped to sed s/…/…/ replacements and bare `FROM` lines —
+# never matches base tags being REPLACED (only the destination tag). Handles
+# common shell quoting: `s|FROM tomcat:9.0.30|FROM tomcat:9.0.31|`.
+#
+# Ignores refs like `<something>:<tag>` where the tag looks non-standard
+# (e.g. contains a slash, quotes, or nothing that looks like a version).
+# Docker Hub is the source of truth — if manifest inspect fails, we skip
+# the sed to avoid a doomed rebuild.
+_DOCKER_TAG_REPLACEMENT_RE = re.compile(
+    # sed replacement: s|<sep>...<sep>FROM image:tag<sep> — capture the
+    # NEW tag (after the second separator), not the OLD one being replaced.
+    # Also matches a plain `FROM image:tag` outside sed.
+    r"(?:sed\s+-i\s+[\"']?s[|/#,](?:[^|/#,]+)[|/#,])?"
+    r"FROM\s+([a-z0-9][a-z0-9._/-]*):([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
 
 
 # =============================================================================
@@ -263,6 +288,62 @@ class ImageStrategy(BaseFixStrategy):
             return True
 
         return False
+
+    # ==================================================================
+    # Docker Hub tag-existence guard
+    # ==================================================================
+    def _hallucinated_docker_tag_reason(self, executor: RemoteExecutor, command: str) -> str | None:
+        """Return a skip reason if the command's `FROM <image>:<tag>` target
+        does NOT exist on Docker Hub. Returns None if all tags exist, or the
+        command has no FROM target to check.
+
+        Uses `docker manifest inspect <image>:<tag>` on env2 — asks the
+        registry itself, so no allowlist / hardcoded tag list in our code.
+        Applies universally: any image scanner, any base image family.
+
+        Fail-open: any exec error (network / SSM timeout / rate-limit) →
+        assume the tag exists and let the fix proceed. Worst case: today's
+        behavior — a doomed rebuild wastes ~1 min but rescan still judges.
+        """
+        matches = _DOCKER_TAG_REPLACEMENT_RE.findall(command or "")
+        if not matches:
+            return None
+        # Deduplicate + skip likely non-registry refs (variable interpolation,
+        # ARG-referenced tags — `FROM $BASE_IMAGE:$TAG` etc.).
+        tags: list[str] = []
+        seen: set[str] = set()
+        for image, tag in matches:
+            ref = f"{image}:{tag}"
+            if ref in seen:
+                continue
+            if "$" in ref or "{" in ref:
+                continue
+            seen.add(ref)
+            tags.append(ref)
+        if not tags:
+            return None
+        # For a sed pattern, matches yields BOTH the old and new tag if the
+        # regex catches both `FROM <old>` and `FROM <new>` in the same line.
+        # That's fine — verifying an OLD tag exists is safe (it's the current
+        # state and will always exist unless the user deleted it, in which
+        # case the sed wouldn't match anyway).
+        for ref in tags:
+            probe = f"docker manifest inspect {ref} > /dev/null 2>&1 && echo OK || echo MISSING"
+            try:
+                r = executor.run_command(probe, timeout_s=30)
+            except (RemoteExecError, CommandTimeoutError):
+                # Fail-open: registry probe crashed — let the fix proceed.
+                return None
+            out = (r.stdout or "").strip()
+            if r.exit_code != 0 or out == "MISSING":
+                return (
+                    f"target Docker image tag {ref!r} does not exist on Docker Hub "
+                    "(the LLM likely hallucinated the tag). Skipping this step "
+                    "avoids a doomed rebuild; the scanner re-scan will report "
+                    "the CVE as still present so the finding is honestly counted "
+                    "as unfixed."
+                )
+        return None
 
     # ==================================================================
     # Phase 3 — Pre-flight
@@ -722,6 +803,37 @@ class ImageStrategy(BaseFixStrategy):
                         action=step_text[:200],
                         command=combined,
                         stdout="skipped: docker push not supported in env2 sandbox (no registry credentials)",
+                        stderr="",
+                        exit_code=0,
+                        duration_ms=0,
+                        status="success",
+                        started_at=ts,
+                        finished_at=ts,
+                    )
+                )
+                continue
+
+            # ── LLM hallucinated Docker image tag guard ──────────────────────
+            # If the step's sed replaces one FROM tag with another (or emits
+            # a bare FROM line), verify the target tag actually exists on
+            # Docker Hub. Skips the step cleanly when the LLM invented a
+            # non-existent tag like `tomcat:9.0.31-jdk8-openjdk-curl7.79.0`
+            # — saves a doomed docker build cycle. Fail-open if the probe
+            # itself errors.
+            hallucination_reason = self._hallucinated_docker_tag_reason(executor, combined)
+            if hallucination_reason:
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"   ⏭ Step {i} skipped — {hallucination_reason[:200]}",
+                )
+                ts = utcnow()
+                results.append(
+                    StepResult(
+                        step_num=i,
+                        action=step_text[:200],
+                        command=combined,
+                        stdout=f"skipped: {hallucination_reason}",
                         stderr="",
                         exit_code=0,
                         duration_ms=0,
