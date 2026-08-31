@@ -28,6 +28,45 @@ systemctl start docker
 usermod -aG docker ubuntu
 
 # =============================================================================
+# 0-vuln-baseline. Host OS vulnerable baseline (env1 == env2 parity)
+# -----------------------------------------------------------------------------
+# Ubuntu focal-updates only serves the LATEST patched build of each package,
+# so instances launched on different days drift apart (env2 launched ~42h
+# after env1 and self-patched apport/accountsservice past the versions env1
+# reported). That drift makes Trivy-OS findings unfixable on env2: the host
+# is already patched, so `apt-get install --only-upgrade` is a no-op and the
+# fix rolls back.
+#
+# Fix: pin apport + accountsservice to the BASE focal release (behind the
+# security patches) at provision time on BOTH env1 and env2 via this shared
+# module. Trivy-OS then reports genuine CVEs, and SA-4's
+# `apt-get install --only-upgrade <pkg>` moves the base release forward to
+# the patched focal-updates build (confirmed available:
+#   apport            2.20.11-0ubuntu27      -> 2.20.11-0ubuntu27.31
+#   accountsservice   0.6.55-0ubuntu11       -> 0.6.55-0ubuntu12~20.04.7).
+#
+# We do NOT `apt-mark hold` these — a held package cannot be upgraded, which
+# would block the very fix we want SA-4 to make. Instead we disable the
+# unattended-upgrade / apt-daily timers so the pinned baseline does not
+# self-patch between provision and fix.
+#
+# apparmor is deliberately EXCLUDED: Docker (which runs the trivy-image labs
+# on this same host) depends on AppArmor confinement, so downgrading it could
+# break container launches. It accounts for only ~9% of Trivy-OS findings;
+# apport + accountsservice cover ~90%, well above the fixable target.
+#
+# Scope: touches ONLY these two host packages + auto-upgrade timers. No
+# scanner, lab, or other functionality is affected. `|| true` keeps a fresh
+# provision resilient if a version is ever unavailable in a future archive
+# snapshot (baseline just won't downgrade; nothing else breaks).
+# =============================================================================
+apt-get install -y --allow-downgrades \
+  apport=2.20.11-0ubuntu27 \
+  accountsservice=0.6.55-0ubuntu11 || echo "WARNING: vuln-baseline downgrade failed (versions may be unavailable in archive)"
+systemctl disable --now unattended-upgrades 2>/dev/null || true
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
+# =============================================================================
 # 0a. Install AWS CLI v2 (self-contained, no system Python dependency conflicts)
 # =============================================================================
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
