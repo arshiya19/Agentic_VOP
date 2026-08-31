@@ -27,11 +27,10 @@ systemctl enable docker
 systemctl start docker
 usermod -aG docker ubuntu
 
-# Vuln baseline (env1==env2 parity): downgrade apport+accountsservice to base
-# focal release so Trivy-OS reports fixable CVEs; disable auto-upgrade so the
-# baseline doesn't self-patch. No apt-mark hold (would block the fix). apparmor
-# excluded (Docker depends on it). SA-4 fixes via apt-get --only-upgrade.
-apt-get install -y --allow-downgrades apport=2.20.11-0ubuntu27 accountsservice=0.6.55-0ubuntu11 || echo "WARN: vuln-baseline downgrade failed"
+# Vuln baseline parity (env1==env2): the focal AMI already ships vulnerable
+# apport/accountsservice; we only FREEZE them by disabling auto-upgrade so the
+# host doesn't self-patch and drift from env1. SA-4 fixes via apt-get
+# --only-upgrade (moves e.g. apport 27.8 -> 27.31, which the archive serves).
 systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
 
 # =============================================================================
