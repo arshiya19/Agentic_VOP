@@ -21,10 +21,42 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import traceback
 from typing import Any
 
 from ..fixer.models import FixContext, StrategyOutcome
+
+
+# =============================================================================
+# Fake-fix guard
+# =============================================================================
+# Historical "coordinated-image-generator" (now retired) seeded KB entries whose
+# only remediation_step was `echo 'UNFIXABLE: <CVE>'` — a no-op that never
+# attempts a real fix but returns exit 0, making the run look successful.
+# Those seed entries then get replayed by SA-3, "succeed" trivially, and get
+# re-captured here — creating a self-perpetuating loop of fake KB entries.
+#
+# This regex matches recipes whose entire body is a UNFIXABLE echo (optionally
+# with a "Skip — Unfixable" header). Refusing to capture these breaks the loop
+# and forces SA-3 to compose a real plan on the next attempt (which will either
+# actually fix the CVE, or honestly roll back — either way, real signal).
+_FAKE_UNFIXABLE_ECHO_RE = re.compile(r"echo\s+['\"]?UNFIXABLE\s*:", re.IGNORECASE)
+
+
+def _is_fake_unfixable_recipe(remediation_steps: list) -> bool:
+    """True if the recipe's ONLY step is an 'echo UNFIXABLE:*' no-op.
+
+    Multi-step recipes (real backup + edit + verify + rebuild + rescan) that
+    happen to include the word "UNFIXABLE" somewhere are NOT caught here —
+    only single-step echo-only recipes. Universal: works for any check_id,
+    scanner, or family.
+    """
+    if not remediation_steps or len(remediation_steps) != 1:
+        return False
+    step = remediation_steps[0]
+    step_text = (step.get("step") if isinstance(step, dict) else str(step)) or ""
+    return bool(_FAKE_UNFIXABLE_ECHO_RE.search(step_text))
 
 
 # =============================================================================
@@ -162,6 +194,28 @@ def capture_successful_fix(
     """
     # Guard: only successful, fully validated runs
     if outcome.status != "success":
+        return None
+
+    # Guard: refuse to capture "echo UNFIXABLE" fake-fix recipes. These are
+    # single-step echo-only plans that skip the real remediation and always
+    # exit 0 (see _is_fake_unfixable_recipe). Persisting them creates a
+    # self-perpetuating loop of fake KB entries that mask whether a CVE is
+    # actually fixable. Blocking the capture forces the next SA-3 run to
+    # compose a real plan — which either fixes the CVE or honestly rolls back.
+    _pathway_steps = (ctx.pathway or {}).get("remediation_steps") or []
+    if _is_fake_unfixable_recipe(_pathway_steps):
+        if emit_fn:
+            try:
+                emit_fn(
+                    ctx.agent_run_id,
+                    "kb-capture",
+                    "MESSAGE",
+                    "KB capture skipped: recipe is a single-step "
+                    "'echo UNFIXABLE' pseudo-fix that never attempts real "
+                    "remediation. Not persisted as a proven pattern.",
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
         return None
 
     # Guard: at minimum the scanner re-scan must have passed.
