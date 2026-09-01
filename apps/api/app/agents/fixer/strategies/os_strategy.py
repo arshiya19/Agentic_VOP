@@ -44,7 +44,7 @@ from ..tools.remote_exec import (
     RemoteExecError,
     RemoteExecutor,
 )
-from .base import BaseFixStrategy, runtime_lookup_skip_reason
+from .base import BaseFixStrategy, match_rescan_expected, runtime_lookup_skip_reason
 
 
 _RESCAN_CLI_MARKERS: tuple[str, ...] = (
@@ -569,12 +569,11 @@ class OSStrategy(BaseFixStrategy):
 
     @staticmethod
     def _check_expected(expected: str, actual: str, exit_code: int) -> bool:
-        if not expected or not expected.strip():
-            return exit_code == 0
-        e = expected.strip().lower()
-        if e in ("command exits 0", "exit 0", "exit code 0", "0"):
-            return exit_code == 0
-        return expected.strip() in actual
+        # Delegates to the shared matcher — see base.match_rescan_expected for
+        # why numeric expected values (from `grep -c '<CVE>' || true`) must be
+        # compared to the STRIPPED OUTPUT and not to exit_code (which `|| true`
+        # forces to 0 regardless of whether the CVE is still present).
+        return match_rescan_expected(expected, actual, exit_code)
 
     # ==================================================================
     # Phase 7 — Rollback
