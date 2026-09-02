@@ -136,6 +136,56 @@ def runtime_lookup_skip_reason(command: str) -> str | None:
 
 
 # =============================================================================
+# Shared rescan-result matcher
+# =============================================================================
+def match_rescan_expected(expected: str, actual: str, exit_code: int) -> bool:
+    """Correct comparator for scanner-rescan test outcomes.
+
+    The scanner rescan pattern that SA-3 typically emits is:
+
+        <scanner> ... | grep -c '<check_id>' || true
+
+    * `grep -c` prints an integer count (0 = CVE gone, N>0 = still present).
+    * `|| true` forces exit_code to 0 regardless of the count, so exit_code
+      alone cannot be trusted to distinguish "fixed" from "not fixed".
+
+    Historic bug (see os_strategy pre-2026-08-31): if `expected == "0"` was
+    treated as "check exit_code == 0", the rescan always passed because `||
+    true` masks the real result. Real successes and real failures both got
+    credited as fixed.
+
+    Semantics here:
+      * Empty expected            → trust exit code (backward-compatible).
+      * Numeric expected ("0", "3", ...) → strip actual and compare EXACTLY
+        (this is the `grep -c` shape — the only correct read of the count).
+      * Legacy exit-shape strings ("exit 0", "exit code 0", "command exits 0")
+        → trust exit code (backward-compatible for tests written that way).
+      * Any other expected string → substring match, with an exit_code == 0
+        guard so a legit-crashed rescan doesn't silently "pass".
+
+    No per-CVE, per-scanner, or per-family logic. Same rule for every strategy.
+    """
+    e = (expected or "").strip()
+    if not e:
+        return exit_code == 0
+    # `grep -c` numeric count → exact match, tolerating scanner stderr noise.
+    # Scanners like trivy emit INFO/WARN lines to stderr that some executors
+    # merge into `actual`. grep -c's count is ALWAYS a single numeric-only
+    # line — scan for the first such line and match against it. Never
+    # substring "0" in "10" (false positive on any multi-digit count).
+    if e.isdigit():
+        for line in (actual or "").splitlines():
+            stripped = line.strip()
+            if stripped.isdigit():
+                return stripped == e
+        return False
+    if e.lower() in ("command exits 0", "exit 0", "exit code 0"):
+        return exit_code == 0
+    # Text expected — substring match, but only when the command didn't crash.
+    return exit_code == 0 and e in actual
+
+
+# =============================================================================
 # Shared pre-flight: tool availability
 # =============================================================================
 def verify_tools(
