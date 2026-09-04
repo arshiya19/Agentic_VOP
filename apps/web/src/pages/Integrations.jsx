@@ -321,6 +321,46 @@ export default function Integrations() {
     setIsTriggering(false)
   }
 
+  // HITL pipeline: same as Run Demo Pipeline but pauses after SA-3 packages
+  // land. Cap = 5 per scanner (keeps approval queue reviewable). User
+  // approves/rejects each package in the Remediation page; approve triggers
+  // Sub-Agent 4 for that single package in the background.
+  const handleTriggerHITL = async () => {
+    if (selectedScanners.size === 0 || isTriggering) return
+    setIsTriggering(true)
+    setLastResult(null)
+
+    localStorage.setItem('pipelineMode', 'real')
+    window.dispatchEvent(new Event('pipelineModeChanged'))
+
+    const eventId = `EVT-HITL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    try {
+      const res = await fetch(`${API_URL}/agents/trigger_demo_hitl`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_id: eventId,
+          action: 'FULL',
+          targets: { scanners: Array.from(selectedScanners) },
+        }),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+      }
+      const data = await res.json()
+      setLastResult({
+        ok: true,
+        message: `HITL pipeline triggered (${data.event_id}) — real fetch → sample (cap 5) → remediate → PAUSED. Approve/Reject packages on the Remediation page.`,
+      })
+      setTimeout(() => setIsTriggering(false), 5000)
+      return
+    } catch (err) {
+      setLastResult({ ok: false, message: `Failed to trigger HITL: ${err.message}` })
+    }
+    setIsTriggering(false)
+  }
+
   const allTools = useMemo(() => {
     return integrationsData.flatMap(group =>
       group.tools.map(tool => ({
@@ -439,6 +479,17 @@ export default function Integrations() {
                 {isTriggering
                   ? 'Triggering…'
                   : `Run Demo Pipeline${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
+              </button>
+              <button
+                type="button"
+                className="scanner-runner-btn scanner-runner-btn-hitl"
+                onClick={handleTriggerHITL}
+                disabled={selectedScanners.size === 0 || isTriggering}
+                title="Human-in-the-loop: real fetch → sample (cap 5/scanner) → remediate → PAUSE. Approve/Reject each package in Remediation page to trigger fix."
+              >
+                {isTriggering
+                  ? 'Triggering…'
+                  : `👤 Run HITL Pipeline${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
               </button>
               {lastResult && (
                 <div

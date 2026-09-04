@@ -241,6 +241,79 @@ def trigger_demo_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -
     )
 
 
+@app.post("/agents/trigger_demo_hitl", response_model=RunCreated, status_code=201)
+def trigger_demo_hitl_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> RunCreated:
+    """Kick off the demo pipeline in HUMAN-IN-THE-LOOP mode.
+
+    Same as /agents/trigger_demo but:
+      * per_scanner_cap=5 (keeps the approval queue reviewable)
+      * hitl=True → SA-3 packages land as awaiting_approval; SA-4 does NOT
+        auto-run. The user approves/rejects each package in the Remediation
+        page; approve triggers SA-4 for that package in the background.
+    """
+    import uuid
+
+    sb_pub = supabase_admin()
+    sb_demo = supabase_admin_demo()
+
+    real_insert = (
+        sb_pub.table("agent_runs")
+        .insert(
+            {
+                "event_id": payload.event_id,
+                "triggered_by": payload.persona,
+                "action": payload.action,
+                "targets": payload.targets.model_dump(),
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not real_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create real run")
+    real_run_id = real_insert.data[0]["run_id"]
+
+    demo_event_id = f"demo-hitl-{uuid.uuid4().hex[:8]}"
+    demo_insert = (
+        sb_demo.table("agent_runs")
+        .insert(
+            {
+                "event_id": demo_event_id,
+                "triggered_by": "demo-hitl",
+                "action": "FULL",
+                "targets": {
+                    "demo": True,
+                    "hitl": True,
+                    "scanners": payload.targets.scanners,
+                    "real_run_id": real_run_id,
+                },
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not demo_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create demo HITL run")
+    demo_row = demo_insert.data[0]
+
+    def _run_real_then_demo_hitl():
+        run_master(real_run_id)
+        run_demo_master(
+            demo_row["run_id"],
+            real_run_id=real_run_id,
+            hitl=True,
+            per_scanner_cap=5,
+        )
+
+    background_tasks.add_task(_run_real_then_demo_hitl)
+
+    return RunCreated(
+        run_id=demo_row["run_id"],
+        event_id=demo_row["event_id"],
+        status=demo_row["status"],
+    )
+
+
 @app.post("/agents/demo/reset")
 def reset_demo_state() -> dict:
     """Wipe demo output tables. Keeps demo.raw_findings (the 5-row seed fixture).
@@ -599,6 +672,201 @@ echo "=== Reset complete ==="
     }
 
 
+# =============================================================================
+# Shared helper — bundle pristine repo files into ONE SSM shell script, ship,
+# poll for completion. Same base64-in-base64 transport as reset-images so file
+# contents never touch shell quoting.
+# =============================================================================
+def _reset_files_via_ssm(
+    *,
+    label: str,
+    files: list[tuple[str, str]],  # [(remote_path, file_content), ...]
+    remote_bak_dir: str | None,  # e.g. "/opt/vuln-labs/appsec-lab" → wipes *.bak-*
+    ssm_timeout_s: int = 180,
+) -> dict:
+    """Base64-encode each file, wrap into one shell script, SSM send + poll.
+
+    Returns the standard success dict on completion. Raises HTTPException on
+    any failure (mirrors reset_env2_images error surface).
+    """
+    import base64
+    import time
+
+    import boto3
+
+    instance_id = settings.fixer_env2_instance_id
+    if not instance_id:
+        raise HTTPException(
+            status_code=500,
+            detail="fixer_env2_instance_id not configured — set it in .env",
+        )
+
+    # Compose the shell script — one base64-decode-then-write per file.
+    lines: list[str] = ["#!/bin/bash", "set -e", f"echo '=== Resetting {label} ==='"]
+    if remote_bak_dir:
+        lines.append(f"rm -f {remote_bak_dir}/*.bak-* 2>/dev/null || true")
+    for remote_path, content in files:
+        b64 = base64.b64encode(content.encode()).decode()
+        remote_dir = remote_path.rsplit("/", 1)[0]
+        lines.append(f"mkdir -p {remote_dir}")
+        lines.append(f"echo '{b64}' | base64 -d > {remote_path}")
+        lines.append(f"echo '  restored: {remote_path}'")
+    lines.append(f"echo '=== {label} reset complete ==='")
+    reset_script = "\n".join(lines) + "\n"
+
+    outer_b64 = base64.b64encode(reset_script.encode()).decode()
+    started = datetime.now(UTC)
+
+    try:
+        ssm = boto3.client("ssm", region_name=settings.aws_region)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"Failed to create SSM client: {type(e).__name__}: {e}"
+        ) from e
+
+    try:
+        resp = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            TimeoutSeconds=ssm_timeout_s + 30,
+            Parameters={"commands": [f"echo {outer_b64} | base64 -d | bash"]},
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"SSM send_command failed: {type(e).__name__}: {e}"
+        ) from e
+
+    command_id = resp["Command"]["CommandId"]
+    deadline = time.time() + ssm_timeout_s
+    invocation = None
+    while time.time() < deadline:
+        try:
+            invocation = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        except ssm.exceptions.InvocationDoesNotExist:
+            time.sleep(2)
+            continue
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=f"SSM get_command_invocation failed: {type(e).__name__}: {e}",
+            ) from e
+        if invocation["Status"] not in ("InProgress", "Pending", "Delayed"):
+            break
+        time.sleep(3)
+    else:
+        raise HTTPException(
+            status_code=504,
+            detail=f"{label} reset exceeded {ssm_timeout_s}s (command_id={command_id})",
+        )
+
+    status = invocation["Status"]
+    stdout = invocation.get("StandardOutputContent") or ""
+    stderr = invocation.get("StandardErrorContent") or ""
+    duration_s = int((datetime.now(UTC) - started).total_seconds())
+
+    if status != "Success":
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": f"{label} reset failed with SSM status {status}",
+                "command_id": command_id,
+                "stderr_tail": stderr[-1500:],
+                "stdout_tail": stdout[-1500:],
+                "duration_s": duration_s,
+            },
+        )
+
+    return {
+        "status": "success",
+        "command_id": command_id,
+        "duration_s": duration_s,
+        "instance_id": instance_id,
+        "files_restored": [p for p, _ in files],
+        "stdout_tail": stdout[-800:],
+    }
+
+
+@app.post("/admin/env2/reset-appsec")
+def reset_env2_appsec() -> dict:
+    """Reset appsec-lab source files on env2 to their pristine vulnerable state.
+
+    Covers scanners: semgrep-ec2 (SAST on .py sources) and trivy-fs-ec2
+    (SCA on requirements.txt). Restores all files under
+    infra/vuln-labs/appsec-lab/ to /opt/vuln-labs/appsec-lab/ on env2.
+
+    No impact on CSPM lab, image labs, or serverless lab.
+    """
+    from pathlib import Path
+
+    repo_dir = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs" / "appsec-lab"
+    if not repo_dir.is_dir():
+        raise HTTPException(status_code=500, detail=f"pristine source dir missing: {repo_dir}")
+    src_files = sorted(f for f in repo_dir.iterdir() if f.is_file())
+    if not src_files:
+        raise HTTPException(status_code=500, detail=f"{repo_dir} has no files to restore")
+
+    remote_dir = "/opt/vuln-labs/appsec-lab"
+    files = [(f"{remote_dir}/{f.name}", f.read_text(encoding="utf-8")) for f in src_files]
+
+    return _reset_files_via_ssm(
+        label="AppSec Lab (semgrep + trivy-fs)",
+        files=files,
+        remote_bak_dir=remote_dir,
+        ssm_timeout_s=120,
+    )
+
+
+@app.post("/admin/env2/reset-serverless")
+def reset_env2_serverless() -> dict:
+    """Reset serverless-lab source + Terraform template on env2 to vulnerable state.
+
+    Covers scanner: serverless-ec2 (custom Semgrep rules on Lambda source +
+    IaC checks on main.tf). Restores:
+      - /opt/vuln-labs/serverless-lab/lambda_function.py  (from repo pristine)
+      - /opt/vuln-labs/serverless-lab/main.tf             (from repo template
+        with NAME_PLACEHOLDER / REGION_PLACEHOLDER substituted the same way
+        modules/lab-instance/user-data.sh.tpl does at provisioning time)
+
+    No terraform apply is run — the file reset alone restores the source-of-
+    truth that SA-3 reads and SA-4 edits. If deployed AWS state needs to
+    match, the next fix run's `terraform apply` will reconcile.
+
+    No impact on CSPM lab, image labs, or appsec lab.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs"
+    py_src = repo_root / "serverless-lab" / "lambda_function.py"
+    tf_template = repo_root / "serverless-lab-template.tf"
+    if not py_src.is_file():
+        raise HTTPException(status_code=500, detail=f"pristine lambda source missing: {py_src}")
+    if not tf_template.is_file():
+        raise HTTPException(
+            status_code=500, detail=f"pristine terraform template missing: {tf_template}"
+        )
+
+    # Same substitutions as modules/lab-instance/user-data.sh.tpl performs on
+    # first-boot rendering. Keep in sync with env2 name_prefix in env2/main.tf.
+    tf_rendered = (
+        tf_template.read_text(encoding="utf-8")
+        .replace("NAME_PLACEHOLDER", "vop-vuln-lab-env2")
+        .replace("REGION_PLACEHOLDER", settings.aws_region or "us-east-1")
+    )
+
+    remote_dir = "/opt/vuln-labs/serverless-lab"
+    files = [
+        (f"{remote_dir}/lambda_function.py", py_src.read_text(encoding="utf-8")),
+        (f"{remote_dir}/main.tf", tf_rendered),
+    ]
+
+    return _reset_files_via_ssm(
+        label="Serverless Lab",
+        files=files,
+        remote_bak_dir=remote_dir,
+        ssm_timeout_s=60,
+    )
+
+
 @app.get("/agents/demo/runs")
 def list_demo_runs(limit: int = 20) -> dict:
     """List demo pipeline runs — newest first."""
@@ -670,19 +938,40 @@ def get_demo_remediation_package(pkg_id: int) -> dict:
 
 
 @app.post("/admin/remediation-packages/demo/{pkg_id}/approve")
-def approve_demo_remediation_package(pkg_id: int, body: dict | None = None) -> dict:
-    """Approve a demo package — same logic as the real endpoint but hits the demo DB."""
+def approve_demo_remediation_package(
+    pkg_id: int,
+    background_tasks: BackgroundTasks,
+    body: dict | None = None,
+) -> dict:
+    """Approve a demo package + dispatch Sub-Agent 4 for it in the background.
+
+    HITL flow: this is the "resume" step. The user reviewed the package in the
+    Remediation page and clicked Approve. We flip status to
+    ready_for_execution and kick off the fixer for THIS single package
+    (async). Approvals can be issued in any order; env2's concurrency lock
+    serializes actual execution.
+    """
     sb = supabase_admin_demo()
-    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    resp = (
+        sb.table("remediation_packages")
+        .select("id, status, issue_id, agent_run_id")
+        .eq("id", pkg_id)
+        .limit(1)
+        .execute()
+    )
     if not resp.data:
         raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
-    current = resp.data[0]["status"]
+    row = resp.data[0]
+    current = row["status"]
     if current in ("approved", "ready_for_execution"):
         return {"id": pkg_id, "status": current, "message": "already approved"}
     if current == "rejected":
         raise HTTPException(status_code=409, detail="package was rejected; cannot approve")
 
     approved_by = (body or {}).get("approved_by", "system")
+    agent_run_id = row.get("agent_run_id")
+    issue_id = row.get("issue_id")
+
     sb.table("remediation_packages").update(
         {
             "status": "ready_for_execution",
@@ -691,24 +980,162 @@ def approve_demo_remediation_package(pkg_id: int, body: dict | None = None) -> d
             "rejected_reason": None,
         }
     ).eq("id", pkg_id).execute()
-    return {"id": pkg_id, "status": "ready_for_execution", "approved_by": approved_by}
+
+    # Trace the human action in the demo pipeline log so the Agents page
+    # shows it in the flow (between the paused SA-3 and the incoming SA-4).
+    if agent_run_id:
+        from .agents.trace_demo import emit_trace_demo  # noqa: PLC0415
+
+        try:
+            emit_trace_demo(
+                agent_run_id,
+                "master",
+                "MESSAGE",
+                f"👤 Package #{pkg_id} (issue {issue_id}) APPROVED by {approved_by} "
+                "— dispatching Sub-Agent 4 in the background",
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    # Async dispatch — SA-4 runs in a background task, endpoint returns
+    # immediately. UI polls Agents page trace / fix_runs table to watch it.
+    # Signature matches master_demo._fix_node's run_fixer call (pkg_id
+    # positional; sb + emit_fn keyword). Writes into demo.fix_runs.
+    #
+    # After SA-4 completes, sync the OUTCOME back to the package row so the
+    # Remediation page reflects the fix result (fixed / rolled_back /
+    # fix_failed) rather than staying stuck at "ready_for_execution" forever.
+    def _dispatch_fix():
+        from .agents.trace_demo import emit_trace_demo as _emit  # noqa: PLC0415
+
+        sb_demo = supabase_admin_demo()
+        try:
+            from .agents.fixer import run_fixer  # noqa: PLC0415
+
+            fix_run_id = run_fixer(
+                pkg_id,
+                agent_run_id=agent_run_id,
+                sb=sb_demo,
+                emit_fn=_emit,
+                environment="sandbox",
+            )
+        except Exception as e:  # noqa: BLE001
+            if agent_run_id:
+                try:
+                    _emit(
+                        agent_run_id,
+                        "master",
+                        "ERROR",
+                        f"Sub-Agent 4 dispatch for package #{pkg_id} crashed: "
+                        f"{type(e).__name__}: {str(e)[:200]}",
+                    )
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            # Reflect the crash on the package so the UI doesn't hang at
+            # ready_for_execution — user needs to know something broke.
+            try:
+                sb_demo.table("remediation_packages").update({"status": "fix_failed"}).eq(
+                    "id", pkg_id
+                ).execute()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            return
+
+        # SA-4 finished (successfully or with rollback). Look up its outcome
+        # and map to a terminal package status. Fix-run statuses come from
+        # apps/api/app/agents/fixer/models.py — success / rolled_back /
+        # partial_success / failed.
+        _FIX_TO_PACKAGE = {
+            "success": "fixed",
+            "partial_success": "fixed",
+            "rolled_back": "rolled_back",
+            "failed": "fix_failed",
+        }
+        try:
+            resp = (
+                sb_demo.table("fix_runs").select("status").eq("id", fix_run_id).limit(1).execute()
+            )
+            fix_status = (resp.data[0]["status"] if resp.data else None) or "failed"
+            pkg_status = _FIX_TO_PACKAGE.get(fix_status, "fix_failed")
+            try:
+                sb_demo.table("remediation_packages").update({"status": pkg_status}).eq(
+                    "id", pkg_id
+                ).execute()
+                sync_msg = (
+                    f"📦 Package #{pkg_id} status updated: "
+                    f"ready_for_execution → {pkg_status} "
+                    f"(fix_run #{fix_run_id} = {fix_status})"
+                )
+            except Exception as sync_err:  # noqa: BLE001
+                # The remediation_packages_status_check CHECK constraint blocks
+                # the fix-outcome values until migration 0039 is applied. If
+                # that's the case, degrade gracefully — the fix itself already
+                # succeeded, and the outcome is visible via fix_runs.
+                err_txt = str(sync_err)
+                if "remediation_packages_status_check" in err_txt or "23514" in err_txt:
+                    sync_msg = (
+                        f"📦 Package #{pkg_id} fix done "
+                        f"(fix_run #{fix_run_id} = {fix_status}). "
+                        f"Status stays 'ready_for_execution' — apply migration "
+                        f"0039_remediation_package_fix_outcomes.sql to enable "
+                        f"'{pkg_status}' as a package status."
+                    )
+                else:
+                    raise
+            if agent_run_id:
+                try:
+                    _emit(agent_run_id, "master", "MESSAGE", sync_msg)
+                except Exception:  # noqa: BLE001, S110
+                    pass
+        except Exception as e:  # noqa: BLE001
+            if agent_run_id:
+                try:
+                    _emit(
+                        agent_run_id,
+                        "master",
+                        "ERROR",
+                        f"Failed to sync package #{pkg_id} status from fix_run "
+                        f"#{fix_run_id}: {type(e).__name__}: {str(e)[:200]}",
+                    )
+                except Exception:  # noqa: BLE001, S110
+                    pass
+
+    background_tasks.add_task(_dispatch_fix)
+
+    return {
+        "id": pkg_id,
+        "status": "ready_for_execution",
+        "approved_by": approved_by,
+        "fixer_dispatched": True,
+    }
 
 
 @app.post("/admin/remediation-packages/demo/{pkg_id}/reject")
 def reject_demo_remediation_package(pkg_id: int, body: dict | None = None) -> dict:
-    """Reject a demo package — same logic as the real endpoint but hits the demo DB."""
+    """Reject a demo package — no SA-4 dispatch. Emits a trace event so the
+    Agents page shows the human action alongside the (paused) pipeline."""
     sb = supabase_admin_demo()
-    resp = sb.table("remediation_packages").select("status").eq("id", pkg_id).limit(1).execute()
+    resp = (
+        sb.table("remediation_packages")
+        .select("id, status, issue_id, agent_run_id")
+        .eq("id", pkg_id)
+        .limit(1)
+        .execute()
+    )
     if not resp.data:
         raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
-    current = resp.data[0]["status"]
+    row = resp.data[0]
+    current = row["status"]
     if current in ("approved", "ready_for_execution"):
         raise HTTPException(status_code=409, detail=f"package is already {current}; cannot reject")
     if current == "rejected":
         return {"id": pkg_id, "status": "rejected", "message": "already rejected"}
 
-    reason = (body or {}).get("reason", "No reason provided")
+    reason = (body or {}).get("reason") or "No reason provided"
     rejected_by = (body or {}).get("rejected_by", "system")
+    agent_run_id = row.get("agent_run_id")
+    issue_id = row.get("issue_id")
+
     sb.table("remediation_packages").update(
         {
             "status": "rejected",
@@ -717,6 +1144,25 @@ def reject_demo_remediation_package(pkg_id: int, body: dict | None = None) -> di
             "approved_at": datetime.now(UTC).isoformat(),
         }
     ).eq("id", pkg_id).execute()
+
+    if agent_run_id:
+        from .agents.trace_demo import emit_trace_demo  # noqa: PLC0415
+
+        try:
+            emit_trace_demo(
+                agent_run_id,
+                "master",
+                "MESSAGE",
+                f"👤 Package #{pkg_id} (issue {issue_id}) REJECTED by {rejected_by}"
+                + (
+                    f" — reason: {reason[:200]}"
+                    if reason and reason != "No reason provided"
+                    else ""
+                ),
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     return {"id": pkg_id, "status": "rejected", "reason": reason, "rejected_by": rejected_by}
 
 

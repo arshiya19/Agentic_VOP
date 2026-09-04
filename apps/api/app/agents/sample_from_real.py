@@ -119,7 +119,11 @@ _SEVERITY_RANK = {
 }
 
 
-def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> dict:
+def sample_and_copy_ec2_issues(
+    run_id: str,
+    real_run_id: str | None = None,
+    per_scanner_cap: int | None = None,
+) -> dict:
     """Query public.issues (source LIKE '%-ec2'), classify + group by family,
     copy 1 per family into demo.issues under this run_id.
 
@@ -129,6 +133,10 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
             THIS real fetch (so we don't pull in stale -ec2 rows from prior
             runs). If None, samples across every -ec2 issue in the DB —
             useful when the demo is triggered without a chained real fetch.
+        per_scanner_cap: if provided, overrides EVERY entry in `_SOURCE_SCOOPS`
+            with this value. Used by the HITL pipeline to keep the queue
+            reviewable (default cap=5 keeps the total sample ≤ 5 × scanners).
+            None (default) keeps each scanner's normal scoop.
 
     Returns: {"sampled": N, "families_found": [...], "families_missing": [...]}
     """
@@ -270,7 +278,15 @@ def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> d
     for iss in ec2_issues:
         by_source.setdefault(iss.get("source") or "", []).append(iss)
 
-    for source_name, n in _SOURCE_SCOOPS.items():
+    # HITL override: cap every scanner to the same low number so the
+    # approval queue stays reviewable. Keeps _SOURCE_SCOOPS as the default
+    # for the auto-demo pipeline (unchanged behavior when cap is None).
+    _effective_scoops = (
+        {k: per_scanner_cap for k in _SOURCE_SCOOPS}
+        if per_scanner_cap is not None
+        else _SOURCE_SCOOPS
+    )
+    for source_name, n in _effective_scoops.items():
         pool = by_source.get(source_name, [])
         if not pool:
             emit_trace_demo(
