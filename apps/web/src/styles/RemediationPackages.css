@@ -272,6 +272,10 @@
 .rmp-status-pill.st-approved            { background: #1d3a2a; color: #5dc28f; }
 .rmp-status-pill.st-ready_for_execution { background: #1d3a2a; color: #5dc28f; }
 .rmp-status-pill.st-rejected            { background: #3a1d1d; color: #e2876f; }
+/* Terminal fix-outcome states (set by HITL approve flow after SA-4 completes) */
+.rmp-status-pill.st-fixed               { background: #14532d; color: #86efac; }
+.rmp-status-pill.st-rolled_back         { background: #3a2a1d; color: #fbbf24; }
+.rmp-status-pill.st-fix_failed          { background: #3a1d1d; color: #f87171; }
 
 .rmp-view-btn {
   background: transparent;

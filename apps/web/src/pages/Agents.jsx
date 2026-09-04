@@ -65,8 +65,13 @@ export default function Agents() {
   const [selectedTrace, setSelectedTrace] = useState(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [modelConfigOpen, setModelConfigOpen] = useState(false)
-  // env2 reset state — button next to Real/Demo toggle
-  const [resetting, setResetting] = useState(false)
+  // env2 reset state — buttons next to Real/Demo toggle
+  // `resettingLabel` holds the label of the button currently running (e.g.
+  // 'CSPM'). Only that button shows the spinner; the others stay disabled
+  // but keep their normal label so the UI is clear about which reset is in
+  // flight. null when no reset is running.
+  const [resettingLabel, setResettingLabel] = useState(null)
+  const resetting = resettingLabel !== null
   const [resetToast, setResetToast] = useState(null)  // { kind: 'success'|'error', message: string }
   // Contextual switch: 'real' (supabase realtime on public.*) or 'demo' (poll
   // backend demo endpoints). Set by Integrations page's trigger buttons; can
@@ -195,42 +200,98 @@ export default function Agents() {
     window.dispatchEvent(new Event('pipelineModeChanged'))
   }
 
-  const handleResetEnv2 = async () => {
+  // Shared runner for all 4 lab-reset buttons. `resetting` is a single flag
+  // that blocks ALL reset buttons while any one is running — env2 is a shared
+  // sandbox so overlapping resets would race on the same host.
+  const runReset = async ({ label, endpoint, confirmMsg, successFmt }) => {
     if (resetting) return
-    const ok = window.confirm(
-      "Reset env2 to the vulnerable baseline?\n\n" +
-      "This will:\n" +
-      "  • terraform destroy the current lab resources\n" +
-      "  • wipe S3 terraform state + DynamoDB lock\n" +
-      "  • restore main.tf from main.tf.original\n" +
-      "  • terraform apply the fresh vulnerable baseline\n\n" +
-      "Takes ~60 seconds. Do not trigger a demo run during this."
-    )
-    if (!ok) return
-    setResetting(true)
+    if (confirmMsg && !window.confirm(confirmMsg)) return
+    setResettingLabel(label)
     setResetToast(null)
     try {
-      const res = await fetch(`${API_URL}/admin/env2/reset`, { method: 'POST' })
+      const res = await fetch(`${API_URL}${endpoint}`, { method: 'POST' })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
-        const detail = typeof body?.detail === 'string' ? body.detail : JSON.stringify(body?.detail || body)
-        setResetToast({ kind: 'error', message: `Reset failed: ${detail.slice(0, 300)}` })
+        const detail = typeof body?.detail === 'string'
+          ? body.detail
+          : JSON.stringify(body?.detail || body)
+        setResetToast({ kind: 'error', message: `${label} reset failed: ${detail.slice(0, 300)}` })
       } else {
-        const bits = []
-        if (body.checkov_failed != null) bits.push(`${body.checkov_failed} checkov failures`)
-        if (body.new_sg_id) bits.push(`new SG ${body.new_sg_id}`)
-        if (body.duration_s != null) bits.push(`${body.duration_s}s`)
         setResetToast({
           kind: 'success',
-          message: `✅ env2 cleaned — ${bits.join(' · ') || 'ready'}`,
+          message: successFmt ? successFmt(body) : `✅ ${label} reset — ready`,
         })
       }
     } catch (e) {
-      setResetToast({ kind: 'error', message: `Reset request failed: ${e.message || e}` })
+      setResetToast({ kind: 'error', message: `${label} reset request failed: ${e.message || e}` })
     } finally {
-      setResetting(false)
+      setResettingLabel(null)
     }
   }
+
+  const handleResetCSPM = () => runReset({
+    label: 'CSPM',
+    endpoint: '/admin/env2/reset',
+    confirmMsg:
+      'Reset CSPM lab (checkov-ec2) to the vulnerable baseline?\n\n' +
+      'This will:\n' +
+      '  • terraform destroy the current lab resources\n' +
+      '  • wipe S3 terraform state + DynamoDB lock\n' +
+      '  • restore main.tf from the pristine template\n' +
+      '  • terraform apply the fresh vulnerable baseline\n\n' +
+      'Takes ~60 seconds. Do not trigger a demo run during this.',
+    successFmt: (body) => {
+      const bits = []
+      if (body.checkov_failed != null) bits.push(`${body.checkov_failed} checkov failures`)
+      if (body.new_sg_id) bits.push(`new SG ${body.new_sg_id}`)
+      if (body.duration_s != null) bits.push(`${body.duration_s}s`)
+      return `✅ CSPM reset — ${bits.join(' · ') || 'ready'}`
+    },
+  })
+
+  const handleResetImages = () => runReset({
+    label: 'Images',
+    endpoint: '/admin/env2/reset-images',
+    confirmMsg:
+      'Reset all 3 image labs (infra + java + python) to their vulnerable baseline?\n\n' +
+      'Covers scanners: trivy-image-ec2, trivy-image-java-ec2, trivy-image-python-ec2.\n\n' +
+      'Rebuilds each Docker image with --no-cache. Takes ~2-3 minutes.\n' +
+      'Do not trigger a demo run during this.',
+    successFmt: (body) => {
+      const imgs = (body.images_reset || []).length
+      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
+      return `✅ Images reset — ${imgs} image(s)${secs}`
+    },
+  })
+
+  const handleResetAppSec = () => runReset({
+    label: 'AppSec',
+    endpoint: '/admin/env2/reset-appsec',
+    confirmMsg:
+      'Reset AppSec lab source files to their vulnerable baseline?\n\n' +
+      'Covers scanners: semgrep-ec2 (SAST) and trivy-fs-ec2 (SCA).\n' +
+      'Restores 7 files under /opt/vuln-labs/appsec-lab/. Takes ~10 seconds.',
+    successFmt: (body) => {
+      const n = (body.files_restored || []).length
+      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
+      return `✅ AppSec reset — ${n} file(s)${secs}`
+    },
+  })
+
+  const handleResetServerless = () => runReset({
+    label: 'Serverless',
+    endpoint: '/admin/env2/reset-serverless',
+    confirmMsg:
+      'Reset Serverless lab (lambda_function.py + main.tf) to vulnerable baseline?\n\n' +
+      'Covers scanner: serverless-ec2.\n' +
+      'Restores /opt/vuln-labs/serverless-lab/{lambda_function.py, main.tf}. Takes ~10 seconds.\n' +
+      'Note: file-only reset — deployed AWS state is reconciled by the next fix run\'s terraform apply.',
+    successFmt: (body) => {
+      const n = (body.files_restored || []).length
+      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
+      return `✅ Serverless reset — ${n} file(s)${secs}`
+    },
+  })
 
   // Auto-dismiss the reset toast after 8s so it doesn't cover the trace
   useEffect(() => {
@@ -471,35 +532,47 @@ export default function Agents() {
               </p>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                onClick={handleResetEnv2}
-                disabled={resetting}
-                title="Destroy + recreate env2 to the vulnerable baseline (~60s)"
-                style={{
-                  padding: '6px 14px',
-                  borderRadius: 999,
-                  border: '1px solid ' + (resetting ? '#334155' : '#f59e0b'),
-                  background: resetting ? 'transparent' : 'rgba(245,158,11,0.12)',
-                  color: resetting ? '#94a3b8' : '#f59e0b',
-                  fontSize: 12, fontWeight: 600,
-                  cursor: resetting ? 'wait' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                }}
-              >
-                {resetting ? (
-                  <>
-                    <span style={{
-                      width: 10, height: 10, border: '2px solid currentColor',
-                      borderTopColor: 'transparent', borderRadius: '50%',
-                      animation: 'spin 0.8s linear infinite', display: 'inline-block',
-                    }} />
-                    Resetting env2…
-                  </>
-                ) : (
-                  <>🧹 Reset env2</>
-                )}
-              </button>
+              {[
+                { label: 'CSPM', onClick: handleResetCSPM, title: 'Destroy + recreate CSPM lab (checkov-ec2) — ~60s' },
+                { label: 'Images', onClick: handleResetImages, title: 'Rebuild all 3 image labs (infra + java + python) — ~2-3 min' },
+                { label: 'AppSec', onClick: handleResetAppSec, title: 'Restore appsec-lab files (semgrep + trivy-fs) — ~10s' },
+                { label: 'Serverless', onClick: handleResetServerless, title: 'Restore serverless-lab files (lambda + main.tf) — ~10s' },
+              ].map(({ label, onClick, title }) => {
+                const isMe = resettingLabel === label
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={onClick}
+                    disabled={resetting}
+                    title={title}
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: 999,
+                      border: '1px solid ' + (resetting && !isMe ? '#334155' : '#f59e0b'),
+                      background: resetting && !isMe ? 'transparent' : 'rgba(245,158,11,0.12)',
+                      color: resetting && !isMe ? '#64748b' : '#f59e0b',
+                      opacity: resetting && !isMe ? 0.55 : 1,
+                      fontSize: 12, fontWeight: 600,
+                      cursor: resetting ? 'wait' : 'pointer',
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                    }}
+                  >
+                    {isMe ? (
+                      <>
+                        <span style={{
+                          width: 10, height: 10, border: '2px solid currentColor',
+                          borderTopColor: 'transparent', borderRadius: '50%',
+                          animation: 'spin 0.8s linear infinite', display: 'inline-block',
+                        }} />
+                        Resetting {label}…
+                      </>
+                    ) : (
+                      <>🧹 Reset {label}</>
+                    )}
+                  </button>
+                )
+              })}
               <button
                 type="button"
                 onClick={() => setModeManual('real')}

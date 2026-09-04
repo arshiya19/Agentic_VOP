@@ -30,6 +30,11 @@ const STATUS_LABEL = {
   approved: 'Approved',
   rejected: 'Rejected',
   ready_for_execution: 'Ready for Execution',
+  // Terminal fix-outcome states set by the HITL approve flow after SA-4
+  // completes (see main.py approve endpoint background task).
+  fixed: 'Fixed',
+  rolled_back: 'Rolled Back',
+  fix_failed: 'Fix Failed',
 }
 
 const VALIDATION_TONE = {
@@ -343,7 +348,7 @@ export default function Remediation() {
           {/* Toolbar — just filter pills now, action moved into stats strip */}
           <div className="rmp-toolbar">
             <div className="rmp-filter-group">
-              {['all', 'awaiting_approval', 'ready_for_execution', 'rejected'].map(s => (
+              {['all', 'awaiting_approval', 'ready_for_execution', 'fixed', 'rolled_back', 'fix_failed', 'rejected'].map(s => (
                 <button
                   key={s}
                   className={`rmp-filter-pill ${statusFilter === s ? 'active' : ''}`}

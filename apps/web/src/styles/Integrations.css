@@ -760,6 +760,32 @@
   cursor: not-allowed;
 }
 
+/* Run Demo Pipeline — blue accent to distinguish from Fetch findings */
+.scanner-runner-btn-demo {
+  background: #3B82F6;
+  color: #ffffff;
+}
+.scanner-runner-btn-demo:hover:not(:disabled) {
+  background: #2563EB;
+}
+.scanner-runner-btn-demo:disabled {
+  background: #1E293B;
+  color: #64748B;
+}
+
+/* Run HITL Pipeline — purple accent for the human-approval variant */
+.scanner-runner-btn-hitl {
+  background: #A855F7;
+  color: #ffffff;
+}
+.scanner-runner-btn-hitl:hover:not(:disabled) {
+  background: #9333EA;
+}
+.scanner-runner-btn-hitl:disabled {
+  background: #1E293B;
+  color: #64748B;
+}
+
 .scanner-runner-result {
   font-size: 13px;
   padding: 8px 12px;
