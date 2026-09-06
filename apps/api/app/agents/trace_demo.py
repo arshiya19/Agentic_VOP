@@ -114,19 +114,37 @@ def emit_trace_demo(
 
 
 def is_cancellation_requested_demo(run_id: str) -> bool:
-    """Check if a user has clicked Stop on this demo run. Reads demo.agent_runs."""
+    """Check whether this demo run should abort. Reads demo.agent_runs.
+
+    Two abort signals — either means "stop":
+      - `cancellation_requested = true` (operator hit Stop)
+      - `status != 'running'` (someone force-closed the row out-of-band —
+        typically an operator recovering from a stuck queue via DB fixup)
+
+    Treating both as abort makes recovery reliable: setting `status='completed'`
+    directly in the DB now stops master on its next iteration, rather than
+    silently leaving the in-memory package loop churning.
+    """
     if not run_id:
         return False
     try:
         sb = supabase_admin_demo()
         row = (
             sb.table("agent_runs")
-            .select("cancellation_requested")
+            .select("cancellation_requested, status")
             .eq("run_id", run_id)
             .single()
             .execute()
             .data
         )
-        return bool(row and row.get("cancellation_requested"))
+        if not row:
+            return False
+        if row.get("cancellation_requested"):
+            return True
+        # Any non-running status is a definitive "this run should not be
+        # producing new work" signal. Master started with status='running';
+        # anything else means the run was closed externally.
+        status = (row.get("status") or "").lower()
+        return status not in ("", "running", "queued")
     except Exception:  # noqa: BLE001 — DB hiccup shouldn't kill the run
         return False

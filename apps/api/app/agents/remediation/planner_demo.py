@@ -50,8 +50,16 @@ from .planner import (
 _MAX_PACKAGES = 20
 
 
-def run_demo_remediation(run_id: str) -> dict:
+def run_demo_remediation(run_id: str, hitl: bool = False) -> dict:
     """Generate + persist RemediationPackages for every demo issue in this run.
+
+    Args:
+        run_id: the DEMO agent_run this planning belongs to.
+        hitl: when True, disables per-file batching so every finding gets its
+            own package. HITL exists so a human can review + approve per-
+            finding; batching collapses that granularity and (empirically)
+            produces under-covered fix plans once the batch grows past ~5
+            findings. Auto-demo keeps batching for speed.
 
     Returns {"planned": N, "persisted": N, "failed": N}.
     """
@@ -140,16 +148,21 @@ def run_demo_remediation(run_id: str) -> dict:
     # file (eliminates within-run state drift). Single-finding files keep
     # current behavior. Universal — same code path for any scanner that
     # emits file paths (semgrep, bandit, sonarqube, checkov, tfsec, trivy IaC).
-    file_groups = _group_issues_by_file(issues, _raw_for)
-    grouped_count = sum(1 for g in file_groups.values() if len(g) > 1)
-    if grouped_count:
-        emit_trace_demo(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"📦 Per-file batching: {len(issues)} finding(s) → {len(file_groups)} package(s) "
-            f"({grouped_count} file(s) with multiple findings will be batched)",
-        )
+    # Per-finding packaging — one package per finding, always. Batching was
+    # producing under-covered plans (LLM tops out at ~5 steps regardless of
+    # how many findings share a file, so batches ≥9 findings ended with the
+    # primary "fixed" and the rest silently ignored). Truthful per-finding
+    # outcomes matter more than the LLM-call savings. See _group_issues_by_file
+    # (still exported) if a properly-verified batching mode is added later.
+    file_groups = {f"__singleton__:{iss['id']}": [iss] for iss in issues}
+    mode_label = "👤 HITL mode" if hitl else "🤖 Auto-demo"
+    emit_trace_demo(
+        run_id,
+        "sub-agent-3",
+        "MESSAGE",
+        f"{mode_label} — one package per finding: "
+        f"{len(issues)} finding(s) → {len(issues)} package(s)",
+    )
 
     for file_key, group in file_groups.items():
         if persisted >= _MAX_PACKAGES:
@@ -211,6 +224,41 @@ def run_demo_remediation(run_id: str) -> dict:
                     run_id, prompt_row, primary, pattern, asset, family, sb_pub, _raw_for(primary)
                 )
             planned += 1
+
+            # Static validation — reject clearly-broken plans before they
+            # cost env2 minutes of wall-clock. See plan_validators for the
+            # rule catalog (no-op sed, wrong-tool-for-family, masked test
+            # failures, rescan CVE mismatch).
+            from .plan_validators import (  # noqa: PLC0415
+                has_errors as _has_val_errors,
+                summary as _val_summary,
+                validate_package,
+            )
+
+            _val_issues = validate_package(pkg, primary_issue=primary, family=family)
+            if _val_issues:
+                _msg = _val_summary(_val_issues)
+                _details = "; ".join(
+                    f"[{i.severity} {i.check}] {i.message[:180]}" for i in _val_issues[:5]
+                )
+                if _has_val_errors(_val_issues):
+                    emit_trace_demo(
+                        run_id,
+                        "sub-agent-3",
+                        "ERROR",
+                        f"✗ Plan rejected by validators for issue {primary['id']}: "
+                        f"{_msg}. {_details}",
+                    )
+                    failed += 1
+                    continue  # skip persistence for this broken plan
+                # Warnings only — persist but note them in trace for audit
+                emit_trace_demo(
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
+                    f"⚠ Plan validators reported warnings for issue "
+                    f"{primary['id']}: {_msg}. {_details}",
+                )
 
             _persist_to_demo(sb_demo, pkg, run_id)
             persisted += 1

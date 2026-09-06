@@ -231,7 +231,7 @@ def _remediate_node(state: DemoMasterState) -> dict:
         raise RunCancelledError("Demo run cancelled before remediation")
 
     emit_trace_demo(run_id, "master", "MESSAGE", "Dispatching to Sub-Agent 3 (demo)")
-    result = planner_demo.run_demo_remediation(run_id)
+    result = planner_demo.run_demo_remediation(run_id, hitl=bool(state.get("hitl")))
     emit_trace_demo(
         run_id,
         "master",
@@ -246,7 +246,7 @@ def _remediate_node(state: DemoMasterState) -> dict:
         try:
             sb_demo = supabase_admin_demo()
             sb_demo.table("remediation_packages").update(
-                {"status": "awaiting_approval", "approval_required": True}
+                {"status": "awaiting_approval", "approval_required": "single_approver"}
             ).eq("agent_run_id", run_id).execute()
             emit_trace_demo(
                 run_id,
@@ -423,6 +423,19 @@ def _fix_node(state: DemoMasterState) -> dict:
         covered_ids_list = pkg_covered_ids.get(int(pkg["id"]), [])
         pkg_findings = len(covered_ids_list) or 1
 
+        # Flip package status to `ready_for_execution` BEFORE calling SA-4
+        # so the Remediation page reflects "this one is being worked on now"
+        # instead of staying at `awaiting_approval` until the fix finishes.
+        # Terminal status (fixed/rolled_back/fix_failed) is written after
+        # the fix_run completes (see block below). Constraint-safe: fails
+        # silently if migration 0035 hasn't landed for demo (rare).
+        try:
+            sb.table("remediation_packages").update({"status": "ready_for_execution"}).eq(
+                "id", pkg["id"]
+            ).execute()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
         try:
             fix_run_id = run_fixer(
                 pkg["id"],
@@ -491,6 +504,35 @@ def _fix_node(state: DemoMasterState) -> dict:
         findings_covered += pkg_findings
         fix_runs.append({"package_id": pkg["id"], "fix_run_id": fix_run_id, "status": status})
 
+        # Sync package.status → fix outcome so the Remediation page reflects
+        # per-package progress as SA-4 churns through the queue. Without this
+        # the UI shows all N packages stuck at `awaiting_approval` until the
+        # whole run finishes. Constraint-safe: if migration 0039 hasn't been
+        # applied, the update silently falls back to leaving the current
+        # status (fix outcome is still visible via fix_runs join).
+        _FIX_TO_PACKAGE_STATUS = {
+            "success": "fixed",
+            "partial_success": "fixed",
+            "rolled_back": "rolled_back",
+            "failed": "fix_failed",
+            "no_fix_needed": "fixed",
+        }
+        _new_pkg_status = _FIX_TO_PACKAGE_STATUS.get(status)
+        if _new_pkg_status:
+            try:
+                sb.table("remediation_packages").update({"status": _new_pkg_status}).eq(
+                    "id", pkg["id"]
+                ).execute()
+            except Exception as _e:  # noqa: BLE001
+                _err = str(_e)
+                if "remediation_packages_status_check" not in _err and "23514" not in _err:
+                    emit_trace_demo(
+                        run_id,
+                        "master",
+                        "MESSAGE",
+                        f"⚠ Package #{pkg['id']} status sync skipped: {type(_e).__name__}",
+                    )
+
         # Honest per-finding coverage: for each covered_id, check if ITS
         # check_id has a passing re-scan. A single rescan for
         # `hardcoded-secret-key` credits ALL findings that share that rule_id
@@ -526,16 +568,18 @@ def _fix_node(state: DemoMasterState) -> dict:
             succeeded += 1
             findings_fixed += len(fixed_ids_here)
             findings_unaddressed += len(unaddressed_ids_here)
-            all_unaddressed_ids.extend(unaddressed_ids_here)
+            # Only queue unaddressed findings for retry when this was a
+            # real batch. See gating rationale on the rolled_back branch
+            # below. Singleton unaddressed → nothing structural to gain
+            # by re-planning; just accept and report honestly.
+            if len(covered_ids_list) > 1:
+                all_unaddressed_ids.extend(unaddressed_ids_here)
         elif status == "partial_success":
             partial += 1
-            # Fixed by per-finding rule above; the rest queue for retry.
-            # (For symmetry with success: retry can move them to fixed OR
-            # remain based on the singleton outcome. Bucket accounting stays
-            # consistent because retry decrements findings_unaddressed.)
             findings_fixed += len(fixed_ids_here)
             findings_unaddressed += len(unaddressed_ids_here)
-            all_unaddressed_ids.extend(unaddressed_ids_here)
+            if len(covered_ids_list) > 1:
+                all_unaddressed_ids.extend(unaddressed_ids_here)
         elif status == "no_fix_needed":
             # Nothing was actually edited but the file is clean. Report
             # honestly as its own bucket — NOT fixed (we did nothing),
@@ -545,11 +589,19 @@ def _fix_node(state: DemoMasterState) -> dict:
         elif status == "rolled_back":
             rolled_back += 1
             findings_remain += pkg_findings
-            # Queue rolled-back findings for a fresh singleton retry attempt.
-            # File is now pristine (rollback restored it). A fresh SA-3 call
-            # may compose a landing edit — especially if THIS run captured a
-            # KB entry for the check_id in an earlier successful fix.
-            all_rolled_back_ids.extend(covered_ids_list)
+            # Queue for retry ONLY if the original package was a real batch
+            # (>1 covered finding). Retry was designed to break batched
+            # packages into per-finding singletons — each might now hit its
+            # own KB entry. With batching disabled globally, every package
+            # is already a singleton, so retry becomes "re-run the exact
+            # same SA-3 + SA-4 path at temperature 0.2 hoping for a lucky
+            # different plan." That's not reliable engineering — it just
+            # burns env2 minutes. Skip and accept the rolled_back verdict.
+            #
+            # (If per-file batching is ever re-enabled with per-finding
+            # verify, this guard automatically re-engages the retry loop.)
+            if len(covered_ids_list) > 1:
+                all_rolled_back_ids.extend(covered_ids_list)
         else:
             failed += 1
             findings_remain += pkg_findings

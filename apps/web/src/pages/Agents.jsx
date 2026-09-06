@@ -73,6 +73,24 @@ export default function Agents() {
   const [resettingLabel, setResettingLabel] = useState(null)
   const resetting = resettingLabel !== null
   const [resetToast, setResetToast] = useState(null)  // { kind: 'success'|'error', message: string }
+  // env2 busy state — poll /admin/env2/status so reset buttons can disable
+  // themselves when a fix_run is active (would race with SSM). Poll cadence
+  // is 10s so the UI updates within one iteration of the fix loop.
+  const [env2Busy, setEnv2Busy] = useState(null)  // null (unknown) | Env2StatusResponse
+  useEffect(() => {
+    let mounted = true
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API_URL}/admin/env2/status`)
+        if (!mounted || !r.ok) return
+        const d = await r.json()
+        if (mounted) setEnv2Busy(d)
+      } catch { /* transient network error */ }
+    }
+    poll()
+    const interval = setInterval(poll, 10000)
+    return () => { mounted = false; clearInterval(interval) }
+  }, [])
   // Contextual switch: 'real' (supabase realtime on public.*) or 'demo' (poll
   // backend demo endpoints). Set by Integrations page's trigger buttons; can
   // be overridden manually via the pill at the top of the page.
@@ -208,8 +226,16 @@ export default function Agents() {
     if (confirmMsg && !window.confirm(confirmMsg)) return
     setResettingLabel(label)
     setResetToast(null)
+    // Hard-cap the request so a stuck backend / dead network can never
+    // leave the button spinning forever. 10 min covers every reset flow
+    // (longest is Images at ~3-5 min) with plenty of buffer.
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000)
     try {
-      const res = await fetch(`${API_URL}${endpoint}`, { method: 'POST' })
+      const res = await fetch(`${API_URL}${endpoint}`, {
+        method: 'POST',
+        signal: controller.signal,
+      })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
         const detail = typeof body?.detail === 'string'
@@ -223,8 +249,12 @@ export default function Agents() {
         })
       }
     } catch (e) {
-      setResetToast({ kind: 'error', message: `${label} reset request failed: ${e.message || e}` })
+      const msg = e.name === 'AbortError'
+        ? `${label} reset timed out after 10 min — backend unresponsive. Check the server logs.`
+        : `${label} reset request failed: ${e.message || e}`
+      setResetToast({ kind: 'error', message: msg })
     } finally {
+      clearTimeout(timeoutId)
       setResettingLabel(null)
     }
   }
@@ -484,6 +514,39 @@ export default function Agents() {
     const activeRun = runs.find(r => r.status === 'running' || r.status === 'queued')
     if (!activeRun) return
 
+    // Demo runs use a different endpoint (writes to demo.agent_runs) and
+    // skip the issue-delete step (demo issues are transient per run).
+    if (pipelineMode === 'demo') {
+      const ok = window.confirm(
+        `Stop the running demo pipeline?\n\n` +
+        `This will:\n` +
+        `  • Set cancellation_requested on the demo run\n` +
+        `  • SA-4 watchdog will abort in-flight fix within seconds\n` +
+        `  • Env2 lease releases so the reset buttons unlock\n\n` +
+        `Continue?`
+      )
+      if (!ok) return
+      try {
+        const res = await fetch(`${API_URL}/agents/demo/runs/${activeRun.run_id}/cancel`, {
+          method: 'POST',
+        })
+        if (!res.ok) {
+          alert(`Failed to stop demo run: ${res.status} — ${await res.text()}`)
+          return
+        }
+        const data = await res.json()
+        alert(
+          `Stopped demo run ${data.run_id.slice(0, 8)}…\n\n` +
+          `Previous status: ${data.previous_status}\n` +
+          `Active fix_runs flagged: ${data.active_fix_runs_flagged}`
+        )
+      } catch (err) {
+        alert(`Network error stopping demo run: ${err.message || err}`)
+      }
+      return
+    }
+
+    // Real-mode stop — original behavior (cleans issues + resets watermark).
     const scanners = (activeRun.targets?.scanners || []).join(', ') || 'this scanner'
     const ok = window.confirm(
       `Stop the running fetch?\n\n` +
@@ -495,7 +558,6 @@ export default function Agents() {
     )
     if (!ok) return
 
-    const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
     try {
       const res = await fetch(`${API_URL}/agents/runs/${activeRun.run_id}/cancel`, {
         method: 'POST',
@@ -514,6 +576,41 @@ export default function Agents() {
       )
     } catch (err) {
       alert(`Network error stopping run: ${err.message || err}`)
+    }
+  }
+
+  const handleForceReleaseEnv2 = async () => {
+    const ok = window.confirm(
+      `Force-release env2?\n\n` +
+      `This will:\n` +
+      `  • Close every active fix_run (marks as failed)\n` +
+      `  • Cancel every running agent_run on both schemas\n` +
+      `  • Free the env2 lease so you can trigger a fresh reset or pipeline\n\n` +
+      `Use this when a run is stuck or you just want to start over.\n\n` +
+      `Continue?`
+    )
+    if (!ok) return
+    try {
+      const res = await fetch(`${API_URL}/admin/env2/force-release`, { method: 'POST' })
+      if (!res.ok) {
+        alert(`Force-release failed: ${res.status} — ${await res.text()}`)
+        return
+      }
+      const data = await res.json()
+      alert(
+        `✅ env2 released\n\n` +
+        `Fix runs closed: ${data.fix_runs_closed}\n` +
+        `Agent runs closed: ${data.agent_runs_closed}\n` +
+        `Schemas touched: ${data.schemas_touched.join(', ') || 'none'}`
+      )
+      // Immediately re-poll so the reset buttons re-enable without waiting
+      // for the next 10s tick.
+      try {
+        const s = await fetch(`${API_URL}/admin/env2/status`)
+        if (s.ok) setEnv2Busy(await s.json())
+      } catch { /* transient */ }
+    } catch (err) {
+      alert(`Network error: ${err.message || err}`)
     }
   }
 
@@ -539,22 +636,27 @@ export default function Agents() {
                 { label: 'Serverless', onClick: handleResetServerless, title: 'Restore serverless-lab files (lambda + main.tf) — ~10s' },
               ].map(({ label, onClick, title }) => {
                 const isMe = resettingLabel === label
+                const busyBlocked = Boolean(env2Busy?.busy) && !isMe
+                const effectiveTitle = busyBlocked
+                  ? `env2 busy — ${env2Busy.reason}. Cancel the active run first.`
+                  : title
+                const disabled = resetting || busyBlocked
                 return (
                   <button
                     key={label}
                     type="button"
                     onClick={onClick}
-                    disabled={resetting}
-                    title={title}
+                    disabled={disabled}
+                    title={effectiveTitle}
                     style={{
                       padding: '6px 14px',
                       borderRadius: 999,
-                      border: '1px solid ' + (resetting && !isMe ? '#334155' : '#f59e0b'),
-                      background: resetting && !isMe ? 'transparent' : 'rgba(245,158,11,0.12)',
-                      color: resetting && !isMe ? '#64748b' : '#f59e0b',
-                      opacity: resetting && !isMe ? 0.55 : 1,
+                      border: '1px solid ' + (disabled && !isMe ? '#334155' : '#f59e0b'),
+                      background: disabled && !isMe ? 'transparent' : 'rgba(245,158,11,0.12)',
+                      color: disabled && !isMe ? '#64748b' : '#f59e0b',
+                      opacity: disabled && !isMe ? 0.55 : 1,
                       fontSize: 12, fontWeight: 600,
-                      cursor: resetting ? 'wait' : 'pointer',
+                      cursor: resetting ? 'wait' : (busyBlocked ? 'not-allowed' : 'pointer'),
                       display: 'inline-flex', alignItems: 'center', gap: 6,
                     }}
                   >
@@ -573,6 +675,24 @@ export default function Agents() {
                   </button>
                 )
               })}
+              {env2Busy?.busy && (
+                <button
+                  type="button"
+                  onClick={handleForceReleaseEnv2}
+                  title={`Force-close all active fix_runs + running agent_runs so env2 unlocks immediately. ${env2Busy.reason}`}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: 999,
+                    border: '1px solid #ef4444',
+                    background: 'rgba(239,68,68,0.12)',
+                    color: '#ef4444',
+                    fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  🚨 Force Release env2
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setModeManual('real')}
@@ -799,7 +919,9 @@ export default function Agents() {
                     <button
                       className="trace-btn trace-btn-stop"
                       onClick={handleStopActiveRun}
-                      title="Stop the running fetch and wipe its scanner's data"
+                      title={pipelineMode === 'demo'
+                        ? 'Cancel the running demo pipeline — SA-4 watchdog aborts in-flight fix; env2 lease releases'
+                        : 'Stop the running fetch and wipe its scanner\'s data'}
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                         <rect x="6" y="6" width="12" height="12" rx="1"></rect>

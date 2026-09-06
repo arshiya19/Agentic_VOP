@@ -15,6 +15,7 @@ Two entry points:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from .config import FixerConfig, load_config_from_settings
@@ -38,6 +39,7 @@ from .strategies.dependency_strategy import DependencyStrategy
 from .strategies.iac_strategy import IaCStrategy
 from .strategies.image_strategy import ImageStrategy
 from .strategies.os_strategy import OSStrategy
+from .watchdog import RunCancelledError, WatchdogTimeout, check_run_health
 
 
 # =============================================================================
@@ -467,7 +469,50 @@ def run_fixer(
     started_at = utcnow()
     outcome: StrategyOutcome
     try:
-        outcome = _run_lifecycle(sb, fix_run_id, strategy, ctx, emit_fn=emit_fn)
+        outcome = _run_lifecycle(
+            sb,
+            fix_run_id,
+            strategy,
+            ctx,
+            emit_fn=emit_fn,
+            started_at=started_at,
+            timeout_seconds=cfg.run_timeout_s,
+        )
+    except WatchdogTimeout as e:
+        # Watchdog fired — attempt rollback (safe if backup was taken; no-op
+        # otherwise) then finalize as failed so the row transitions cleanly.
+        rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
+        outcome = StrategyOutcome(
+            status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
+            rollback_results=rollback,
+            error_message=f"watchdog timeout: {str(e)[:400]}",
+        )
+        try:
+            emit_fn(
+                agent_run_id,
+                "sub-agent-4",
+                "ERROR",
+                f"⏱ Fix run #{fix_run_id} killed by watchdog "
+                f"(timeout={cfg.run_timeout_s}s); {str(e)[:200]}",
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+    except RunCancelledError as e:
+        rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
+        outcome = StrategyOutcome(
+            status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
+            rollback_results=rollback,
+            error_message=f"cancelled by operator: {str(e)[:400]}",
+        )
+        try:
+            emit_fn(
+                agent_run_id,
+                "sub-agent-4",
+                "MESSAGE",
+                f"🛑 Fix run #{fix_run_id} cancelled by operator — {str(e)[:200]}",
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
     except Exception as e:  # noqa: BLE001
         # Belt-and-suspenders: _run_lifecycle already catches strategy-level
         # errors; this catches orchestrator-level bugs (bad emit call, etc.).
@@ -492,24 +537,52 @@ def run_fixer(
         except Exception:  # noqa: BLE001, S110
             pass
 
-    # 9. Persist final state — MUST run so 'in_flight' status is cleared.
-    # If finalize itself crashes there's not much we can do, but at least the
-    # lifecycle exception path above will have produced a StrategyOutcome.
-    try:
-        finalize_fix_run(sb, fix_run_id, ctx=ctx, outcome=outcome, started_at=started_at)
-    except Exception as e:  # noqa: BLE001
+    # 9. Persist final state — MUST run so the row leaves any non-terminal
+    # status. finalize_fix_run's Supabase update can fail transiently (network
+    # blip, connection pool exhaustion). Retry a few times with backoff, and
+    # if every attempt fails, fall back to a bare-minimum status update so
+    # the watchdog reaper doesn't have to close this row later.
+    import time  # noqa: PLC0415
+
+    for attempt in range(3):
         try:
-            emit_fn(
-                agent_run_id,
-                "sub-agent-4",
-                "ERROR",
-                f"✗ finalize_fix_run crashed for fix_run #{fix_run_id}: "
-                f"{type(e).__name__}: {str(e)[:300]}. Row may remain 'in_flight' — "
-                f"manual DB fix required.",
-            )
-        except Exception:  # noqa: BLE001, S110
-            pass
-        raise
+            finalize_fix_run(sb, fix_run_id, ctx=ctx, outcome=outcome, started_at=started_at)
+            break
+        except Exception as e:  # noqa: BLE001
+            if attempt == 2:
+                # All retries exhausted — try the minimal-fields fallback so
+                # at least status + finished_at land.
+                try:
+                    from .models import utcnow as _utcnow  # noqa: PLC0415
+
+                    _now = _utcnow()
+                    sb.table("fix_runs").update(
+                        {
+                            "status": "failed"
+                            if outcome.status == "partial_success"
+                            else outcome.status,
+                            "finished_at": _now.isoformat(),
+                            "error_message": (
+                                f"finalize_fix_run failed after 3 retries "
+                                f"({type(e).__name__}: {str(e)[:200]}); minimal fallback applied"
+                            )[:2000],
+                        }
+                    ).eq("id", fix_run_id).execute()
+                except Exception:  # noqa: BLE001, S110
+                    pass
+                try:
+                    emit_fn(
+                        agent_run_id,
+                        "sub-agent-4",
+                        "ERROR",
+                        f"✗ finalize_fix_run failed for fix_run #{fix_run_id} "
+                        f"after 3 attempts ({type(e).__name__}). Reaper will close "
+                        f"if the minimal fallback also missed.",
+                    )
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            else:
+                time.sleep(0.5 * (attempt + 1))
 
     # 10. Knowledge Base capture — store successful fixes for future few-shot reuse.
     # Best-effort: never blocks the main flow. Only fires on verified success.
@@ -608,14 +681,33 @@ def _run_lifecycle(
     ctx: FixContext,
     *,
     emit_fn,
+    started_at: datetime,
+    timeout_seconds: int,
 ) -> StrategyOutcome:
     """Drive the 5 strategy phases. Returns a StrategyOutcome.
 
     Catches strategy-level exceptions and converts to 'failed' + rollback
     attempt. Never re-raises — the fix_run row captures everything the
     caller needs to know.
+
+    Watchdog: calls `check_run_health` at each phase boundary so a
+    long-running strategy or a stuck SSM call cannot hold the run past
+    `timeout_seconds`, and so the operator's Cancel button aborts within
+    at most one phase.
     """
+
+    def _health():
+        """Raise WatchdogTimeout / RunCancelledError if this run should abort."""
+        check_run_health(
+            sb,
+            agent_run_id=ctx.agent_run_id,
+            fix_run_id=fix_run_id,
+            started_at=started_at,
+            timeout_seconds=timeout_seconds,
+        )
+
     # ─── Phase 3: Pre-flight ────────────────────────────────────────────
+    _health()
     set_status(sb, fix_run_id, "provisioning")
     try:
         preflight = strategy.pre_flight_check(ctx)
@@ -660,6 +752,7 @@ def _run_lifecycle(
         )
 
     # ─── Phase 4: Backup ────────────────────────────────────────────────
+    _health()
     try:
         backup = strategy.backup(ctx)
     except Exception as e:  # noqa: BLE001
@@ -674,6 +767,7 @@ def _run_lifecycle(
         ctx = ctx.model_copy(update={"backup_reference": backup.backup_reference})
 
     # ─── Phase 5: Execute ───────────────────────────────────────────────
+    _health()
     set_status(sb, fix_run_id, "executing")
     try:
         step_results = strategy.execute(ctx)
@@ -757,6 +851,7 @@ def _run_lifecycle(
             )
 
     # ─── Phase 6: Validate ──────────────────────────────────────────────
+    _health()
     set_status(sb, fix_run_id, "validating")
     try:
         validation_results = strategy.validate(ctx)

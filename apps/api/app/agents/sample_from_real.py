@@ -216,30 +216,11 @@ def sample_and_copy_ec2_issues(
         sev_val = _SEVERITY_RANK.get(issue.get("severity") or "", 0)
         return (risk_val, sev_val)
 
-    by_pin: dict[tuple[str, str], dict] = {}
-    for iss in ec2_issues:
-        key = (iss.get("source_vuln_id") or "", _resource_label(iss))
-        # First-seen wins — real-fetch may create duplicate rows across runs.
-        by_pin.setdefault(key, iss)
-
+    # Pinned demo picks disabled — the sampler now runs scoops only so the
+    # same rule applies to auto-demo and HITL alike. The `_PINNED_DEMO_CHECKS`
+    # constant is kept above as documentation of the historical investor-demo
+    # pin list.
     picks: list[dict] = []
-    pinned_hits: list[str] = []
-    pinned_misses: list[str] = []
-    for check_id, resource in _PINNED_DEMO_CHECKS:
-        hit = by_pin.get((check_id, resource))
-        if hit is not None:
-            picks.append(hit)
-            pinned_hits.append(f"{check_id}@{resource.split('.')[-1]}")
-        else:
-            pinned_misses.append(f"{check_id}@{resource.split('.')[-1]}")
-
-    emit_trace_demo(
-        run_id,
-        "system",
-        "MESSAGE",
-        f"Pinned picks: {len(picks)}/{len(_PINNED_DEMO_CHECKS)} hit "
-        f"(hit={pinned_hits or '-'}, missed={pinned_misses or '-'})",
-    )
 
     # Per-source scoops — pull top N highest-risk issues from each configured
     # source. Runs AFTER pinned picks so those always land first. Any issue

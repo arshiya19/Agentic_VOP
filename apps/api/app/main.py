@@ -65,6 +65,48 @@ app.add_middleware(
 )
 
 
+# ─── Zombie fix_run reaper ────────────────────────────────────────────────
+# Runs every 60s in the background. Catches fix_runs that exceeded their
+# `timeout_seconds` but never received an in-process finalize (SIGKILL, OOM,
+# backend restart mid-fix, or finalize itself crashing after retries). Sweeps
+# both public.fix_runs and demo.fix_runs so the demo pipeline gets the same
+# guarantee. Failures are logged and swallowed — a broken sweep must never
+# take down the API.
+_REAPER_INTERVAL_S = 60
+
+
+@app.on_event("startup")
+async def _start_fix_run_reaper() -> None:
+    import asyncio  # noqa: PLC0415
+    import logging  # noqa: PLC0415
+
+    from .agents.fixer.watchdog import sweep_stale_fix_runs  # noqa: PLC0415
+
+    log = logging.getLogger("fix_run_reaper")
+
+    async def _loop():
+        # Small initial delay so startup isn't blocked by a DB round-trip.
+        await asyncio.sleep(15)
+        while True:
+            for schema, client_fn in (
+                ("public", supabase_admin),
+                ("demo", supabase_admin_demo),
+            ):
+                try:
+                    reaped = await asyncio.to_thread(sweep_stale_fix_runs, client_fn())
+                    if reaped:
+                        log.warning(
+                            "fix_run_reaper: closed %d zombie fix_run(s) in %s", reaped, schema
+                        )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "fix_run_reaper %s sweep failed: %s: %s", schema, type(e).__name__, e
+                    )
+            await asyncio.sleep(_REAPER_INTERVAL_S)
+
+    asyncio.create_task(_loop())
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Ensure unhandled 500s still carry CORS headers so the browser can read the error."""
@@ -339,6 +381,176 @@ def reset_demo_state() -> dict:
     }
 
 
+# ─── env2 lease guard ─────────────────────────────────────────────────────
+# Both reset endpoints and SA-4 fix_runs execute long-running SSM commands
+# against the same env2 instance. Concurrent docker builds / terraform apply
+# will corrupt each other. The guard below refuses reset when ANY fix_run is
+# active (on either public or demo schema), and gives the caller a clear
+# error naming what's blocking so the UI can offer a Cancel affordance.
+class Env2StatusResponse(BaseModel):
+    busy: bool
+    reason: str  # human-readable "why"
+    active_fix_run_id: int | None = None
+    active_fix_run_package_id: int | None = None
+    active_fix_run_status: str | None = None
+    active_fix_run_started_at: str | None = None
+    schema: str | None = None  # 'public' or 'demo' — which side is holding
+
+
+def _get_env2_status() -> Env2StatusResponse:
+    """Query both schemas for any in-flight fix_run. Return the first found."""
+    from .agents.fixer.persistence import any_concurrent_run  # noqa: PLC0415
+
+    for schema_name, client_fn in (("public", supabase_admin), ("demo", supabase_admin_demo)):
+        try:
+            row = any_concurrent_run(client_fn())
+        except Exception:  # noqa: BLE001
+            row = None
+        if row:
+            return Env2StatusResponse(
+                busy=True,
+                reason=(
+                    f"fix_run #{row['id']} (package #{row.get('package_id')}) "
+                    f"is {row.get('status')} on the {schema_name} schema"
+                ),
+                active_fix_run_id=row["id"],
+                active_fix_run_package_id=row.get("package_id"),
+                active_fix_run_status=row.get("status"),
+                active_fix_run_started_at=(row.get("started_at") or "")[:19],
+                schema=schema_name,
+            )
+    return Env2StatusResponse(busy=False, reason="env2 is idle")
+
+
+def _guard_env2_free_for_reset() -> None:
+    """Raise 409 Conflict if env2 is busy. Called from every reset endpoint."""
+    st = _get_env2_status()
+    if st.busy:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"env2 is busy — {st.reason}. Cancel the active run first, "
+                f"or wait for it to complete. (Reset would race with the "
+                f"in-flight docker/terraform command and corrupt state.)"
+            ),
+        )
+
+
+@app.get("/admin/env2/status", response_model=Env2StatusResponse)
+def env2_status() -> Env2StatusResponse:
+    """Return whether env2 is currently busy. UI polls this to enable/disable
+    the reset buttons and show a "cancel the active run first" hint."""
+    return _get_env2_status()
+
+
+class ForceReleaseResponse(BaseModel):
+    fix_runs_closed: int
+    agent_runs_closed: int
+    schemas_touched: list[str]
+
+
+@app.post("/admin/env2/force-release", response_model=ForceReleaseResponse)
+def env2_force_release() -> ForceReleaseResponse:
+    """Force-close every in-flight fix_run + every running agent_run so env2
+    is immediately free for a reset or a new pipeline.
+
+    This is the "get me unstuck" escape hatch. Use when a run is spinning
+    without productive progress and you want to start fresh. The active
+    SA-4 process (if any) will notice the state change on its next
+    watchdog check (≤30s) and abort cleanly; the reaper backstop closes
+    anything it misses within 60s.
+
+    Non-destructive to any completed fix_runs or packages — only touches
+    rows currently in a non-terminal status.
+    """
+    from datetime import datetime as _dt  # noqa: PLC0415
+
+    now_iso = _dt.now(UTC).isoformat()
+    schemas_touched: list[str] = []
+    fix_closed = 0
+    run_closed = 0
+
+    for schema_name, client_fn in (("public", supabase_admin), ("demo", supabase_admin_demo)):
+        try:
+            sb = client_fn()
+        except Exception:  # noqa: BLE001, S112
+            continue
+
+        # Close active fix_runs
+        try:
+            active_frs = (
+                sb.table("fix_runs")
+                .select("id")
+                .in_("status", ("pending", "provisioning", "executing", "validating"))
+                .execute()
+                .data
+                or []
+            )
+            for fr in active_frs:
+                try:
+                    sb.table("fix_runs").update(
+                        {
+                            "status": "failed",
+                            "finished_at": now_iso,
+                            "error_message": (
+                                "Force-released by operator via /admin/env2/force-release "
+                                "— env2 lease reclaimed for a fresh run/reset."
+                            ),
+                        }
+                    ).eq("id", fr["id"]).execute()
+                    fix_closed += 1
+                except Exception:  # noqa: BLE001, S110
+                    pass
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+        # Close running agent_runs. Try `cancelled` first (production shape
+        # after migration 0040); fall back to `completed` when the CHECK
+        # constraint / column isn't in place yet.
+        try:
+            running_runs = (
+                sb.table("agent_runs").select("run_id").eq("status", "running").execute().data or []
+            )
+            for r in running_runs:
+                patch_ideal = {
+                    "cancellation_requested": True,
+                    "status": "cancelled",
+                    "completed_at": now_iso,
+                    "summary": "Force-released by operator via /admin/env2/force-release",
+                }
+                patch_fallback = {
+                    "status": "completed",
+                    "completed_at": now_iso,
+                    "summary": "Force-released by operator (schema pre-0040 fallback)",
+                }
+                try:
+                    sb.table("agent_runs").update(patch_ideal).eq("run_id", r["run_id"]).execute()
+                except Exception as e:  # noqa: BLE001
+                    err = str(e)
+                    if any(k in err for k in ("cancellation_requested", "23514", "PGRST204")):
+                        try:
+                            sb.table("agent_runs").update(patch_fallback).eq(
+                                "run_id", r["run_id"]
+                            ).execute()
+                        except Exception:  # noqa: BLE001, S112
+                            continue
+                    else:
+                        continue
+                run_closed += 1
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+        if fix_closed or run_closed:
+            if schema_name not in schemas_touched:
+                schemas_touched.append(schema_name)
+
+    return ForceReleaseResponse(
+        fix_runs_closed=fix_closed,
+        agent_runs_closed=run_closed,
+        schemas_touched=schemas_touched,
+    )
+
+
 @app.post("/admin/env2/reset")
 def reset_env2_baseline() -> dict:
     """Reset the env2 vulnerable-lab EC2 back to its fresh baseline.
@@ -354,6 +566,8 @@ def reset_env2_baseline() -> dict:
     the parsed checkov count + new SG id so the UI can display "env cleaned,
     11 checkov failures, SG sg-xxx" without a second call.
     """
+    _guard_env2_free_for_reset()
+
     import base64
     import time
     import boto3
@@ -497,6 +711,8 @@ def reset_env2_images() -> dict:
 
     No impact on CSPM lab (Terraform/Checkov) or any other scanner.
     """
+    _guard_env2_free_for_reset()
+
     import base64
     import time
 
@@ -587,10 +803,30 @@ OPENSSL_VER=$(docker run --rm vuln-lab-image:latest dpkg -l openssl 2>/dev/null 
 echo "  infra-lab openssl: $OPENSSL_VER"
 
 echo ""
-echo "=== Post-reset scan counts ==="
-trivy image vuln-lab-image:latest --format json --scanners vuln 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f'  Trivy Image (infra): {sum(len(r.get(\"Vulnerabilities\",[])) for r in d.get(\"Results\",[]))} findings')"
-trivy image vuln-java-image:latest --format json --scanners vuln 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f'  Trivy Image (java): {sum(len(r.get(\"Vulnerabilities\",[])) for r in d.get(\"Results\",[]))} findings')"
-trivy image vuln-python-image:latest --format json --scanners vuln 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f'  Trivy Image (python): {sum(len(r.get(\"Vulnerabilities\",[])) for r in d.get(\"Results\",[]))} findings')"
+echo "=== Pre-warming trivy DB (first-run download, ~30-60s if fresh) ==="
+trivy image --download-db-only 2>&1 | tail -2 || echo "  DB warm-up returned non-zero (continuing)"
+
+echo ""
+echo "=== Post-reset scan counts (best-effort — non-fatal) ==="
+count_findings() {
+  local img="$1" label="$2"
+  local out
+  out=$(trivy image "$img" --format json --scanners vuln 2>/dev/null)
+  if [ -z "$out" ]; then
+    echo "  $label: (trivy returned empty — DB may still be initializing, image is built OK)"
+    return
+  fi
+  echo "$out" | python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin)
+    n=sum(len(r.get('Vulnerabilities',[])) for r in d.get('Results',[]))
+    print(f'  $label: {n} findings')
+except Exception as e:
+    print(f'  $label: (parse skipped: {type(e).__name__})')" || true
+}
+count_findings vuln-lab-image:latest    "Trivy Image (infra)"
+count_findings vuln-java-image:latest   "Trivy Image (java)"
+count_findings vuln-python-image:latest "Trivy Image (python)"
 echo "=== Reset complete ==="
 """
 
@@ -796,6 +1032,8 @@ def reset_env2_appsec() -> dict:
 
     No impact on CSPM lab, image labs, or serverless lab.
     """
+    _guard_env2_free_for_reset()
+
     from pathlib import Path
 
     repo_dir = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs" / "appsec-lab"
@@ -833,6 +1071,8 @@ def reset_env2_serverless() -> dict:
 
     No impact on CSPM lab, image labs, or appsec lab.
     """
+    _guard_env2_free_for_reset()
+
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs"
@@ -1283,6 +1523,97 @@ def cancel_run(run_id: str) -> CancelRunResponse:
         scanners_cleaned=scanners,
         issues_deleted=issues_deleted,
         raw_findings_deleted=raw_findings_deleted,
+    )
+
+
+class DemoCancelResponse(BaseModel):
+    run_id: str
+    previous_status: str
+    new_status: str
+    active_fix_runs_flagged: int
+
+
+@app.post("/agents/demo/runs/{run_id}/cancel", response_model=DemoCancelResponse)
+def cancel_demo_run(run_id: str) -> DemoCancelResponse:
+    """Stop an in-flight demo run.
+
+    Effect:
+      1. Sets `cancellation_requested=true` on demo.agent_runs (master +
+         SA-4 watchdog poll this and abort at their next checkpoint).
+      2. Flips status → 'cancelled' so the UI reflects it immediately.
+
+    Does NOT delete demo.issues rows — the demo pipeline is transient
+    and future demo runs get their own sample. Returns fast (no waiting
+    on in-flight SSM commands); the reaper closes any orphaned fix_runs.
+    """
+    sb = supabase_admin_demo()
+
+    run = (
+        sb.table("agent_runs").select("run_id, status").eq("run_id", run_id).single().execute().data
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail=f"demo run_id {run_id} not found")
+
+    previous_status = run.get("status") or "unknown"
+    now_iso = datetime.now(UTC).isoformat()
+
+    # Ideal update — both the cancellation flag AND the terminal status. If
+    # migration 0040 hasn't been applied yet, the demo schema is missing
+    # `cancellation_requested` and its status CHECK doesn't include
+    # 'cancelled', so we degrade in two steps:
+    #   1) try the ideal shape
+    #   2) if the DB rejects it, fall back to status='completed' + summary
+    # The enhanced `is_cancellation_requested_demo` treats ANY non-running
+    # status as an abort signal, so the fallback still stops master + SA-4.
+    patch_ideal = {
+        "cancellation_requested": True,
+        "status": "cancelled",
+        "completed_at": now_iso,
+        "summary": "Cancelled by operator via /agents/demo/runs/*/cancel",
+    }
+    patch_fallback = {
+        "status": "completed",
+        "completed_at": now_iso,
+        "summary": (
+            "Cancelled by operator (schema pre-0040: no 'cancelled' status "
+            "or cancellation_requested column). Apply migration 0040 for "
+            "full cancel semantics."
+        ),
+    }
+    try:
+        sb.table("agent_runs").update(patch_ideal).eq("run_id", run_id).execute()
+        applied_status = "cancelled"
+    except Exception as e:  # noqa: BLE001
+        err = str(e)
+        if (
+            "cancellation_requested" in err
+            or "agent_runs_status_check" in err
+            or "23514" in err
+            or "PGRST204" in err
+        ):
+            sb.table("agent_runs").update(patch_fallback).eq("run_id", run_id).execute()
+            applied_status = "completed"
+        else:
+            raise
+
+    # Count active fix_runs on this specific run — the watchdog inside SA-4
+    # will notice the cancellation flag on its next check_run_health() and
+    # abort cleanly. We just report the count so the caller knows how many
+    # in-flight fixes are affected.
+    active = (
+        sb.table("fix_runs")
+        .select("id", count="exact")
+        .eq("agent_run_id", run_id)
+        .in_("status", ("pending", "provisioning", "executing", "validating"))
+        .execute()
+    )
+    active_count = active.count or len(active.data or [])
+
+    return DemoCancelResponse(
+        run_id=run_id,
+        previous_status=previous_status,
+        new_status=applied_status,
+        active_fix_runs_flagged=active_count,
     )
 
 

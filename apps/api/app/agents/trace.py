@@ -48,10 +48,14 @@ def emit_trace(
 
 
 def is_cancellation_requested(run_id: str) -> bool:
-    """Check if a user has clicked Stop on this run.
+    """Check whether this run should abort. Two signals — either means "stop":
 
-    Polled at checkpoints by Master + Sub-Agents to exit early. Errors
-    return False (fail-open) so a transient DB hiccup doesn't kill a run.
+      - `cancellation_requested = true` (operator hit Stop)
+      - `status != 'running'` (row force-closed externally — treat as abort
+        so an operator-triggered DB fixup actually stops master's package loop)
+
+    Polled at checkpoints by Master + Sub-Agents to exit early. DB errors
+    return False (fail-open) so a transient hiccup doesn't kill a run.
     """
     if not run_id:
         return False
@@ -59,13 +63,18 @@ def is_cancellation_requested(run_id: str) -> bool:
         sb = supabase_admin()
         row = (
             sb.table("agent_runs")
-            .select("cancellation_requested")
+            .select("cancellation_requested, status")
             .eq("run_id", run_id)
             .single()
             .execute()
             .data
         )
-        return bool(row and row.get("cancellation_requested"))
+        if not row:
+            return False
+        if row.get("cancellation_requested"):
+            return True
+        status = (row.get("status") or "").lower()
+        return status not in ("", "running", "queued")
     except Exception:  # noqa: BLE001 — DB hiccup shouldn't kill the run
         return False
 
