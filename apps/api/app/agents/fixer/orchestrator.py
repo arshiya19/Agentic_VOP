@@ -15,6 +15,7 @@ Two entry points:
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -40,6 +41,24 @@ from .strategies.iac_strategy import IaCStrategy
 from .strategies.image_strategy import ImageStrategy
 from .strategies.os_strategy import OSStrategy
 from .watchdog import RunCancelledError, WatchdogTimeout, check_run_health
+
+
+# ─── Process-level env2 dispatch lock ────────────────────────────────────
+# The DB-based `any_concurrent_run` check has a TOCTOU race: multiple
+# background dispatches (typical when a user approves several HITL packages
+# in quick succession) all wake up simultaneously when a prior fix finishes,
+# each pass the "is env2 busy?" SELECT, and each rush to INSERT a new
+# fix_run — putting two SA-4 runs in parallel on env2 despite the design
+# saying "one at a time." Result: both hit env2 contention, both trivy
+# rescans time out, both roll back.
+#
+# A process-local `threading.Lock` closes the window inside a single
+# uvicorn worker. Combined with the existing DB check (which stays as
+# cross-process backup), dispatches strictly serialize.
+#
+# Multi-worker deploys need a real DB lease (postgres advisory lock or
+# a leases table). Not required for the current single-process backend.
+_ENV2_DISPATCH_LOCK = threading.Lock()
 
 
 # =============================================================================
@@ -230,11 +249,52 @@ def run_fixer(
     """
     cfg = config or load_config_from_settings()
 
-    # Concurrency lock — env2 is a single shared sandbox; only one fix_run
-    # at a time (Nikhil's design note: parallel runs race on terraform state
-    # + AWS API rate limits). Wait with backoff when locked rather than
-    # raising immediately, so teammates iterating together don't step on
-    # each other's dispatches.
+    # Serialize env2 dispatches at the PROCESS level — closes the TOCTOU
+    # race between the DB concurrency check below and the create_fix_run
+    # INSERT further down. Even if multiple background tasks reach here
+    # simultaneously (typical when a user approves 5 HITL packages in
+    # quick succession), only one enters at a time. The others block
+    # until this one returns.
+    _lock_acquired_at = utcnow()
+    _ENV2_DISPATCH_LOCK.acquire()
+    _lock_waited_s = int((utcnow() - _lock_acquired_at).total_seconds())
+    if _lock_waited_s > 0:
+        try:
+            emit_fn(
+                agent_run_id,
+                "sub-agent-4",
+                "MESSAGE",
+                f"🔒 Serial dispatch: waited {_lock_waited_s}s for prior fix_run to release lock",
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+    try:
+        return _run_fixer_locked(
+            package_id=package_id,
+            agent_run_id=agent_run_id,
+            sb=sb,
+            emit_fn=emit_fn,
+            environment=environment,
+            cfg=cfg,
+        )
+    finally:
+        _ENV2_DISPATCH_LOCK.release()
+
+
+def _run_fixer_locked(
+    *,
+    package_id: int,
+    agent_run_id: str,
+    sb: Any,
+    emit_fn,
+    environment: str,
+    cfg: FixerConfig,
+) -> int:
+    """Body of run_fixer — executed only while _ENV2_DISPATCH_LOCK is held."""
+    # Concurrency lock (DB-side belt-and-suspenders) — env2 is a single
+    # shared sandbox; only one fix_run at a time. This check remains as
+    # cross-process safety for multi-worker deployments even though the
+    # process-level lock in run_fixer already serializes within one worker.
     if not FixerConfig.allow_concurrent_runs:
         import time  # noqa: PLC0415 — local import; keeps top-of-file clean
 

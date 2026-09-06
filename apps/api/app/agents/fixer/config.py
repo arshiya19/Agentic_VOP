@@ -30,8 +30,17 @@ class FixerConfig:
 
     # ─── Whole-run timeout ────────────────────────────────────────────────
     # How long the entire fix (all steps + validation + rollback) may take.
-    # Persisted on fix_runs.timeout_seconds for downstream monitors.
-    run_timeout_s: int = 300
+    # Persisted on fix_runs.timeout_seconds; enforced by the watchdog
+    # (check_run_health at every phase boundary) + the zombie reaper.
+    #
+    # 1200s (20 min) accommodates the slowest legitimate real-world cases:
+    #   • Docker image rebuild (multi-stage, no cache): 3-10 min
+    #   • OS fix waiting on unattended-upgrades to release dpkg lock:
+    #     up to 10 min wait + 2-5 min apt + rescan
+    #   • Terraform apply on a cold state: 3-5 min
+    # Faster fixes still finish fast; this is a ceiling, not a target.
+    # Override per-strategy in the future via a class attribute if needed.
+    run_timeout_s: int = 1200
 
     # ─── SSM invocation polling ───────────────────────────────────────────
     # How often we poll ssm.get_command_invocation for terminal status.

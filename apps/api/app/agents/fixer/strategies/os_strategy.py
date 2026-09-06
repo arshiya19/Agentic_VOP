@@ -27,6 +27,8 @@ Design principles (same as IaCStrategy / ImageStrategy):
 
 from __future__ import annotations
 
+import os
+
 from ...remediation.verifier import _extract_shell_blocks
 from ..config import FixerConfig
 from ..models import (
@@ -55,6 +57,92 @@ _RESCAN_CLI_MARKERS: tuple[str, ...] = (
     "rpm -qa",
     "yum list installed",
 )
+
+
+# ─── Package-manager lock contention ─────────────────────────────────────
+# Any Debian/Ubuntu host with `unattended-upgrades` (default on Ubuntu),
+# cron-apt, Puppet/Ansible, or a security-scanning agent will periodically
+# hold /var/lib/dpkg/lock-frontend. Concurrent apt-get calls fail with
+# exit 100 "Could not get lock". Same story for yum on RHEL/AL2 with
+# yum-cron / dnf-automatic.
+#
+# The fixer runs sequentially and can't influence what else runs on the
+# host, so every OS fix command must WAIT for the lock rather than fail.
+# The wait uses `flock -w` when available (atomic) with a plain
+# fuser-poll fallback for images without util-linux. Emits a bash
+# `_wait_for_pkg_lock` shell fn injected once via `&&` chain, then
+# calls it before the actual command.
+#
+# Tunables (env vars, read on the target host at exec time):
+#   FIXER_PKG_LOCK_WAIT_S   — max seconds to wait per lock (default 600)
+#   FIXER_PKG_LOCK_POLL_S   — poll interval when lock held (default 5)
+_APT_LOCK_FILES = (
+    "/var/lib/dpkg/lock-frontend",
+    "/var/lib/dpkg/lock",
+    "/var/lib/apt/lists/lock",
+    "/var/cache/apt/archives/lock",
+)
+_YUM_LOCK_FILES = (
+    "/var/run/yum.pid",
+    "/var/run/dnf.pid",
+)
+
+_WAIT_FN = r"""
+_wait_for_pkg_lock() {
+  local files="$1" max="${FIXER_PKG_LOCK_WAIT_S:-600}" poll="${FIXER_PKG_LOCK_POLL_S:-5}"
+  local waited=0 holder=""
+  while [ "$waited" -lt "$max" ]; do
+    local busy=""
+    for f in $files; do
+      if [ -e "$f" ] && sudo fuser "$f" >/dev/null 2>&1; then busy="$f"; break; fi
+    done
+    if [ -z "$busy" ]; then
+      [ "$waited" -gt 0 ] && echo "[pkg-lock] cleared after ${waited}s"
+      return 0
+    fi
+    if [ -z "$holder" ]; then
+      holder=$(sudo fuser "$busy" 2>/dev/null | awk '{print $NF}')
+      local proc=$(ps -p "$holder" -o comm= 2>/dev/null | head -1)
+      echo "[pkg-lock] $busy held by pid=$holder (${proc:-unknown}); waiting up to ${max}s"
+    fi
+    sleep "$poll"; waited=$((waited + poll))
+  done
+  echo "[pkg-lock] STILL held after ${max}s — proceeding anyway (will likely fail)"
+  return 1
+}
+"""
+
+
+# Regex matches an apt/dpkg/yum invocation at word boundary (optionally
+# prefixed by `sudo`). Case-sensitive intentionally.
+def _needs_pkg_lock_guard(cmd: str) -> str | None:
+    """Return 'apt' or 'yum' if cmd needs lock guarding, else None."""
+    import re as _re  # noqa: PLC0415
+
+    if _re.search(r"(?:^|[;&|\s])(?:sudo\s+)?(?:apt-get|apt|dpkg)\b", cmd):
+        return "apt"
+    if _re.search(r"(?:^|[;&|\s])(?:sudo\s+)?(?:yum|dnf|rpm)\b", cmd):
+        return "yum"
+    return None
+
+
+def _wrap_with_lock_wait(cmd: str, pkg_mgr_hint: str | None = None) -> str:
+    """Prepend the wait_for_lock shell fn + a call before the actual command.
+
+    Detection is driven entirely by the command text — we only wrap when
+    it actually touches a package manager (apt/dpkg/yum/dnf/rpm). The
+    `pkg_mgr_hint` is a fallback used only when the command is ambiguous
+    (rare), never an override — trivy/echo/grep commands must never be
+    wrapped even when called from an apt-family strategy.
+    """
+    kind = _needs_pkg_lock_guard(cmd)
+    if not kind:
+        return cmd
+    files = _APT_LOCK_FILES if kind == "apt" else _YUM_LOCK_FILES
+    files_arg = " ".join(files)
+    # Bash-safe compose: the fn definition + call + the original command,
+    # all in one shell so the fn survives to the actual command.
+    return f"{_WAIT_FN}\n_wait_for_pkg_lock '{files_arg}' || true\n{cmd}"
 
 
 def _normalize_method(method: str | None) -> str:
@@ -347,8 +435,24 @@ class OSStrategy(BaseFixStrategy):
             else:
                 timeout = 120
 
+            # Package-manager lock guard — prepend a wait-for-lock loop so
+            # concurrent unattended-upgrades / cron-apt / yum-cron on the
+            # target don't cause exit=100 "Could not get lock". No-op for
+            # commands that don't touch a package manager.
+            wrapped = _wrap_with_lock_wait(combined, pkg_mgr_hint=self._pkg_mgr)
+            if wrapped is not combined:
+                # We added a wait wrapper — extend the timeout to include
+                # the max wait budget so we don't kill the command mid-wait.
+                _wait_max = int(os.environ.get("FIXER_PKG_LOCK_WAIT_S", "600"))
+                timeout = timeout + _wait_max
+                self._emit(
+                    ctx,
+                    "MESSAGE",
+                    f"   🔒 Wrapped with pkg-lock wait (max +{_wait_max}s)",
+                )
+
             try:
-                cmd_result = executor.run_command(combined, timeout_s=timeout)
+                cmd_result = executor.run_command(wrapped, timeout_s=timeout)
             except (RemoteExecError, CommandTimeoutError) as e:
                 # For OS strategy: only halt on timeout if it's a core fix command.
                 # Non-critical commands timing out shouldn't kill the whole run.
@@ -520,7 +624,11 @@ class OSStrategy(BaseFixStrategy):
                 )
                 continue
 
-            timeout = 300 if "trivy" in command.lower() else 120
+            # trivy rescan on env2 rootfs takes 3-5 min solo, longer under
+            # any concurrency. Successful runs land near 246s; a 300s cap
+            # cut it too close and rolled back plans that would have passed.
+            # 600s gives headroom without letting a truly stuck scan hang.
+            timeout = 600 if "trivy" in command.lower() else 120
             try:
                 cmd_result = executor.run_command(command, timeout_s=timeout)
                 actual = ((cmd_result.stdout or "") + (cmd_result.stderr or ""))[:2000]

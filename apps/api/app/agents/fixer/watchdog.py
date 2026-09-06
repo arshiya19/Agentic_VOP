@@ -143,23 +143,34 @@ def sweep_stale_fix_runs(sb: Any) -> int:
 
         age_s = int((now - started_at).total_seconds())
         try:
-            sb.table("fix_runs").update(
-                {
-                    "status": "failed",
-                    "finished_at": now.isoformat(),
-                    "duration_seconds": age_s,
-                    "error_message": (
-                        f"reaped by watchdog — status was {r['status']!r} "
-                        f"{age_s}s after start (timeout_seconds={timeout_s}). "
-                        f"Fixer process likely crashed or hung; no in-process "
-                        f"finalize occurred."
-                    ),
-                }
-            ).eq("id", r["id"]).execute()
-            reaped += 1
+            # Compare-and-set: only update if the row is STILL non-terminal.
+            # If finalize_fix_run raced us and already wrote 'success' /
+            # 'rolled_back' / 'failed' between our SELECT and this UPDATE,
+            # the `.in_("status", NON_TERMINAL_STATUSES)` filter matches 0
+            # rows and finalize's authoritative result stands. Never clobber
+            # a real finalize with a reaper's fake "failed" status.
+            resp = (
+                sb.table("fix_runs")
+                .update(
+                    {
+                        "status": "failed",
+                        "finished_at": now.isoformat(),
+                        "duration_seconds": age_s,
+                        "error_message": (
+                            f"reaped by watchdog — status was {r['status']!r} "
+                            f"{age_s}s after start (timeout_seconds={timeout_s}). "
+                            f"Fixer process likely crashed or hung; no in-process "
+                            f"finalize occurred."
+                        ),
+                    }
+                )
+                .eq("id", r["id"])
+                .in_("status", NON_TERMINAL_STATUSES)
+                .execute()
+            )
+            if resp.data:
+                reaped += 1
         except Exception:  # noqa: BLE001, S110
-            # Another sweeper (or the process itself, coming back) may have
-            # written a terminal state between our SELECT and UPDATE.
             # Ignoring is safe — next sweep will re-evaluate.
             pass
     return reaped
