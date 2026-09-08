@@ -765,13 +765,7 @@ export default function Agents() {
                 Avg duration: {stats.avgDuration ?? '—'}
               </div>
             </div>
-            <div className="agent-stat-card">
-              <div className="agent-stat-value error">{stats.errorsToday ?? '—'}</div>
-              <div className="agent-stat-label">Errors (today)</div>
-              <div className="agent-stat-sub">
-                Last error: {stats.lastErrorAt ?? '—'}
-              </div>
-            </div>
+          
           </div>
 
           <div className="agents-content-grid">
