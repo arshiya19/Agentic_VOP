@@ -361,6 +361,46 @@ export default function Integrations() {
     setIsTriggering(false)
   }
 
+  // HITL v2 — post-fix review. Autonomous dispatch (no pre-fix approval),
+  // then SA-4 pauses after successful validate and captures a unified diff
+  // of the file it changed. Packages land at `awaiting_review`; user
+  // clicks the card to see the diff and Approve or Reject.
+  const handleTriggerHITLReview = async () => {
+    if (selectedScanners.size === 0 || isTriggering) return
+    setIsTriggering(true)
+    setLastResult(null)
+
+    localStorage.setItem('pipelineMode', 'real')
+    window.dispatchEvent(new Event('pipelineModeChanged'))
+
+    const eventId = `EVT-HITL-REVIEW-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    try {
+      const res = await fetch(`${API_URL}/agents/trigger_demo_hitl_review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_id: eventId,
+          action: 'FULL',
+          targets: { scanners: Array.from(selectedScanners) },
+        }),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+      }
+      const data = await res.json()
+      setLastResult({
+        ok: true,
+        message: `HITL Review pipeline triggered (${data.event_id}) — real fetch → sample → remediate → fix → PAUSED for diff review. Review changes on the Remediation page.`,
+      })
+      setTimeout(() => setIsTriggering(false), 5000)
+      return
+    } catch (err) {
+      setLastResult({ ok: false, message: `Failed to trigger HITL Review: ${err.message}` })
+    }
+    setIsTriggering(false)
+  }
+
   const allTools = useMemo(() => {
     return integrationsData.flatMap(group =>
       group.tools.map(tool => ({
@@ -485,11 +525,22 @@ export default function Integrations() {
                 className="scanner-runner-btn scanner-runner-btn-hitl"
                 onClick={handleTriggerHITL}
                 disabled={selectedScanners.size === 0 || isTriggering}
-                title="Human-in-the-loop: real fetch → sample (cap 5/scanner) → remediate → PAUSE. Approve/Reject each package in Remediation page to trigger fix."
+                title="HITL v1 — pre-fix approval. Real fetch → remediate → PAUSE. Approve/Reject each package to trigger the fix."
               >
                 {isTriggering
                   ? 'Triggering…'
                   : `👤 Run HITL Pipeline${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
+              </button>
+              <button
+                type="button"
+                className="scanner-runner-btn scanner-runner-btn-hitl-review"
+                onClick={handleTriggerHITLReview}
+                disabled={selectedScanners.size === 0 || isTriggering}
+                title="HITL v2 — post-fix review. Autonomous fix, then PAUSE at the diff. Approve keeps the change live; Reject restores the file via SSM."
+              >
+                {isTriggering
+                  ? 'Triggering…'
+                  : `🔍 Run HITL Review${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
               </button>
               {lastResult && (
                 <div

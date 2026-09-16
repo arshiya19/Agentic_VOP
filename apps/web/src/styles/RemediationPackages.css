@@ -276,6 +276,11 @@
 .rmp-status-pill.st-fixed               { background: #14532d; color: #86efac; }
 .rmp-status-pill.st-rolled_back         { background: #3a2a1d; color: #fbbf24; }
 .rmp-status-pill.st-fix_failed          { background: #3a1d1d; color: #f87171; }
+/* HITL v2 post-fix review states — teal for the pending decision, muted
+ * red for the rejected outcome. Distinct from awaiting_approval (amber)
+ * so v1 and v2 packages read as different states at a glance. */
+.rmp-status-pill.st-awaiting_review     { background: #0f2f2b; color: #5eead4; }
+.rmp-status-pill.st-review_rejected     { background: #2a1d20; color: #fda4af; }
 
 .rmp-view-btn {
   background: transparent;

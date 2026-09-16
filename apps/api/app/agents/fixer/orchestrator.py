@@ -1028,6 +1028,70 @@ def _run_lifecycle(
                 ),
             )
 
+    # HITL v2 — post-fix review capture.
+    # If the package was created with `review_required=True`, we DON'T
+    # cleanup the backup yet. Instead:
+    #   1. Read the current file bytes + the .bak bytes via SSM
+    #   2. Compute a unified diff
+    #   3. Persist to fix_run.review_diff
+    # Master then flips the package to `awaiting_review` (see master's
+    # _FIX_TO_PACKAGE_STATUS override). The Approve endpoint later
+    # deletes the backup; the Reject endpoint restores from it.
+    #
+    # Best-effort — a failed capture is logged but doesn't block the
+    # success path. Rescan passed = fix is correct regardless of whether
+    # the diff was captured.
+    _pkg = ctx.package or {}
+    if _pkg.get("review_required") and ctx.file_path and backup.backup_reference:
+        try:
+            from .review import capture_review_diff, persist_diff  # noqa: PLC0415
+            from .tools.remote_exec import RemoteExecutor  # noqa: PLC0415
+
+            # Build the executor directly instead of asking the strategy for
+            # one — strategy method naming varies (IaCStrategy uses
+            # `_executor_for`, ImageStrategy uses `_executor`), and neither
+            # is part of a formal interface. Direct construction sidesteps
+            # the naming drift entirely.
+            _cfg = strategy.config if hasattr(strategy, "config") else None
+            _review_executor = RemoteExecutor(
+                ctx.target_instance_id,
+                region=ctx.aws_region,
+                config=_cfg,
+                emit_fn=emit_fn,
+                run_id=ctx.agent_run_id,
+            )
+            diff = capture_review_diff(
+                _review_executor,
+                current_path=ctx.file_path,
+                backup_path=backup.backup_reference,
+            )
+            if diff:
+                persist_diff(sb, fix_run_id, diff)
+                emit_fn(
+                    ctx.agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"📸 Review diff captured — {len(diff)} file(s), "
+                    f"{sum(d.get('bytes_after', 0) for d in diff)} bytes. "
+                    f"Package will pause at awaiting_review for human approval.",
+                )
+            else:
+                emit_fn(
+                    ctx.agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    "⚠ Review diff capture returned empty — package will still "
+                    "pause at awaiting_review but no diff will show in the UI.",
+                )
+        except Exception as e:  # noqa: BLE001
+            emit_fn(
+                ctx.agent_run_id,
+                "sub-agent-4",
+                "MESSAGE",
+                f"⚠ Review diff capture crashed ({type(e).__name__}: "
+                f"{str(e)[:200]}) — package will still pause at awaiting_review.",
+            )
+
     # 🎉 Success
     return StrategyOutcome(
         status="success",

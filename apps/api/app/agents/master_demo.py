@@ -145,6 +145,13 @@ class DemoMasterState(TypedDict, total=False):
     # via /admin/remediation-packages/demo/{id}/approve, which kicks off
     # the fixer for that single package in the background.
     hitl: bool
+    # HITL v2 (post-fix review): when True, SA-3 persists packages with
+    # `review_required=True`. SA-4 then pauses after successful validate,
+    # captures a unified diff of the file it changed, and packages flip
+    # to `awaiting_review` for human approve/reject on the Remediation
+    # page. Independent of `hitl` — you can mix v1 (pre-fix approve)
+    # with v2 (post-fix review) or use either on its own.
+    hitl_review: bool
     # Optional override for per-scanner sampling cap. HITL default = 5.
     # None keeps the standard _SOURCE_SCOOPS values (auto-demo behavior).
     per_scanner_cap: int | None
@@ -231,7 +238,11 @@ def _remediate_node(state: DemoMasterState) -> dict:
         raise RunCancelledError("Demo run cancelled before remediation")
 
     emit_trace_demo(run_id, "master", "MESSAGE", "Dispatching to Sub-Agent 3 (demo)")
-    result = planner_demo.run_demo_remediation(run_id, hitl=bool(state.get("hitl")))
+    result = planner_demo.run_demo_remediation(
+        run_id,
+        hitl=bool(state.get("hitl")),
+        hitl_review=bool(state.get("hitl_review")),
+    )
     emit_trace_demo(
         run_id,
         "master",
@@ -324,7 +335,7 @@ def _fix_node(state: DemoMasterState) -> dict:
         sb.table("remediation_packages")
         # `pathways` needed so we can read the per-batch covered_issue_ids
         # marker persisted in pathway.considerations for findings-level counts.
-        .select("id, family, issue_id, pathways")
+        .select("id, family, issue_id, pathways, review_required")
         .eq("agent_run_id", run_id)
         .execute()
         .data
@@ -518,6 +529,13 @@ def _fix_node(state: DemoMasterState) -> dict:
             "no_fix_needed": "fixed",
         }
         _new_pkg_status = _FIX_TO_PACKAGE_STATUS.get(status)
+        # HITL v2 override: a package created with review_required=True doesn't
+        # go straight to `fixed` on success — it goes to `awaiting_review`
+        # so a human can approve or reject the captured diff. Rollback +
+        # failure paths are unaffected (nothing to review if the fix didn't
+        # land). See design doc: Post-Fix Review Modes, Approach A.
+        if _new_pkg_status == "fixed" and bool(pkg.get("review_required")):
+            _new_pkg_status = "awaiting_review"
         if _new_pkg_status:
             try:
                 sb.table("remediation_packages").update({"status": _new_pkg_status}).eq(
@@ -1002,6 +1020,8 @@ def run_demo_master(
     real_run_id: str | None = None,
     hitl: bool = False,
     per_scanner_cap: int | None = None,
+    *,
+    hitl_review: bool = False,
 ) -> None:
     """Compile-once graph, invoke per run. Falls back to _fail_node on exception.
 
@@ -1024,6 +1044,7 @@ def run_demo_master(
                 "run_id": run_id,
                 "real_run_id": real_run_id,
                 "hitl": hitl,
+                "hitl_review": hitl_review,
                 "per_scanner_cap": per_scanner_cap,
             }
         )

@@ -35,6 +35,11 @@ const STATUS_LABEL = {
   fixed: 'Fixed',
   rolled_back: 'Rolled Back',
   fix_failed: 'Fix Failed',
+  // HITL v2 — post-fix review states. Set by master's status sync when
+  // the package was created with review_required=True (see design doc:
+  // Post-Fix Review Modes, Approach A · Sandbox).
+  awaiting_review: 'Awaiting Review',
+  review_rejected: 'Review Rejected',
 }
 
 const VALIDATION_TONE = {
@@ -207,6 +212,51 @@ export default function Remediation() {
     }
   }, [refreshList, selectedId, showToast, apiBase])
 
+  // HITL v2 — approve the DIFF SA-4 produced. Keeps changes live,
+  // finalizes package as `fixed`, cleans up the .bak on env2.
+  const handleReviewApprove = useCallback(async (id) => {
+    if (!window.confirm('Approve these changes?\n\nThis will keep the file edits SA-4 made and mark the package as Fixed. The backup file will be deleted from env2.')) return
+    try {
+      const res = await fetch(`${apiBase}/${id}/review-approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewed_by: 'demo-user@acmecorp.com' }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+      showToast('success', `Package ${id} — changes approved (Fixed)`)
+      await refreshList()
+      if (selectedId === id) {
+        const refreshed = await fetch(`${apiBase}/${id}`).then(r => r.json())
+        setDetail(refreshed)
+      }
+    } catch (e) {
+      showToast('error', `Review approve failed: ${e.message}`)
+    }
+  }, [refreshList, selectedId, showToast, apiBase])
+
+  // HITL v2 — reject the diff. Restores the .bak via SSM, finalizes as
+  // `review_rejected`.
+  const handleReviewReject = useCallback(async (id) => {
+    if (!window.confirm('Reject these changes?\n\nThis will restore the original file on env2 from the backup, and mark the package as Review Rejected. The fix will be undone.')) return
+    try {
+      const res = await fetch(`${apiBase}/${id}/review-reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewed_by: 'demo-user@acmecorp.com' }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+      const data = await res.json()
+      showToast('success', `Package ${id} — changes rejected, file restored (${data.status})`)
+      await refreshList()
+      if (selectedId === id) {
+        const refreshed = await fetch(`${apiBase}/${id}`).then(r => r.json())
+        setDetail(refreshed)
+      }
+    } catch (e) {
+      showToast('error', `Review reject failed: ${e.message}`)
+    }
+  }, [refreshList, selectedId, showToast, apiBase])
+
   const handleReject = useCallback(async (id) => {
     const reason = window.prompt('Reject reason (will be saved on the package):')
     if (!reason || reason.trim().length < 3) {
@@ -348,7 +398,7 @@ export default function Remediation() {
           {/* Toolbar — just filter pills now, action moved into stats strip */}
           <div className="rmp-toolbar">
             <div className="rmp-filter-group">
-              {['all', 'awaiting_approval', 'ready_for_execution', 'fixed', 'rolled_back', 'fix_failed', 'rejected'].map(s => (
+              {['all', 'awaiting_approval', 'awaiting_review', 'ready_for_execution', 'fixed', 'rolled_back', 'fix_failed', 'review_rejected', 'rejected'].map(s => (
                 <button
                   key={s}
                   className={`rmp-filter-pill ${statusFilter === s ? 'active' : ''}`}
@@ -433,6 +483,8 @@ export default function Remediation() {
             onClose={() => { setSelectedId(null); setDetail(null) }}
             onApprove={() => handleApprove(selectedId)}
             onReject={() => handleReject(selectedId)}
+            onReviewApprove={() => handleReviewApprove(selectedId)}
+            onReviewReject={() => handleReviewReject(selectedId)}
             apiBase={apiBase}
           />
         )}
@@ -513,10 +565,25 @@ function StatusPill({ status }) {
 // Horizontal Detail Card — replaces the old right-side drawer
 // =============================================================================
 
-function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, apiBase }) {
+function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewApprove, onReviewReject, apiBase }) {
   const pw = recommendedPathway(pkg)
   const vm = pw?.validation_metadata
   const [ticketLoading, setTicketLoading] = useState(false)
+  // HITL v2 — review diff loaded lazily when the package is awaiting_review.
+  const [reviewDiff, setReviewDiff] = useState(null)
+  const [reviewDiffLoading, setReviewDiffLoading] = useState(false)
+  const isAwaitingReview = pkg?.status === 'awaiting_review'
+  useEffect(() => {
+    if (!isAwaitingReview || !pkg?.id) { setReviewDiff(null); return }
+    let mounted = true
+    setReviewDiffLoading(true)
+    fetch(`${apiBase}/${pkg.id}/review-diff`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(data => { if (mounted) setReviewDiff(data) })
+      .catch(() => { if (mounted) setReviewDiff({ diff: [], error: true }) })
+      .finally(() => { if (mounted) setReviewDiffLoading(false) })
+    return () => { mounted = false }
+  }, [isAwaitingReview, pkg?.id, apiBase])
   const [ticket, setTicket] = useState(() => {
     // If package is ready_for_execution and was approved, check if we already created a ticket
     // (Demo tickets are deterministic: INC + package ID)
@@ -1017,9 +1084,72 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, apiBase }) {
             </div>
           )}
 
+          {/* HITL v2 — Post-fix review panel. Only shown when the package
+              is awaiting_review (SA-4 already applied the fix, backup is
+              preserved, human decides whether to keep or restore). */}
+          {isAwaitingReview && (
+            <div style={{ padding: '16px 0', borderTop: '1px solid #2D3748', marginTop: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.06em', color: '#5eead4', textTransform: 'uppercase' }}>
+                  Post-fix review
+                </span>
+                <span style={{ fontSize: 11, color: '#64748B' }}>
+                  Fix applied &amp; rescan passed. Approve to keep, reject to restore.
+                </span>
+              </div>
+              {reviewDiffLoading ? (
+                <div style={{ padding: '18px 12px', color: '#94a3b8', fontSize: 13 }}>Loading diff…</div>
+              ) : reviewDiff?.error ? (
+                <div style={{ padding: '12px', color: '#f87171', fontSize: 13 }}>Failed to load diff. Fix ran but capture may not have completed.</div>
+              ) : (reviewDiff?.diff || []).length === 0 ? (
+                <div style={{ padding: '12px', color: '#94a3b8', fontSize: 13 }}>No diff captured. You can still Approve to finalize as Fixed, or Reject to restore from backup.</div>
+              ) : (
+                reviewDiff.diff.map((d, i) => (
+                  <div key={i} style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11.5, color: '#94a3b8', fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', marginBottom: 6 }}>
+                      📄 {d.file_path} <span style={{ color: '#64748B' }}>· {d.bytes_before} → {d.bytes_after} bytes</span>
+                    </div>
+                    <pre style={{
+                      background: '#0b1220',
+                      border: '1px solid #1e2a3a',
+                      borderRadius: 4,
+                      padding: '12px 14px',
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                      overflow: 'auto',
+                      maxHeight: 380,
+                      fontFamily: 'ui-monospace, SF Mono, Menlo, Consolas, monospace',
+                      margin: 0,
+                      whiteSpace: 'pre',
+                    }}>
+                      {(d.unified_diff || '').split('\n').map((line, li) => {
+                        let color = '#cbd5e1'
+                        if (line.startsWith('+') && !line.startsWith('+++')) color = '#7dc078'
+                        else if (line.startsWith('-') && !line.startsWith('---')) color = '#d17878'
+                        else if (line.startsWith('@@')) color = '#64c9c9'
+                        else if (line.startsWith('+++') || line.startsWith('---')) color = '#64748B'
+                        return <div key={li} style={{ color }}>{line || ' '}</div>
+                      })}
+                    </pre>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
           {/* Footer actions */}
           <div className="detail-card-actions">
-            {effectiveTerminal ? (
+            {isAwaitingReview ? (
+              <>
+                <button className="action-btn secondary" onClick={onReviewReject}>Reject Changes</button>
+                <button className="action-btn primary create-pr-btn" onClick={onReviewApprove}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  Approve Changes
+                </button>
+              </>
+            ) : effectiveTerminal ? (
               <>
                 {effectiveStatus === 'ready_for_execution' ? (
                   ticket ? (
