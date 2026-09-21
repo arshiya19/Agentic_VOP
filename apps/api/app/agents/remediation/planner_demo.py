@@ -50,7 +50,12 @@ from .planner import (
 _MAX_PACKAGES = 20
 
 
-def run_demo_remediation(run_id: str, hitl: bool = False) -> dict:
+def run_demo_remediation(
+    run_id: str,
+    hitl: bool = False,
+    *,
+    hitl_review: bool = False,
+) -> dict:
     """Generate + persist RemediationPackages for every demo issue in this run.
 
     Args:
@@ -60,6 +65,11 @@ def run_demo_remediation(run_id: str, hitl: bool = False) -> dict:
             finding; batching collapses that granularity and (empirically)
             produces under-covered fix plans once the batch grows past ~5
             findings. Auto-demo keeps batching for speed.
+        hitl_review: HITL v2. When True, packages are persisted with
+            `review_required=True` so SA-4 pauses after successful validate
+            and captures a diff for human approve/reject on the Remediation
+            page. Independent of `hitl` — you can have autonomous dispatch
+            + post-fix review, or pre-fix approval + no post-fix review.
 
     Returns {"planned": N, "persisted": N, "failed": N}.
     """
@@ -260,7 +270,7 @@ def run_demo_remediation(run_id: str, hitl: bool = False) -> dict:
                     f"{primary['id']}: {_msg}. {_details}",
                 )
 
-            _persist_to_demo(sb_demo, pkg, run_id)
+            _persist_to_demo(sb_demo, pkg, run_id, review_required=hitl_review)
             persisted += 1
 
             emit_trace_demo(
@@ -944,8 +954,19 @@ def _plan_and_enrich(
     )
 
 
-def _persist_to_demo(sb_demo: Any, pkg: RemediationPackage, run_id: str) -> int:
-    """INSERT a RemediationPackage into demo.remediation_packages."""
+def _persist_to_demo(
+    sb_demo: Any,
+    pkg: RemediationPackage,
+    run_id: str,
+    *,
+    review_required: bool = False,
+) -> int:
+    """INSERT a RemediationPackage into demo.remediation_packages.
+
+    review_required (HITL v2): when True, the package carries a flag that
+    tells SA-4 to pause after successful validate + capture a diff. The
+    Remediation page then shows Approve/Reject buttons on the diff.
+    """
     row = {
         "issue_id": pkg.issue_id,
         "family": pkg.family,
@@ -958,6 +979,20 @@ def _persist_to_demo(sb_demo: Any, pkg: RemediationPackage, run_id: str) -> int:
         "status": "awaiting_approval",
         "agent_run_id": run_id,
     }
-    resp = sb_demo.table("remediation_packages").insert(row).execute()
+    # Only include the column when set — omitting it lets us degrade
+    # gracefully if migration 0041 hasn't been applied yet (the column
+    # simply doesn't exist and the insert works with the default False).
+    if review_required:
+        row["review_required"] = True
+    try:
+        resp = sb_demo.table("remediation_packages").insert(row).execute()
+    except Exception as e:  # noqa: BLE001
+        # Migration 0041 pre-flight: retry without the column if the DB
+        # doesn't know about it yet.
+        if "review_required" in str(e) and review_required:
+            row.pop("review_required", None)
+            resp = sb_demo.table("remediation_packages").insert(row).execute()
+        else:
+            raise
     rows = resp.data or []
     return rows[0]["id"] if rows else 0

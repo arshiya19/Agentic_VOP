@@ -786,6 +786,21 @@
   color: #64748B;
 }
 
+/* Run HITL Review — teal accent for the post-fix review variant.
+ * Distinct from HITL v1's purple so they read as different products
+ * at a glance. Teal reads as "code review / diff" more than purple. */
+.scanner-runner-btn-hitl-review {
+  background: #14B8A6;
+  color: #ffffff;
+}
+.scanner-runner-btn-hitl-review:hover:not(:disabled) {
+  background: #0F9488;
+}
+.scanner-runner-btn-hitl-review:disabled {
+  background: #1E293B;
+  color: #64748B;
+}
+
 .scanner-runner-result {
   font-size: 13px;
   padding: 8px 12px;

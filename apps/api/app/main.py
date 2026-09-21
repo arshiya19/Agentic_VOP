@@ -356,6 +356,89 @@ def trigger_demo_hitl_run(payload: TriggerEvent, background_tasks: BackgroundTas
     )
 
 
+@app.post("/agents/trigger_demo_hitl_review", response_model=RunCreated, status_code=201)
+def trigger_demo_hitl_review_run(
+    payload: TriggerEvent, background_tasks: BackgroundTasks
+) -> RunCreated:
+    """Kick off the demo pipeline in HITL v2 (post-fix review) mode.
+
+    Autonomous dispatch — SA-4 runs immediately after SA-3, no pre-fix
+    approval needed. When SA-4 finishes successfully, it captures a
+    unified diff of the changed file and the package pauses at
+    `awaiting_review`. The Remediation page shows the diff with
+    Approve / Reject buttons. Approve keeps the change live and
+    finalizes as `fixed`. Reject restores the original file via SSM
+    and finalizes as `review_rejected`.
+
+    Requires migration 0041 for the new status values + review_required
+    column + fix_runs.review_diff. Falls back gracefully if not applied.
+    """
+    import uuid
+
+    sb_pub = supabase_admin()
+    sb_demo = supabase_admin_demo()
+
+    real_insert = (
+        sb_pub.table("agent_runs")
+        .insert(
+            {
+                "event_id": payload.event_id,
+                "triggered_by": payload.persona,
+                "action": payload.action,
+                "targets": payload.targets.model_dump(),
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not real_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create real run")
+    real_run_id = real_insert.data[0]["run_id"]
+
+    demo_event_id = f"demo-hitl-review-{uuid.uuid4().hex[:8]}"
+    demo_insert = (
+        sb_demo.table("agent_runs")
+        .insert(
+            {
+                "event_id": demo_event_id,
+                "triggered_by": "demo-hitl-review",
+                "action": "FULL",
+                "targets": {
+                    "demo": True,
+                    "hitl_review": True,
+                    "scanners": payload.targets.scanners,
+                    "real_run_id": real_run_id,
+                },
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not demo_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create demo HITL-review run")
+    demo_row = demo_insert.data[0]
+
+    def _run_real_then_demo_hitl_review():
+        run_master(real_run_id)
+        # hitl=False → auto-dispatch SA-4 (no pre-fix approval gate)
+        # hitl_review=True → post-fix review pause + diff capture
+        run_demo_master(
+            demo_row["run_id"],
+            real_run_id=real_run_id,
+            hitl=False,
+            hitl_review=True,
+            per_scanner_cap=5,
+        )
+
+    background_tasks.add_task(_run_real_then_demo_hitl_review)
+
+    return RunCreated(
+        run_id=demo_row["run_id"],
+        event_id=demo_row["event_id"],
+        status=demo_row["status"],
+    )
+
+
 @app.post("/agents/demo/reset")
 def reset_demo_state() -> dict:
     """Wipe demo output tables. Keeps demo.raw_findings (the 5-row seed fixture).
@@ -1297,6 +1380,23 @@ def approve_demo_remediation_package(
             )
             fix_status = (resp.data[0]["status"] if resp.data else None) or "failed"
             pkg_status = _FIX_TO_PACKAGE.get(fix_status, "fix_failed")
+            # HITL v2 — a package marked `review_required` doesn't go to
+            # `fixed` on success. It pauses at `awaiting_review` so a
+            # human can approve or reject the diff SA-4 just captured.
+            if pkg_status == "fixed":
+                try:
+                    _pkg = (
+                        sb_demo.table("remediation_packages")
+                        .select("review_required")
+                        .eq("id", pkg_id)
+                        .limit(1)
+                        .execute()
+                        .data
+                    )
+                    if _pkg and _pkg[0].get("review_required"):
+                        pkg_status = "awaiting_review"
+                except Exception:  # noqa: BLE001, S110
+                    pass
             try:
                 sb_demo.table("remediation_packages").update({"status": pkg_status}).eq(
                     "id", pkg_id
@@ -1404,6 +1504,256 @@ def reject_demo_remediation_package(pkg_id: int, body: dict | None = None) -> di
             pass
 
     return {"id": pkg_id, "status": "rejected", "reason": reason, "rejected_by": rejected_by}
+
+
+# =============================================================================
+# HITL v2 post-fix review — approve / reject the DIFF SA-4 produced
+# =============================================================================
+# These are distinct from /approve and /reject above. Those gate DISPATCH
+# (v1: "should we run SA-4?"). These gate PERSISTENCE (v2: "SA-4 already
+# ran, keep or throw away the changes?"). Reviews land on packages whose
+# status is `awaiting_review` — SA-4 finished successfully, captured a
+# diff, and paused before finalize.
+
+
+class ReviewDecisionBody(BaseModel):
+    reviewed_by: str = "demo-user@acmecorp.com"
+
+
+@app.get("/admin/remediation-packages/demo/{pkg_id}/review-diff")
+def get_demo_review_diff(pkg_id: int) -> dict:
+    """Return the unified diff captured by SA-4 for this package.
+
+    Frontend calls this when the user clicks "View Diff" on an
+    `awaiting_review` card. Reads the latest fix_run for the package and
+    returns its `review_diff` JSONB verbatim.
+    """
+    sb = supabase_admin_demo()
+
+    fr = (
+        sb.table("fix_runs")
+        .select("id, status, review_diff, target_file_path, backup_reference, finished_at")
+        .eq("package_id", pkg_id)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not fr:
+        raise HTTPException(status_code=404, detail=f"no fix_run found for package #{pkg_id}")
+
+    row = fr[0]
+    return {
+        "package_id": pkg_id,
+        "fix_run_id": row["id"],
+        "fix_run_status": row["status"],
+        "target_file_path": row.get("target_file_path"),
+        "backup_reference": row.get("backup_reference"),
+        "finished_at": row.get("finished_at"),
+        "diff": row.get("review_diff") or [],
+    }
+
+
+@app.post("/admin/remediation-packages/demo/{pkg_id}/review-approve")
+def review_approve_demo_package(pkg_id: int, body: ReviewDecisionBody | None = None) -> dict:
+    """Approve the diff — keep the changes live, finalize as `fixed`.
+
+    Marks the package `fixed`. Best-effort cleanup of the backup file
+    (via SSM `rm -f`) — a lingering .bak isn't harmful.
+    """
+    reviewed_by = body.reviewed_by if body else "demo-user@acmecorp.com"
+    sb = supabase_admin_demo()
+
+    pkg = (
+        sb.table("remediation_packages")
+        .select("id, status, review_required")
+        .eq("id", pkg_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not pkg:
+        raise HTTPException(status_code=404, detail=f"package #{pkg_id} not found")
+    if pkg.get("status") != "awaiting_review":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"package #{pkg_id} is {pkg.get('status')!r}, not 'awaiting_review' — "
+                f"approve is only valid on packages waiting for post-fix review"
+            ),
+        )
+
+    # Flip package status. fixed is already in the CHECK constraint per
+    # migration 0039 — no fallback needed.
+    now_iso = datetime.now(UTC).isoformat()
+    sb.table("remediation_packages").update(
+        {
+            "status": "fixed",
+            "approved_by": reviewed_by,
+            "approved_at": now_iso,
+            "updated_at": now_iso,
+        }
+    ).eq("id", pkg_id).execute()
+
+    # Cleanup the backup file via SSM — best-effort, non-blocking.
+    _cleanup_backup_for_package(pkg_id, sb=sb, reviewed_by=reviewed_by)
+
+    return {
+        "id": pkg_id,
+        "status": "fixed",
+        "reviewed_by": reviewed_by,
+        "decision": "approved",
+    }
+
+
+@app.post("/admin/remediation-packages/demo/{pkg_id}/review-reject")
+def review_reject_demo_package(pkg_id: int, body: ReviewDecisionBody | None = None) -> dict:
+    """Reject the diff — restore the original file from the backup via
+    SSM, finalize the package as `review_rejected`.
+
+    Requires migration 0041 to be applied for the `review_rejected` state
+    to be accepted by the CHECK constraint. Degrades to `rolled_back` if
+    the constraint blocks it.
+    """
+    reviewed_by = body.reviewed_by if body else "demo-user@acmecorp.com"
+    sb = supabase_admin_demo()
+
+    pkg = (
+        sb.table("remediation_packages")
+        .select("id, status")
+        .eq("id", pkg_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not pkg:
+        raise HTTPException(status_code=404, detail=f"package #{pkg_id} not found")
+    if pkg.get("status") != "awaiting_review":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"package #{pkg_id} is {pkg.get('status')!r}, not 'awaiting_review' — "
+                f"reject is only valid on packages waiting for post-fix review"
+            ),
+        )
+
+    # Look up the latest fix_run to get target_file_path + backup_reference.
+    fr = (
+        sb.table("fix_runs")
+        .select("id, target_file_path, backup_reference, target_instance_id")
+        .eq("package_id", pkg_id)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not fr:
+        raise HTTPException(
+            status_code=500,
+            detail=f"no fix_run found for package #{pkg_id} — cannot locate backup to restore",
+        )
+
+    fr_row = fr[0]
+    file_path = fr_row.get("target_file_path")
+    backup_path = fr_row.get("backup_reference")
+    instance_id = fr_row.get("target_instance_id") or settings.fixer_env2_instance_id
+
+    if not (file_path and backup_path and instance_id):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"package #{pkg_id} missing file_path / backup_reference / instance_id "
+                f"on fix_run — cannot restore"
+            ),
+        )
+
+    # SSM restore. Build a fresh executor rather than reusing SA-4's — the
+    # approve/reject endpoints run in an HTTP request context, not the SA-4
+    # background task loop.
+    from .agents.fixer.config import load_config_from_settings  # noqa: PLC0415
+    from .agents.fixer.review import restore_backup_via_ssm  # noqa: PLC0415
+    from .agents.fixer.tools.remote_exec import RemoteExecutor  # noqa: PLC0415
+
+    cfg = load_config_from_settings()
+    executor = RemoteExecutor(
+        instance_id,
+        region=cfg.aws_region,
+        config=cfg,
+        emit_fn=lambda *_, **__: None,  # endpoint-scope emitter — no trace stream
+        run_id=None,
+    )
+    ok, message = restore_backup_via_ssm(
+        executor,
+        current_path=file_path,
+        backup_path=backup_path,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail=f"backup restore failed for package #{pkg_id}: {message}",
+        )
+
+    # Flip package status. Fall back to `rolled_back` if migration 0041
+    # hasn't been applied (CHECK constraint doesn't include the new value).
+    now_iso = datetime.now(UTC).isoformat()
+    patch = {
+        "status": "review_rejected",
+        "updated_at": now_iso,
+    }
+    applied_status = "review_rejected"
+    try:
+        sb.table("remediation_packages").update(patch).eq("id", pkg_id).execute()
+    except Exception as e:  # noqa: BLE001
+        if "remediation_packages_status_check" in str(e) or "23514" in str(e):
+            patch["status"] = "rolled_back"
+            applied_status = "rolled_back"
+            sb.table("remediation_packages").update(patch).eq("id", pkg_id).execute()
+        else:
+            raise
+
+    return {
+        "id": pkg_id,
+        "status": applied_status,
+        "reviewed_by": reviewed_by,
+        "decision": "rejected",
+        "restore_message": message,
+    }
+
+
+def _cleanup_backup_for_package(pkg_id: int, *, sb, reviewed_by: str) -> None:
+    """Best-effort SSM `rm -f` of the .bak file after an approve. Never
+    raises — a lingering backup file is a rounding-error space cost."""
+    try:
+        fr = (
+            sb.table("fix_runs")
+            .select("backup_reference, target_instance_id")
+            .eq("package_id", pkg_id)
+            .order("id", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not fr:
+            return
+        backup_path = fr[0].get("backup_reference")
+        instance_id = fr[0].get("target_instance_id") or settings.fixer_env2_instance_id
+        if not (backup_path and instance_id):
+            return
+        from .agents.fixer.config import load_config_from_settings  # noqa: PLC0415
+        from .agents.fixer.review import delete_backup_via_ssm  # noqa: PLC0415
+        from .agents.fixer.tools.remote_exec import RemoteExecutor  # noqa: PLC0415
+
+        cfg = load_config_from_settings()
+        executor = RemoteExecutor(
+            instance_id,
+            region=cfg.aws_region,
+            config=cfg,
+            emit_fn=lambda *_, **__: None,
+            run_id=None,
+        )
+        delete_backup_via_ssm(executor, backup_path)
+    except Exception:  # noqa: BLE001, S110
+        pass
 
 
 @app.post("/admin/remediation-packages/demo/{pkg_id}/create-ticket", status_code=201)

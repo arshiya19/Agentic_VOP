@@ -715,6 +715,14 @@
   background: #1B2336;
   display: flex;
   flex-direction: column;
+  /* Right column must scroll independently — the outer card has
+   * `overflow: hidden` + a fixed 720px height, and the HITL v2 review
+   * flow adds a POST-FIX REVIEW section with a diff panel that pushes
+   * the footer (Approve/Reject buttons) out of the clipped area.
+   * `min-height: 0` lets the flex child shrink below its intrinsic
+   * content height so the scroll actually engages. */
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .upgrade-steps-section {
@@ -979,6 +987,16 @@
   margin-top: auto;
   padding-top: 16px;
   border-top: 1px solid #2D3748;
+  /* Pin the actions to the bottom of the right column even when the
+   * review section makes the column scroll. Without this, the user has
+   * to scroll past a long diff to reach Approve/Reject. */
+  position: sticky;
+  bottom: 0;
+  background: #1B2336;
+  margin-inline: -20px;  /* extend to column edges so the sticky bg covers */
+  padding-inline: 20px;
+  padding-bottom: 4px;
+  z-index: 2;
 }
 
 .action-btn {
