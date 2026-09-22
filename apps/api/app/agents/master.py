@@ -68,17 +68,10 @@ def _aggregate_tokens_for_agent(run_id: str, agent: str) -> dict:
     total_tokens_sum = 0
     for event in events:
         payload = event.get("payload") or {}
-<<<<<<< Updated upstream
         if payload.get("event_subtype") == "TOKEN_USAGE":
             total_prompt += payload.get("prompt_tokens", 0)
             total_completion += payload.get("completion_tokens", 0)
             total_tokens_sum += payload.get("total_tokens", 0)
-=======
-        total_prompt += payload.get("prompt_tokens", 0)
-        total_completion += payload.get("completion_tokens", 0)
-        total_tokens_sum += payload.get("total_tokens", 0)
-
->>>>>>> Stashed changes
     return {
         "prompt_tokens": total_prompt,
         "completion_tokens": total_completion,
