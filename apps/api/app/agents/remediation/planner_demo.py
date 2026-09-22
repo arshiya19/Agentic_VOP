@@ -24,6 +24,7 @@ Key schema difference vs planner.py's plan_remediation():
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -153,17 +154,7 @@ def run_demo_remediation(
     planned = persisted = failed = 0
 
     # --- Per-file batching ---
-    # Group issues by the file they target. Multi-finding files get ONE
-    # package with N edit_file steps composed against a single view of the
-    # file (eliminates within-run state drift). Single-finding files keep
-    # current behavior. Universal — same code path for any scanner that
-    # emits file paths (semgrep, bandit, sonarqube, checkov, tfsec, trivy IaC).
-    # Per-finding packaging — one package per finding, always. Batching was
-    # producing under-covered plans (LLM tops out at ~5 steps regardless of
-    # how many findings share a file, so batches ≥9 findings ended with the
-    # primary "fixed" and the rest silently ignored). Truthful per-finding
-    # outcomes matter more than the LLM-call savings. See _group_issues_by_file
-    # (still exported) if a properly-verified batching mode is added later.
+    # Per-finding packaging — one package per finding, always.
     file_groups = {f"__singleton__:{iss['id']}": [iss] for iss in issues}
     mode_label = "👤 HITL mode" if hitl else "🤖 Auto-demo"
     emit_trace_demo(
@@ -174,98 +165,139 @@ def run_demo_remediation(
         f"{len(issues)} finding(s) → {len(issues)} package(s)",
     )
 
-    for file_key, group in file_groups.items():
-        if persisted >= _MAX_PACKAGES:
-            emit_trace_demo(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"Package cap reached ({_MAX_PACKAGES}) — skipping remaining "
-                f"{len(file_groups) - persisted - failed} file group(s) this run",
-            )
-            break
+    # Lazy import validators once outside the worker so the import lock
+    # isn't hit N times in parallel threads.
+    from .plan_validators import (  # noqa: PLC0415
+        has_errors as _has_val_errors,
+        summary as _val_summary,
+        validate_package,
+    )
 
-        # Use the highest-severity finding in the group as the "primary"
-        # (for issue_id / family / pattern / asset lookup) — other findings
-        # in the group ride along in the payload as additional_findings.
+    # Cap how many groups we even submit to workers.
+    groups_to_run = list(file_groups.items())[:_MAX_PACKAGES]
+    if len(file_groups) > _MAX_PACKAGES:
+        emit_trace_demo(
+            run_id,
+            "sub-agent-3",
+            "MESSAGE",
+            f"Package cap ({_MAX_PACKAGES}) — limiting to first {_MAX_PACKAGES} "
+            f"of {len(file_groups)} group(s)",
+        )
+
+    def _plan_one(file_key: str, group: list[dict]) -> dict:
+        """Worker: classify → LLM plan → validate. No DB writes here.
+
+        Returns a result dict consumed by the main thread for persistence.
+        Keys: status ('ok'|'skip'|'error'), pkg, primary, family, file_key,
+              val_issues, batch_label (for multi-finding trace).
+        """
         primary = _select_primary(group)
         related = [i for i in group if i.get("id") != primary.get("id")]
 
-        try:
-            family = classify_finding(primary, raw=_raw_for(primary))
-            if family == "unknown":
+        family = classify_finding(primary, raw=_raw_for(primary))
+        if family == "unknown":
+            return {"status": "skip", "reason": "unclassified", "primary": primary,
+                    "file_key": file_key}
+
+        pattern = patterns_by_family.get(family)
+        if pattern is None:
+            return {"status": "skip", "reason": f"no_pattern:{family}", "primary": primary,
+                    "file_key": file_key}
+
+        asset = _lookup_demo_asset(all_assets, primary)
+
+        if related:
+            pkg = _plan_and_enrich_batch(
+                run_id, prompt_row, primary, related, pattern, asset, family, sb_pub, _raw_for
+            )
+            batch_label = (
+                f"🧩 Batched {1 + len(related)} finding(s) for {file_key} into 1 package "
+                f"(primary issue={primary['id']}, related={[i['id'] for i in related]})"
+            )
+        else:
+            pkg = _plan_and_enrich(
+                run_id, prompt_row, primary, pattern, asset, family, sb_pub, _raw_for(primary)
+            )
+            batch_label = None
+
+        val_issues = validate_package(pkg, primary_issue=primary, family=family)
+        return {
+            "status": "ok",
+            "pkg": pkg,
+            "primary": primary,
+            "family": family,
+            "file_key": file_key,
+            "val_issues": val_issues,
+            "batch_label": batch_label,
+        }
+
+    # Parallel planning — workers call LLM concurrently; main thread
+    # serializes DB inserts to avoid Supabase client contention.
+    workers = max(1, int(settings.llm_parallel_workers or 5))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sa3-plan") as executor:
+        future_map = {
+            executor.submit(_plan_one, fk, grp): (fk, grp)
+            for fk, grp in groups_to_run
+        }
+
+        for future in as_completed(future_map):
+            file_key, group = future_map[future]
+            primary_fallback = _select_primary(group)
+
+            try:
+                result = future.result()
+            except Exception as e:  # noqa: BLE001
+                failed += 1
                 emit_trace_demo(
-                    run_id,
-                    "sub-agent-3",
-                    "ERROR",
-                    f"Primary issue {primary.get('id')} in file group did not classify — skipping",
+                    run_id, "sub-agent-3", "ERROR",
+                    f"Package generation failed for file={file_key} "
+                    f"(primary issue={primary_fallback.get('id')}, "
+                    f"{type(e).__name__}): {str(e)[:250]}",
                 )
+                continue
+
+            primary = result["primary"]
+
+            if result["status"] == "skip":
+                reason = result.get("reason", "")
+                if reason == "unclassified":
+                    emit_trace_demo(
+                        run_id, "sub-agent-3", "ERROR",
+                        f"Primary issue {primary.get('id')} in file group did not classify — skipping",
+                    )
+                else:
+                    family_str = reason.replace("no_pattern:", "")
+                    emit_trace_demo(
+                        run_id, "sub-agent-3", "ERROR",
+                        f"No pattern for family='{family_str}' — skipping file={file_key}",
+                    )
                 failed += 1
                 continue
 
-            pattern = patterns_by_family.get(family)
-            if pattern is None:
-                emit_trace_demo(
-                    run_id,
-                    "sub-agent-3",
-                    "ERROR",
-                    f"No pattern for family='{family}' — skipping file={file_key}",
-                )
-                failed += 1
-                continue
-
-            asset = _lookup_demo_asset(all_assets, primary)
-
-            if related:
-                # Multi-finding batch — SA-3 sees primary + related, emits
-                # ONE package with edit_file steps for each
-                pkg = _plan_and_enrich_batch(
-                    run_id, prompt_row, primary, related, pattern, asset, family, sb_pub, _raw_for
-                )
-                emit_trace_demo(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"🧩 Batched {1 + len(related)} finding(s) for {file_key} into 1 package "
-                    f"(primary issue={primary['id']}, related={[i['id'] for i in related]})",
-                )
-            else:
-                pkg = _plan_and_enrich(
-                    run_id, prompt_row, primary, pattern, asset, family, sb_pub, _raw_for(primary)
-                )
+            # status == 'ok'
+            pkg = result["pkg"]
+            family = result["family"]
             planned += 1
 
-            # Static validation — reject clearly-broken plans before they
-            # cost env2 minutes of wall-clock. See plan_validators for the
-            # rule catalog (no-op sed, wrong-tool-for-family, masked test
-            # failures, rescan CVE mismatch).
-            from .plan_validators import (  # noqa: PLC0415
-                has_errors as _has_val_errors,
-                summary as _val_summary,
-                validate_package,
-            )
+            if result.get("batch_label"):
+                pass  # batch grouping detail — not shown in client trace
 
-            _val_issues = validate_package(pkg, primary_issue=primary, family=family)
-            if _val_issues:
-                _msg = _val_summary(_val_issues)
+            val_issues = result["val_issues"]
+            if val_issues:
+                _msg = _val_summary(val_issues)
                 _details = "; ".join(
-                    f"[{i.severity} {i.check}] {i.message[:180]}" for i in _val_issues[:5]
+                    f"[{i.severity} {i.check}] {i.message[:180]}" for i in val_issues[:5]
                 )
-                if _has_val_errors(_val_issues):
+                if _has_val_errors(val_issues):
                     emit_trace_demo(
-                        run_id,
-                        "sub-agent-3",
-                        "ERROR",
+                        run_id, "sub-agent-3", "ERROR",
                         f"✗ Plan rejected by validators for issue {primary['id']}: "
                         f"{_msg}. {_details}",
                     )
                     failed += 1
-                    continue  # skip persistence for this broken plan
-                # Warnings only — persist but note them in trace for audit
+                    continue
                 emit_trace_demo(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
+                    run_id, "sub-agent-3", "MESSAGE",
                     f"⚠ Plan validators reported warnings for issue "
                     f"{primary['id']}: {_msg}. {_details}",
                 )
@@ -274,20 +306,10 @@ def run_demo_remediation(
             persisted += 1
 
             emit_trace_demo(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
+                run_id, "sub-agent-3", "MESSAGE",
                 f"Package generated for issue {primary['id']} "
-                f"(family={family}, confidence={pkg.pathways[pkg.recommended_pathway_index].confidence_score})",
-            )
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            emit_trace_demo(
-                run_id,
-                "sub-agent-3",
-                "ERROR",
-                f"Package generation failed for file={file_key} "
-                f"(primary issue={primary.get('id')}, {type(e).__name__}): {str(e)[:250]}",
+                f"(family={family}, confidence="
+                f"{pkg.pathways[pkg.recommended_pathway_index].confidence_score})",
             )
 
     emit_trace_demo(
@@ -726,14 +748,6 @@ def _plan_and_enrich(
         issue_source = (issue.get("source") or "").strip()
         hybrid_prompt = _router_load(
             sb_pub, source=issue_source, family=family, default_version="v1.4"
-        )
-        hybrid_prompt_desc = f"{hybrid_prompt['agent']}@{hybrid_prompt['version']}"
-
-        emit_trace_demo(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"Using hybrid planner with prompt: {hybrid_prompt_desc}",
         )
         params = hybrid_prompt.get("parameters") or {}
         base_temp = float(params.get("temperature", 0.3))

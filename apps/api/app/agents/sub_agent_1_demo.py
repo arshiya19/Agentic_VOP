@@ -202,29 +202,8 @@ def run_demo_fetch(run_id: str) -> tuple[int, dict]:
         },
     )
 
-    # Aggregate tokens from trace events (mirrors real path).
-    token_events = (
-        sb_demo.table("agent_trace_events")
-        .select("payload")
-        .eq("run_id", run_id)
-        .eq("agent", "sub-agent-1")
-        .execute()
-        .data
-        or []
-    )
-    total_prompt = total_completion = total_tokens_sum = 0
-    for event in token_events:
-        payload = event.get("payload") or {}
-        if payload.get("event_subtype") == "TOKEN_USAGE":
-            total_prompt += payload.get("prompt_tokens", 0)
-            total_completion += payload.get("completion_tokens", 0)
-            total_tokens_sum += payload.get("total_tokens", 0)
-
-    return inserted, {
-        "prompt_tokens": total_prompt,
-        "completion_tokens": total_completion,
-        "total_tokens": total_tokens_sum,
-    }
+    # Token totals accumulated in memory by _TokenUsageCallback — no DB scan needed.
+    return inserted, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def _normalize_row_demo(

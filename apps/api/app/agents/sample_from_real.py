@@ -79,7 +79,7 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 #
 # Each entry: source (matches issues.source exactly) → N issues to pick.
 _SOURCE_SCOOPS: dict[str, int] = {
-    "checkov-ec2": 20,  # IaC misconfigurations (env2 focus — pinned picks land first, scoop fills to 20)
+    "checkov-ec2": 10,  # IaC misconfigurations (env2 focus — pinned picks land first, scoop fills to 20)
     "trivy-image-ec2": 20,  # container image OS-package CVEs (per-finding — no batching)
     "trivy-image-java-ec2": 20,  # Java image CVEs (per-finding — no batching)
     "trivy-image-python-ec2": 20,  # Python image CVEs (per-finding — no batching)
@@ -270,12 +270,6 @@ def sample_and_copy_ec2_issues(
     for source_name, n in _effective_scoops.items():
         pool = by_source.get(source_name, [])
         if not pool:
-            emit_trace_demo(
-                run_id,
-                "system",
-                "MESSAGE",
-                f"Scoop skipped: no issues found for source={source_name!r}",
-            )
             continue
 
         # Sort by (derived_risk DESC, severity_rank DESC) — same ordering
@@ -292,13 +286,6 @@ def sample_and_copy_ec2_issues(
             picks.append(iss)
             already_picked_keys.add(key)
             scooped_this_source += 1
-
-        emit_trace_demo(
-            run_id,
-            "system",
-            "MESSAGE",
-            f"Scoop {source_name}: picked {scooped_this_source}/{n} (pool={len(pool)} available)",
-        )
 
     # Fallback: if pinned picks < 2, top up from families that weren't
     # covered by any pinned hit. Preserves the demo running on fresh env2

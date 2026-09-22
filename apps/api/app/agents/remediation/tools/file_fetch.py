@@ -101,14 +101,6 @@ def fetch_file(
             "file_fetch denied: no target_instance_id and settings.fixer_env2_instance_id is empty"
         )
 
-    if emit_fn and run_id:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"📄 Fetching file: {file_path} (call {budget.call_count + 1}/{budget.max_calls})",
-        )
-
     # Bundle the cat as a base64-encoded shell script so quoting is safe
     # end-to-end (matches the pattern in /admin/env2/reset and /admin/env2/status).
     # Emits a distinctive sentinel line if the file doesn't exist so we can
@@ -180,13 +172,6 @@ cat "$FILE"
     # instead of raising, so the LLM can decide what to do (fetch a
     # different file, fall back to web docs, etc.)
     if stdout.rstrip() == "__FILE_FETCH_NOT_FOUND__":
-        if emit_fn and run_id:
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"⚠ file_fetch: {file_path} does not exist on {instance_id}",
-            )
         return {
             "file_path": file_path,
             "instance_id": instance_id,
@@ -206,15 +191,6 @@ cat "$FILE"
             + f"\n\n[... truncated at {_MAX_CONTENT_CHARS} chars for LLM context budget ...]"
         )
         truncated = True
-
-    if emit_fn and run_id:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"✓ Fetched {len(stdout)} chars from {file_path} in {elapsed_ms}ms"
-            + (" (truncated)" if truncated else ""),
-        )
 
     return {
         "file_path": file_path,

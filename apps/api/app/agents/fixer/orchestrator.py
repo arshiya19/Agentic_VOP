@@ -257,17 +257,6 @@ def run_fixer(
     # until this one returns.
     _lock_acquired_at = utcnow()
     _ENV2_DISPATCH_LOCK.acquire()
-    _lock_waited_s = int((utcnow() - _lock_acquired_at).total_seconds())
-    if _lock_waited_s > 0:
-        try:
-            emit_fn(
-                agent_run_id,
-                "sub-agent-4",
-                "MESSAGE",
-                f"🔒 Serial dispatch: waited {_lock_waited_s}s for prior fix_run to release lock",
-            )
-        except Exception:  # noqa: BLE001, S110
-            pass
     try:
         return _run_fixer_locked(
             package_id=package_id,
@@ -654,32 +643,15 @@ def _run_fixer_locked(
             from ..remediation.kb_capture import capture_successful_fix  # noqa: PLC0415
             from ...db import supabase_admin as _kb_admin  # noqa: PLC0415
 
-            kb_id = capture_successful_fix(
+            capture_successful_fix(
                 _kb_admin(),
                 ctx=ctx,
                 outcome=outcome,
                 confidence_score=(ctx.pathway or {}).get("confidence_score") or 90,
                 emit_fn=emit_fn,
             )
-            try:
-                emit_fn(
-                    agent_run_id,
-                    "sub-agent-4",
-                    "MESSAGE",
-                    f"📚 KB capture result: kb_id={kb_id} (None = skipped/guard)",
-                )
-            except Exception:  # noqa: BLE001, S110
-                pass
-        except Exception as e:  # noqa: BLE001
-            try:
-                emit_fn(
-                    agent_run_id,
-                    "sub-agent-4",
-                    "ERROR",
-                    f"📚 KB capture FAILED: {type(e).__name__}: {str(e)[:300]}",
-                )
-            except Exception:  # noqa: BLE001, S110
-                pass
+        except Exception:  # noqa: BLE001, S110
+            pass
 
     # 11. KB reuse tracking — if this fix used a KB replay recipe, update counters.
     # Increment times_reused (always after completion) and times_succeeded (on success).
@@ -697,17 +669,6 @@ def _run_fixer_locked(
             increment_reuse_count(_kb_sb, kb_source_id)
             if outcome.status == "success":
                 increment_success_count(_kb_sb, kb_source_id)
-            try:
-                emit_fn(
-                    agent_run_id,
-                    "sub-agent-4",
-                    "MESSAGE",
-                    f"📚 KB reuse tracked: kb_id={kb_source_id}, "
-                    f"outcome={outcome.status} "
-                    f"(times_reused +1{', times_succeeded +1' if outcome.status == 'success' else ''})",
-                )
-            except Exception:  # noqa: BLE001, S110
-                pass
     except Exception:  # noqa: BLE001, S110
         pass  # Best-effort — never block main flow
 

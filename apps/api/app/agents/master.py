@@ -20,6 +20,7 @@ Triggered as a FastAPI BackgroundTask from POST /agents/trigger via
 `run_master(run_id)`, which compiles the graph and calls `.invoke(...)`.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
@@ -29,7 +30,7 @@ from langgraph.graph import END, START, StateGraph
 from ..db import supabase_admin
 from ..models import MasterPlan
 from . import sub_agent_1, sub_agent_2
-from .llm import invoke_structured_with_retry
+from .llm import clear_accumulated_tokens, get_accumulated_tokens, invoke_structured_with_retry
 from .trace import RunCancelledError, emit_trace, is_cancellation_requested
 
 
@@ -39,34 +40,45 @@ from .trace import RunCancelledError, emit_trace, is_cancellation_requested
 
 
 def _aggregate_tokens_for_agent(run_id: str, agent: str) -> dict:
-    """Aggregate all TOKEN_USAGE events from trace for a given agent.
+    """Aggregate token usage for a given agent.
 
-    Returns {prompt_tokens, completion_tokens, total_tokens} summed across
-    all LLM calls emitted by this agent during the run.
+    Prefers the in-memory accumulator (fast, always current, works whether or
+    not per-call TOKEN_USAGE events are written to the DB). Falls back to
+    scanning DB events for backward compat with runs from before this change.
     """
-    sb = supabase_admin()
+    # Fast path — populated by _TokenUsageCallback on every LLM call
+    accumulated = get_accumulated_tokens(run_id, agent)
+    if accumulated["total_tokens"] > 0:
+        return accumulated
 
+    # Fallback — DB scan for older runs or when the flag was on
+    sb = supabase_admin()
     events = (
         sb.table("agent_trace_events")
         .select("payload")
         .eq("run_id", run_id)
         .eq("agent", agent)
+        .eq("payload->>event_subtype", "TOKEN_USAGE")
         .execute()
         .data
         or []
     )
-
     total_prompt = 0
     total_completion = 0
     total_tokens_sum = 0
-
     for event in events:
         payload = event.get("payload") or {}
+<<<<<<< Updated upstream
         if payload.get("event_subtype") == "TOKEN_USAGE":
             total_prompt += payload.get("prompt_tokens", 0)
             total_completion += payload.get("completion_tokens", 0)
             total_tokens_sum += payload.get("total_tokens", 0)
+=======
+        total_prompt += payload.get("prompt_tokens", 0)
+        total_completion += payload.get("completion_tokens", 0)
+        total_tokens_sum += payload.get("total_tokens", 0)
 
+>>>>>>> Stashed changes
     return {
         "prompt_tokens": total_prompt,
         "completion_tokens": total_completion,
@@ -224,30 +236,26 @@ def _route_after_dispatch(state: MasterState) -> str:
     idx = state["step_idx"]
     if plan is None or idx >= len(plan.steps):
         return "summarize"
-    return "fetch" if plan.steps[idx].kind == "FETCH" else "enrich"
+    return "fetch_all" if plan.steps[idx].kind == "FETCH" else "enrich"
 
 
-def _fetch_node(state: MasterState) -> dict:
-    """Execute one FETCH step by invoking Sub-Agent 1."""
-    run_id = state["run_id"]
-    sb = supabase_admin()
-    idx = state["step_idx"]
-    step = state["plan"].steps[idx]
-    step_label = f"Step {idx + 1}/{len(state['plan'].steps)}"
+def _run_single_fetch(
+    run_id: str,
+    step_idx: int,
+    total_steps: int,
+    step,
+    correlation_id: str,
+) -> dict:
+    """Run one FETCH step in a thread. Returns a partial result dict."""
+    from ..db import supabase_admin as _sb  # local import — each thread needs its own client
 
-    # Cancellation checkpoint — exit before doing any work
-    if is_cancellation_requested(run_id):
-        emit_trace(
-            run_id, "master", "MESSAGE", f"{step_label}: cancellation requested, skipping FETCH"
-        )
-        raise RunCancelledError("Run cancelled before FETCH step")
-
+    sb = _sb()
+    step_label = f"Step {step_idx + 1}/{total_steps}"
     tool = step.tool
-    per_scanner = dict(state["per_scanner"])
 
     if not tool:
         emit_trace(run_id, "master", "ERROR", f"{step_label}: FETCH step missing 'tool', skipping")
-        return {"step_idx": idx + 1, "per_scanner": per_scanner}
+        return {"tool": None, "inserted": 0, "error": "missing tool", "sa1_tok": {}}
 
     registry_result = (
         sb.table("connection_registry").select("*").eq("tool", tool).limit(1).execute()
@@ -255,13 +263,9 @@ def _fetch_node(state: MasterState) -> dict:
     registry_row = registry_result.data[0] if registry_result and registry_result.data else None
     if not registry_row:
         emit_trace(
-            run_id,
-            "master",
-            "ERROR",
-            f"{step_label}: no connector for tool '{tool}', skipping",
+            run_id, "master", "ERROR", f"{step_label}: no connector for tool '{tool}', skipping"
         )
-        per_scanner[tool] = {"error": "no connector", "inserted": 0}
-        return {"step_idx": idx + 1, "per_scanner": per_scanner}
+        return {"tool": tool, "inserted": 0, "error": "no connector", "sa1_tok": {}}
 
     emit_trace(
         run_id,
@@ -274,21 +278,26 @@ def _fetch_node(state: MasterState) -> dict:
             "sub_agent_id": "sub-agent-1",
             "tool": tool,
             "protocol": registry_row["protocol"],
-            "correlation_id": state["correlation_id"],
+            "correlation_id": correlation_id,
             "step_notes": step.notes,
         },
     )
 
-    sa1_tokens = dict(state["sa1_tokens"])
-    total_inserted = state["total_inserted"]
-
     try:
         inserted, sa1_tok = sub_agent_1.run_fetch(run_id, tool, registry_row)
-        per_scanner[tool] = {"inserted": inserted}
-        total_inserted += inserted
-        sa1_tokens["prompt_tokens"] += sa1_tok.get("prompt_tokens", 0)
-        sa1_tokens["completion_tokens"] += sa1_tok.get("completion_tokens", 0)
-        sa1_tokens["total_tokens"] += sa1_tok.get("total_tokens", 0)
+        emit_trace(
+            run_id,
+            "master",
+            "MESSAGE",
+            f"Received FETCH_DONE for {tool} — {inserted} canonical Issues",
+            payload={
+                "received_from": "sub-agent-1",
+                "tool": tool,
+                "records_inserted": inserted,
+                "correlation_id": correlation_id,
+            },
+        )
+        return {"tool": tool, "inserted": inserted, "error": None, "sa1_tok": sa1_tok}
     except Exception as e:
         emit_trace(
             run_id,
@@ -296,29 +305,63 @@ def _fetch_node(state: MasterState) -> dict:
             "ERROR",
             f"Sub-Agent 1 failed for tool '{tool}': {type(e).__name__}: {str(e)[:300]}",
         )
-        per_scanner[tool] = {"error": str(e)[:200], "inserted": 0}
-        return {
-            "step_idx": idx + 1,
-            "per_scanner": per_scanner,
-            "total_inserted": total_inserted,
-            "sa1_tokens": sa1_tokens,
-        }
+        return {"tool": tool, "inserted": 0, "error": str(e)[:200], "sa1_tok": {}}
 
-    emit_trace(
-        run_id,
-        "master",
-        "MESSAGE",
-        f"Received FETCH_DONE for {tool} — {per_scanner[tool]['inserted']} canonical Issues",
-        payload={
-            "received_from": "sub-agent-1",
-            "tool": tool,
-            "records_inserted": per_scanner[tool]["inserted"],
-            "correlation_id": state["correlation_id"],
-        },
-    )
+
+def _fetch_all_node(state: MasterState) -> dict:
+    """Execute all consecutive FETCH steps concurrently, then advance past them."""
+    run_id = state["run_id"]
+    plan = state["plan"]
+    idx = state["step_idx"]
+    total_steps = len(plan.steps)
+    correlation_id = state["correlation_id"]
+
+    # Cancellation checkpoint — exit before doing any work
+    if is_cancellation_requested(run_id):
+        emit_trace(run_id, "master", "MESSAGE", "Cancellation requested, skipping FETCH steps")
+        raise RunCancelledError("Run cancelled before FETCH steps")
+
+    # Collect all consecutive FETCH steps starting at idx
+    fetch_steps = []
+    while idx + len(fetch_steps) < total_steps and plan.steps[idx + len(fetch_steps)].kind == "FETCH":
+        fetch_steps.append(plan.steps[idx + len(fetch_steps)])
+
+    # Run them all in parallel
+    with ThreadPoolExecutor(max_workers=len(fetch_steps)) as pool:
+        futures = [
+            pool.submit(
+                _run_single_fetch,
+                run_id,
+                idx + i,
+                total_steps,
+                step,
+                correlation_id,
+            )
+            for i, step in enumerate(fetch_steps)
+        ]
+        results = [f.result() for f in futures]
+
+    # Merge results back into state
+    per_scanner = dict(state["per_scanner"])
+    sa1_tokens = dict(state["sa1_tokens"])
+    total_inserted = state["total_inserted"]
+
+    for r in results:
+        tool = r["tool"]
+        if tool is None:
+            continue
+        if r["error"]:
+            per_scanner[tool] = {"error": r["error"], "inserted": 0}
+        else:
+            per_scanner[tool] = {"inserted": r["inserted"]}
+            total_inserted += r["inserted"]
+        tok = r["sa1_tok"]
+        sa1_tokens["prompt_tokens"] += tok.get("prompt_tokens", 0)
+        sa1_tokens["completion_tokens"] += tok.get("completion_tokens", 0)
+        sa1_tokens["total_tokens"] += tok.get("total_tokens", 0)
 
     return {
-        "step_idx": idx + 1,
+        "step_idx": idx + len(fetch_steps),
         "per_scanner": per_scanner,
         "total_inserted": total_inserted,
         "sa1_tokens": sa1_tokens,
@@ -408,10 +451,15 @@ def _summarize_node(state: MasterState) -> dict:
         }
     ).eq("run_id", run_id).execute()
 
-    # Aggregate actual token usage from all trace events for each agent
-    master_tokens = _aggregate_tokens_for_agent(run_id, "master")
-    sa1_tokens = _aggregate_tokens_for_agent(run_id, "sub-agent-1")
-    sa2_tokens = _aggregate_tokens_for_agent(run_id, "sub-agent-2")
+    # Aggregate actual token usage from all trace events for each agent — run
+    # all three DB queries concurrently since they are fully independent.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_master = pool.submit(_aggregate_tokens_for_agent, run_id, "master")
+        f_sa1    = pool.submit(_aggregate_tokens_for_agent, run_id, "sub-agent-1")
+        f_sa2    = pool.submit(_aggregate_tokens_for_agent, run_id, "sub-agent-2")
+        master_tokens = f_master.result()
+        sa1_tokens    = f_sa1.result()
+        sa2_tokens    = f_sa2.result()
 
     emit_trace(
         run_id,
@@ -450,6 +498,7 @@ def _summarize_node(state: MasterState) -> dict:
         },
     )
 
+    clear_accumulated_tokens(run_id)
     return {}
 
 
@@ -470,6 +519,7 @@ def _fail_node(state: MasterState) -> dict:
             "completed_at": datetime.now(UTC).isoformat(),
         }
     ).eq("run_id", run_id).execute()
+    clear_accumulated_tokens(run_id)
     return {}
 
 
@@ -479,12 +529,18 @@ def _fail_node(state: MasterState) -> dict:
 
 
 def _build_graph():
-    """Compile the Master state machine once, at import time."""
+    """Compile the Master state machine once, at import time.
+
+    All consecutive FETCH steps in the plan are executed concurrently by
+    _fetch_all_node before routing to ENRICH or summarize. FETCH-before-ENRICH
+    ordering is preserved — sub_agent_2.run_enrich queries issues once at
+    startup and would miss any in-flight inserts from a concurrent FETCH.
+    """
     graph = StateGraph(MasterState)
 
     graph.add_node("load_context", _load_context_node)
     graph.add_node("plan", _plan_node)
-    graph.add_node("fetch", _fetch_node)
+    graph.add_node("fetch_all", _fetch_all_node)
     graph.add_node("enrich", _enrich_node)
     graph.add_node("summarize", _summarize_node)
     graph.add_node("fail", _fail_node)
@@ -492,21 +548,22 @@ def _build_graph():
     graph.add_edge(START, "load_context")
     graph.add_edge("load_context", "plan")
 
-    # After plan: route by current step kind. fetch / enrich loop back here.
+    # fetch_all consumes ALL consecutive FETCH steps in one shot then re-routes.
+    # enrich loops back here in case a second FETCH batch follows (rare but valid).
     graph.add_conditional_edges(
         "plan",
         _route_after_dispatch,
-        {"fetch": "fetch", "enrich": "enrich", "summarize": "summarize"},
+        {"fetch_all": "fetch_all", "enrich": "enrich", "summarize": "summarize"},
     )
     graph.add_conditional_edges(
-        "fetch",
+        "fetch_all",
         _route_after_dispatch,
-        {"fetch": "fetch", "enrich": "enrich", "summarize": "summarize"},
+        {"fetch_all": "fetch_all", "enrich": "enrich", "summarize": "summarize"},
     )
     graph.add_conditional_edges(
         "enrich",
         _route_after_dispatch,
-        {"fetch": "fetch", "enrich": "enrich", "summarize": "summarize"},
+        {"fetch_all": "fetch_all", "enrich": "enrich", "summarize": "summarize"},
     )
 
     graph.add_edge("summarize", END)
@@ -531,6 +588,7 @@ def run_master(run_id: str) -> None:
         # User clicked Stop. The cancel endpoint already marked status='cancelled'
         # and wiped data. Just emit a final trace and exit cleanly — don't call
         # _fail_node (which would overwrite the cancelled status with 'failed').
+        clear_accumulated_tokens(run_id)
         emit_trace(run_id, "master", "DONE", "Run cancelled by user — partial data cleared")
     except Exception as e:
         # Last-resort safety net: graph itself blew up before reaching summarize/fail.
