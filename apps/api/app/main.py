@@ -1427,18 +1427,8 @@ def approve_demo_remediation_package(
                     _emit(agent_run_id, "master", "MESSAGE", sync_msg)
                 except Exception:  # noqa: BLE001, S110
                     pass
-        except Exception as e:  # noqa: BLE001
-            if agent_run_id:
-                try:
-                    _emit(
-                        agent_run_id,
-                        "master",
-                        "ERROR",
-                        f"Failed to sync package #{pkg_id} status from fix_run "
-                        f"#{fix_run_id}: {type(e).__name__}: {str(e)[:200]}",
-                    )
-                except Exception:  # noqa: BLE001, S110
-                    pass
+        except Exception:  # noqa: BLE001, S110
+            pass  # sync failure — status visible via fix_runs table
 
     background_tasks.add_task(_dispatch_fix)
 

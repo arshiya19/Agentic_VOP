@@ -89,12 +89,6 @@ def run_demo_enrich(run_id: str) -> dict:
 
     asset_rows = sb_demo.table("assets").select("*").execute().data or []
     asset_index = _build_asset_index(asset_rows)
-    emit_trace_demo(
-        run_id,
-        "sub-agent-2",
-        "MESSAGE",
-        f"Loaded {len(asset_rows)} asset rows from demo.assets for scoring context",
-    )
 
     if not issues:
         emit_trace_demo(
@@ -118,17 +112,10 @@ def run_demo_enrich(run_id: str) -> dict:
             cve_ids.add(issue["cve_id"])
         for c in issue.get("all_cves") or []:
             cve_ids.add(c)
-    emit_trace_demo(
-        run_id,
-        "sub-agent-2",
-        "MESSAGE",
-        f"Collected {len(cve_ids)} unique CVE id(s) to look up",
-    )
 
     # ---- 3. EPSS (single batched call) ----
     epss_data: dict[str, dict] = {}
     if cve_ids:
-        emit_trace_demo(run_id, "sub-agent-2", "MESSAGE", "Querying EPSS (FIRST.org)…")
         try:
             with httpx.Client(timeout=30) as client:
                 resp = request_with_retry(
@@ -351,31 +338,14 @@ def run_demo_enrich(run_id: str) -> dict:
         },
     )
 
-    # Token aggregation (mirrors real path)
-    token_events = (
-        sb_demo.table("agent_trace_events")
-        .select("payload")
-        .eq("run_id", run_id)
-        .eq("agent", "sub-agent-2")
-        .execute()
-        .data
-        or []
-    )
-    total_prompt = total_completion = total_tokens_sum = 0
-    for event in token_events:
-        payload = event.get("payload") or {}
-        if payload.get("event_subtype") == "TOKEN_USAGE":
-            total_prompt += payload.get("prompt_tokens", 0)
-            total_completion += payload.get("completion_tokens", 0)
-            total_tokens_sum += payload.get("total_tokens", 0)
-
+    # Token totals accumulated in memory by _TokenUsageCallback — no DB scan needed.
     return {
         "enriched": enriched,
         "failed": failed,
         "kev_hits": kev_hits,
         "epss_hits": epss_hits,
         "nvd_hits": len(nvd_data),
-        "prompt_tokens": total_prompt,
-        "completion_tokens": total_completion,
-        "total_tokens": total_tokens_sum,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
     }

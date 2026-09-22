@@ -81,14 +81,6 @@ def fetch_url(
     if not allowed:
         raise RuntimeError(f"url_fetch denied: {reason}")
 
-    if emit_fn and run_id:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"📄 Fetching URL: {url[:150]} (call {budget.call_count + 1}/{budget.max_calls})",
-        )
-
     start = time.time()
     try:
         with httpx.Client(
@@ -163,24 +155,6 @@ def fetch_url(
     # warning the agent tool wrapper will surface to the LLM so it knows to
     # go find a better source instead of silently synthesizing on nothing.
     quality_warning = _quality_warning(len(extracted), url)
-
-    if emit_fn and run_id:
-        base = f"Fetched {len(extracted)} chars in {elapsed_ms}ms" + (
-            " (truncated)" if truncated else ""
-        )
-        if quality_warning:
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"⚠ {quality_warning['level']} CONTENT — {base} — {title[:60]}"
-                if title
-                else f"⚠ {quality_warning['level']} — {base}",
-            )
-        elif title:
-            emit_fn(run_id, "sub-agent-3", "MESSAGE", f"{base} — {title[:80]}")
-        else:
-            emit_fn(run_id, "sub-agent-3", "MESSAGE", base)
 
     return {
         "url": url,

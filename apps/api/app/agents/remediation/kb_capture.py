@@ -204,18 +204,6 @@ def capture_successful_fix(
     # compose a real plan — which either fixes the CVE or honestly rolls back.
     _pathway_steps = (ctx.pathway or {}).get("remediation_steps") or []
     if _is_fake_unfixable_recipe(_pathway_steps):
-        if emit_fn:
-            try:
-                emit_fn(
-                    ctx.agent_run_id,
-                    "kb-capture",
-                    "MESSAGE",
-                    "KB capture skipped: recipe is a single-step "
-                    "'echo UNFIXABLE' pseudo-fix that never attempts real "
-                    "remediation. Not persisted as a proven pattern.",
-                )
-            except Exception:  # noqa: BLE001, S110
-                pass
         return None
 
     # Guard: at minimum the scanner re-scan must have passed.
@@ -270,18 +258,6 @@ def capture_successful_fix(
                     }
                 ).eq("id", existing_id).execute()
 
-                if emit_fn:
-                    try:
-                        emit_fn(
-                            ctx.agent_run_id,
-                            "kb-capture",
-                            "MESSAGE",
-                            f"Updated KB entry #{existing_id} (check={row['check_id']}) "
-                            f"— confidence {existing_confidence} → {confidence_score}",
-                        )
-                    except Exception:  # noqa: BLE001, S110
-                        pass
-
             return existing_id
 
         # New entry — insert
@@ -291,19 +267,6 @@ def capture_successful_fix(
             return None
 
         kb_id = inserted[0]["id"]
-
-        if emit_fn:
-            try:
-                emit_fn(
-                    ctx.agent_run_id,
-                    "kb-capture",
-                    "MESSAGE",
-                    f"Captured fix to KB #{kb_id} (check={row['check_id']}, "
-                    f"family={row['family']}, confidence={confidence_score})",
-                )
-            except Exception:  # noqa: BLE001, S110
-                pass
-
         return kb_id
 
     except Exception as e:

@@ -544,12 +544,7 @@ def _fix_node(state: DemoMasterState) -> dict:
             except Exception as _e:  # noqa: BLE001
                 _err = str(_e)
                 if "remediation_packages_status_check" not in _err and "23514" not in _err:
-                    emit_trace_demo(
-                        run_id,
-                        "master",
-                        "MESSAGE",
-                        f"⚠ Package #{pkg['id']} status sync skipped: {type(_e).__name__}",
-                    )
+                    pass  # transient DB sync — not surfaced to client trace
 
         # Honest per-finding coverage: for each covered_id, check if ITS
         # check_id has a passing re-scan. A single rescan for
@@ -713,22 +708,10 @@ def _fix_node(state: DemoMasterState) -> dict:
                 raw = raw_by_id.get(issue.get("raw_finding_id"))
                 family = classify_finding(issue, raw=raw)
                 if family == "unknown":
-                    emit_trace_demo(
-                        run_id,
-                        "master",
-                        "MESSAGE",
-                        f"⏭ Retry issue {issue_id}: family=unknown — skipping",
-                    )
                     return "skipped"
 
                 pattern = patterns_by_family.get(family)
                 if not pattern:
-                    emit_trace_demo(
-                        run_id,
-                        "master",
-                        "MESSAGE",
-                        f"⏭ Retry issue {issue_id}: no pattern for family={family} — skipping",
-                    )
                     return "skipped"
 
                 asset = _lookup_demo_asset(all_assets, issue)

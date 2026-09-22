@@ -510,15 +510,7 @@ def verify_output(
     if not output or not output.pathways:
         return report
 
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"🔎 Verification pass starting — will cross-check up to "
-        f"{max_commands_to_verify} commands against 2+ sources",
-    )
-
-    # ---- 1. Collect commands to verify + destructive-pattern scan ----
+    # Collect commands to verify + destructive/placeholder scans
     #     Structure per candidate: (pathway_idx, step_num, original_url, command_line)
     candidates: list[tuple[int, int, str, str]] = []
     seen_keys: set[str] = set()
@@ -541,12 +533,6 @@ def verify_output(
                             "url": original_url,
                             "explanation": explanation,
                         }
-                    )
-                    emit_fn(
-                        run_id,
-                        "sub-agent-3",
-                        "MESSAGE",
-                        f"⚠ Step {step_num} cites low-authority URL ({name}): {original_url[:100]}",
                     )
                     break  # one flag per step is enough
 
@@ -575,13 +561,6 @@ def verify_output(
                                 "explanation": explanation,
                             }
                         )
-                        emit_fn(
-                            run_id,
-                            "sub-agent-3",
-                            "MESSAGE",
-                            f"🔴 Step {step_num}: unfilled placeholder "
-                            f"'{match_text}' — command unrunnable as-is",
-                        )
                         break  # one placeholder flag per step is enough
                 else:
                     continue
@@ -601,15 +580,7 @@ def verify_output(
                                 "command_snippet": _short_command(cmd),
                             }
                         )
-                        emit_fn(
-                            run_id,
-                            "sub-agent-3",
-                            "MESSAGE",
-                            f"⚠ [{severity.upper()}] Step {step_num}: destructive "
-                            f"pattern '{name}' detected — {explanation}",
-                        )
-
-                # Queue for cross-source verification (dedup by key)
+                    break  # one destructive flag per command
                 key = _command_key(cmd)
                 if key and key not in seen_keys:
                     seen_keys.add(key)
@@ -625,24 +596,10 @@ def verify_output(
 
     _skip_xverify = _os.getenv("SA3_DISABLE_VERIFICATION_PASS", "").lower() in ("1", "true", "yes")
     to_verify = [] if _skip_xverify else candidates[:max_commands_to_verify]
-    if _skip_xverify and candidates:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"Cross-source verification skipped (SA3_DISABLE_VERIFICATION_PASS=1) — "
-            f"would have verified {min(len(candidates), max_commands_to_verify)} command(s)",
-        )
     for _p_idx, step_num, original_url, cmd in to_verify:
         allowed, _ = budget.can_call()
         if not allowed:
             report.skipped_due_to_budget = True
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                "Verification: budget exhausted — remaining commands unverified",
-            )
             break
 
         report.total_commands_examined += 1
@@ -657,14 +614,7 @@ def verify_output(
                 run_id=run_id,
                 emit_fn=emit_fn,
             )
-        except Exception as e:  # noqa: BLE001
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"Verification search failed for step {step_num}: "
-                f"{type(e).__name__}: {str(e)[:150]}",
-            )
+        except Exception:  # noqa: BLE001
             report.single_source += 1
             continue
 
@@ -682,25 +632,12 @@ def verify_output(
         if supporting_hosts:
             report.cross_verified += 1
             report.verification_urls.extend(supporting_urls[:2])
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"✓ Step {step_num} command verified across {1 + len(supporting_hosts)} sources",
-            )
         else:
             report.single_source += 1
             report.consensus_notes.append(
                 f"Step {step_num}: command '{_short_command(cmd, 60)}' "
                 f"appears only in {original_host or 'the originally cited source'} — "
                 "recommend independent verification before production apply."
-            )
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"⚠ Step {step_num} command NOT independently verified "
-                f"({original_host or 'origin'} only)",
             )
 
     # ---- 3. Per-family depth check (does the package have enough steps?) ----
@@ -769,15 +706,6 @@ def verify_output(
             existing.extend(aggregate_notes[:room])
             pathway.considerations = existing
 
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"Verification complete — cross_verified={report.cross_verified}, "
-        f"single_source={report.single_source}, "
-        f"destructive_flags={len(report.destructive_flags)}, "
-        f"budget_left={budget.max_calls - budget.call_count}",
-    )
     return report
 
 
