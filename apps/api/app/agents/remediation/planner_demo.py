@@ -196,13 +196,21 @@ def run_demo_remediation(
 
         family = classify_finding(primary, raw=_raw_for(primary))
         if family == "unknown":
-            return {"status": "skip", "reason": "unclassified", "primary": primary,
-                    "file_key": file_key}
+            return {
+                "status": "skip",
+                "reason": "unclassified",
+                "primary": primary,
+                "file_key": file_key,
+            }
 
         pattern = patterns_by_family.get(family)
         if pattern is None:
-            return {"status": "skip", "reason": f"no_pattern:{family}", "primary": primary,
-                    "file_key": file_key}
+            return {
+                "status": "skip",
+                "reason": f"no_pattern:{family}",
+                "primary": primary,
+                "file_key": file_key,
+            }
 
         asset = _lookup_demo_asset(all_assets, primary)
 
@@ -235,10 +243,7 @@ def run_demo_remediation(
     # serializes DB inserts to avoid Supabase client contention.
     workers = max(1, int(settings.llm_parallel_workers or 5))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sa3-plan") as executor:
-        future_map = {
-            executor.submit(_plan_one, fk, grp): (fk, grp)
-            for fk, grp in groups_to_run
-        }
+        future_map = {executor.submit(_plan_one, fk, grp): (fk, grp) for fk, grp in groups_to_run}
 
         for future in as_completed(future_map):
             file_key, group = future_map[future]
@@ -249,7 +254,9 @@ def run_demo_remediation(
             except Exception as e:  # noqa: BLE001
                 failed += 1
                 emit_trace_demo(
-                    run_id, "sub-agent-3", "ERROR",
+                    run_id,
+                    "sub-agent-3",
+                    "ERROR",
                     f"Package generation failed for file={file_key} "
                     f"(primary issue={primary_fallback.get('id')}, "
                     f"{type(e).__name__}): {str(e)[:250]}",
@@ -262,13 +269,17 @@ def run_demo_remediation(
                 reason = result.get("reason", "")
                 if reason == "unclassified":
                     emit_trace_demo(
-                        run_id, "sub-agent-3", "ERROR",
+                        run_id,
+                        "sub-agent-3",
+                        "ERROR",
                         f"Primary issue {primary.get('id')} in file group did not classify — skipping",
                     )
                 else:
                     family_str = reason.replace("no_pattern:", "")
                     emit_trace_demo(
-                        run_id, "sub-agent-3", "ERROR",
+                        run_id,
+                        "sub-agent-3",
+                        "ERROR",
                         f"No pattern for family='{family_str}' — skipping file={file_key}",
                     )
                 failed += 1
@@ -290,14 +301,18 @@ def run_demo_remediation(
                 )
                 if _has_val_errors(val_issues):
                     emit_trace_demo(
-                        run_id, "sub-agent-3", "ERROR",
+                        run_id,
+                        "sub-agent-3",
+                        "ERROR",
                         f"✗ Plan rejected by validators for issue {primary['id']}: "
                         f"{_msg}. {_details}",
                     )
                     failed += 1
                     continue
                 emit_trace_demo(
-                    run_id, "sub-agent-3", "MESSAGE",
+                    run_id,
+                    "sub-agent-3",
+                    "MESSAGE",
                     f"⚠ Plan validators reported warnings for issue "
                     f"{primary['id']}: {_msg}. {_details}",
                 )
@@ -306,7 +321,9 @@ def run_demo_remediation(
             persisted += 1
 
             emit_trace_demo(
-                run_id, "sub-agent-3", "MESSAGE",
+                run_id,
+                "sub-agent-3",
+                "MESSAGE",
                 f"Package generated for issue {primary['id']} "
                 f"(family={family}, confidence="
                 f"{pkg.pathways[pkg.recommended_pathway_index].confidence_score})",

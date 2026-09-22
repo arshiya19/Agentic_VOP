@@ -316,7 +316,9 @@ def _fetch_all_node(state: MasterState) -> dict:
 
     # Collect all consecutive FETCH steps starting at idx
     fetch_steps = []
-    while idx + len(fetch_steps) < total_steps and plan.steps[idx + len(fetch_steps)].kind == "FETCH":
+    while (
+        idx + len(fetch_steps) < total_steps and plan.steps[idx + len(fetch_steps)].kind == "FETCH"
+    ):
         fetch_steps.append(plan.steps[idx + len(fetch_steps)])
 
     # Run them all in parallel
@@ -448,11 +450,11 @@ def _summarize_node(state: MasterState) -> dict:
     # all three DB queries concurrently since they are fully independent.
     with ThreadPoolExecutor(max_workers=3) as pool:
         f_master = pool.submit(_aggregate_tokens_for_agent, run_id, "master")
-        f_sa1    = pool.submit(_aggregate_tokens_for_agent, run_id, "sub-agent-1")
-        f_sa2    = pool.submit(_aggregate_tokens_for_agent, run_id, "sub-agent-2")
+        f_sa1 = pool.submit(_aggregate_tokens_for_agent, run_id, "sub-agent-1")
+        f_sa2 = pool.submit(_aggregate_tokens_for_agent, run_id, "sub-agent-2")
         master_tokens = f_master.result()
-        sa1_tokens    = f_sa1.result()
-        sa2_tokens    = f_sa2.result()
+        sa1_tokens = f_sa1.result()
+        sa2_tokens = f_sa2.result()
 
     emit_trace(
         run_id,
