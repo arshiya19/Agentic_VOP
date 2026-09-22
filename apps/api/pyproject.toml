@@ -57,6 +57,10 @@ dependencies = [
     # readable text/markdown, preserves code blocks + headings. Uses lxml
     # (already pinned above) under the hood.
     "trafilatura>=1.12.0",
+    # HITL v2 Git-native review (Phase B, side experiment) — only imported
+    # when the git-review orchestrator branch runs. Existing pipelines don't
+    # load it. GitHub REST/GraphQL wrapper for creating PRs, merging, closing.
+    "PyGithub>=2.5.0",
 ]
 
 [dependency-groups]

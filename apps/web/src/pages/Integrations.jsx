@@ -401,6 +401,46 @@ export default function Integrations() {
     setIsTriggering(false)
   }
 
+  // HITL v2 Git-native review (Phase B, side experiment). Autonomous fix,
+  // but the "fix" is a real PR opened against the configured GitHub repo.
+  // Approve merges the PR; Reject closes it. Requires GITHUB_PAT +
+  // GITHUB_REPO in the backend .env. Existing pipelines unaffected.
+  const handleTriggerHITLGitReview = async () => {
+    if (selectedScanners.size === 0 || isTriggering) return
+    setIsTriggering(true)
+    setLastResult(null)
+
+    localStorage.setItem('pipelineMode', 'real')
+    window.dispatchEvent(new Event('pipelineModeChanged'))
+
+    const eventId = `EVT-HITL-GIT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    try {
+      const res = await fetch(`${API_URL}/agents/trigger_demo_hitl_git_review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_id: eventId,
+          action: 'FULL',
+          targets: { scanners: Array.from(selectedScanners) },
+        }),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`)
+      }
+      const data = await res.json()
+      setLastResult({
+        ok: true,
+        message: `HITL Git Review pipeline triggered (${data.event_id}) — fix runs against the configured GitHub repo, opens a real PR per package. Review + merge on the Remediation page.`,
+      })
+      setTimeout(() => setIsTriggering(false), 5000)
+      return
+    } catch (err) {
+      setLastResult({ ok: false, message: `Failed to trigger HITL Git Review: ${err.message}` })
+    }
+    setIsTriggering(false)
+  }
+
   const allTools = useMemo(() => {
     return integrationsData.flatMap(group =>
       group.tools.map(tool => ({
@@ -541,6 +581,17 @@ export default function Integrations() {
                 {isTriggering
                   ? 'Triggering…'
                   : `🔍 Run HITL Review${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
+              </button>
+              <button
+                type="button"
+                className="scanner-runner-btn scanner-runner-btn-hitl-git-review"
+                onClick={handleTriggerHITLGitReview}
+                disabled={selectedScanners.size === 0 || isTriggering}
+                title="HITL v2 Git-native — opens real PRs against your configured GitHub repo. Approve merges the PR; Reject closes it. Requires GITHUB_PAT + GITHUB_REPO in .env."
+              >
+                {isTriggering
+                  ? 'Triggering…'
+                  : `🔀 Run HITL Git Review${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
               </button>
               {lastResult && (
                 <div

@@ -55,6 +55,7 @@ def run_demo_remediation(
     hitl: bool = False,
     *,
     hitl_review: bool = False,
+    hitl_git_review: bool = False,
 ) -> dict:
     """Generate + persist RemediationPackages for every demo issue in this run.
 
@@ -65,11 +66,15 @@ def run_demo_remediation(
             finding; batching collapses that granularity and (empirically)
             produces under-covered fix plans once the batch grows past ~5
             findings. Auto-demo keeps batching for speed.
-        hitl_review: HITL v2. When True, packages are persisted with
+        hitl_review: HITL v2 Sandbox. When True, packages are persisted with
             `review_required=True` so SA-4 pauses after successful validate
             and captures a diff for human approve/reject on the Remediation
-            page. Independent of `hitl` — you can have autonomous dispatch
-            + post-fix review, or pre-fix approval + no post-fix review.
+            page. Independent of `hitl`.
+        hitl_git_review: HITL v2 Git-native (Phase B, side experiment). When
+            True, packages are persisted with `git_native_review=True` AND
+            `review_required=True`. The orchestrator's early branch detects
+            git_native_review and runs the git flow (clone/branch/commit/PR)
+            instead of the SSM flow. Existing pipelines untouched.
 
     Returns {"planned": N, "persisted": N, "failed": N}.
     """
@@ -270,7 +275,13 @@ def run_demo_remediation(
                     f"{primary['id']}: {_msg}. {_details}",
                 )
 
-            _persist_to_demo(sb_demo, pkg, run_id, review_required=hitl_review)
+            _persist_to_demo(
+                sb_demo,
+                pkg,
+                run_id,
+                review_required=hitl_review or hitl_git_review,
+                git_native_review=hitl_git_review,
+            )
             persisted += 1
 
             emit_trace_demo(
@@ -960,12 +971,18 @@ def _persist_to_demo(
     run_id: str,
     *,
     review_required: bool = False,
+    git_native_review: bool = False,
 ) -> int:
     """INSERT a RemediationPackage into demo.remediation_packages.
 
     review_required (HITL v2): when True, the package carries a flag that
     tells SA-4 to pause after successful validate + capture a diff. The
     Remediation page then shows Approve/Reject buttons on the diff.
+
+    git_native_review (HITL v2 Git-native, Phase B): when True, the
+    orchestrator uses the git flow (clone/branch/commit/PR) instead of
+    the SSM flow. Requires migration 0042; falls back to omitting the
+    column when the DB pre-dates the migration.
     """
     row = {
         "issue_id": pkg.issue_id,
@@ -979,18 +996,26 @@ def _persist_to_demo(
         "status": "awaiting_approval",
         "agent_run_id": run_id,
     }
-    # Only include the column when set — omitting it lets us degrade
-    # gracefully if migration 0041 hasn't been applied yet (the column
-    # simply doesn't exist and the insert works with the default False).
+    # Only include the columns when set — omitting them lets us degrade
+    # gracefully if migrations 0041 / 0042 haven't been applied yet.
     if review_required:
         row["review_required"] = True
+    if git_native_review:
+        row["git_native_review"] = True
     try:
         resp = sb_demo.table("remediation_packages").insert(row).execute()
     except Exception as e:  # noqa: BLE001
-        # Migration 0041 pre-flight: retry without the column if the DB
-        # doesn't know about it yet.
-        if "review_required" in str(e) and review_required:
+        # Migration pre-flight: retry without newer columns if the DB
+        # doesn't know about them yet.
+        err = str(e)
+        stripped = False
+        if "git_native_review" in err and git_native_review:
+            row.pop("git_native_review", None)
+            stripped = True
+        if "review_required" in err and review_required:
             row.pop("review_required", None)
+            stripped = True
+        if stripped:
             resp = sb_demo.table("remediation_packages").insert(row).execute()
         else:
             raise

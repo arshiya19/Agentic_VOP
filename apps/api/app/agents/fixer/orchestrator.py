@@ -291,6 +291,29 @@ def _run_fixer_locked(
     cfg: FixerConfig,
 ) -> int:
     """Body of run_fixer — executed only while _ENV2_DISPATCH_LOCK is held."""
+    # ─── HITL v2 Git-native early branch ──────────────────────────────
+    # If this package was flagged `git_native_review=True` by the trigger
+    # endpoint, we run the git flow (clone → branch → edit in working
+    # tree → push → open PR) and return before the SSM lifecycle even
+    # starts. Env2 is never touched for these packages.
+    #
+    # Everything below (concurrency check, SSM pre-flight, strategy
+    # dispatch, validate, rollback) is unchanged — sandbox flow behaves
+    # exactly as it did before Phase B was added.
+    _early_pkg = _load_package(sb, package_id)
+    if _early_pkg and _early_pkg.get("git_native_review"):
+        from .git_review_lifecycle import run_git_review_lifecycle  # noqa: PLC0415
+
+        return run_git_review_lifecycle(
+            package_id=package_id,
+            pkg_row=_early_pkg,
+            agent_run_id=agent_run_id,
+            sb=sb,
+            emit_fn=emit_fn,
+            environment=environment,
+            cfg=cfg,
+        )
+
     # Concurrency lock (DB-side belt-and-suspenders) — env2 is a single
     # shared sandbox; only one fix_run at a time. This check remains as
     # cross-process safety for multi-worker deployments even though the

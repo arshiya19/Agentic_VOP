@@ -85,6 +85,18 @@ class Settings(BaseSettings):
     # AWS region for env2 + SSM RunCommand calls.
     aws_region: str = "us-east-1"
 
+    # --- HITL v2 Git-native review (Phase B, side experiment) ------------
+    # All optional. When any of these are empty, the git-review flow is
+    # simply unavailable — existing HITL v1 + sandbox review + auto-demo
+    # keep working unchanged.
+    #
+    # github_pat        — fine-grained PAT with contents+pull-requests write
+    # github_repo       — 'owner/name' the agent opens PRs against
+    # github_base_branch — target branch for the PR (usually 'main')
+    github_pat: str = ""
+    github_repo: str = ""
+    github_base_branch: str = "main"
+
     # --- Secrets encryption ---
     # Base64-encoded 32-byte key for AES-256-GCM encryption of sensitive
     # scanner metadata (headers, body, credentials). REQUIRED for production.

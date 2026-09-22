@@ -439,6 +439,104 @@ def trigger_demo_hitl_review_run(
     )
 
 
+@app.post("/agents/trigger_demo_hitl_git_review", response_model=RunCreated, status_code=201)
+def trigger_demo_hitl_git_review_run(
+    payload: TriggerEvent, background_tasks: BackgroundTasks
+) -> RunCreated:
+    """HITL v2 Git-native review (Phase B, side experiment).
+
+    Same pipeline shape as HITL Review, but SA-4 skips env2 / SSM entirely
+    and instead:
+      1. Clones the configured GitHub repo (GITHUB_REPO) into a temp dir
+      2. Applies the fix's shell commands in the cloned working tree
+      3. Commits, pushes a branch, opens a real PR against GITHUB_BASE_BRANCH
+      4. Package pauses at `awaiting_review` with the PR URL attached
+      5. Approve endpoint calls GitHub Merge API; Reject closes the PR
+
+    Requires GITHUB_PAT + GITHUB_REPO env vars + migration 0042 applied.
+    Existing pipelines (auto-demo, HITL v1, HITL Sandbox review) unaffected.
+    """
+    import uuid
+
+    # Fail fast if GitHub isn't configured — better a clear 400 than a
+    # runtime crash mid-pipeline.
+    if not (settings.github_pat and settings.github_repo):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GITHUB_PAT and GITHUB_REPO must be set in .env for the "
+                "git-native review flow. Set them and restart the backend."
+            ),
+        )
+
+    sb_pub = supabase_admin()
+    sb_demo = supabase_admin_demo()
+
+    real_insert = (
+        sb_pub.table("agent_runs")
+        .insert(
+            {
+                "event_id": payload.event_id,
+                "triggered_by": payload.persona,
+                "action": payload.action,
+                "targets": payload.targets.model_dump(),
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not real_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create real run")
+    real_run_id = real_insert.data[0]["run_id"]
+
+    demo_event_id = f"demo-hitl-git-{uuid.uuid4().hex[:8]}"
+    demo_insert = (
+        sb_demo.table("agent_runs")
+        .insert(
+            {
+                "event_id": demo_event_id,
+                "triggered_by": "demo-hitl-git-review",
+                "action": "FULL",
+                "targets": {
+                    "demo": True,
+                    "hitl_git_review": True,
+                    "scanners": payload.targets.scanners,
+                    "real_run_id": real_run_id,
+                    "github_repo": settings.github_repo,
+                    "github_base_branch": settings.github_base_branch,
+                },
+                "status": "queued",
+            }
+        )
+        .execute()
+    )
+    if not demo_insert.data:
+        raise HTTPException(status_code=500, detail="Failed to create demo git-review run")
+    demo_row = demo_insert.data[0]
+
+    def _run_real_then_demo_git_review():
+        run_master(real_run_id)
+        # hitl=False → autonomous dispatch (no pre-fix gate)
+        # hitl_review=False → no sandbox diff capture (we get the diff from GitHub)
+        # hitl_git_review=True → orchestrator uses git flow instead of SSM
+        run_demo_master(
+            demo_row["run_id"],
+            real_run_id=real_run_id,
+            hitl=False,
+            hitl_review=False,
+            hitl_git_review=True,
+            per_scanner_cap=5,
+        )
+
+    background_tasks.add_task(_run_real_then_demo_git_review)
+
+    return RunCreated(
+        run_id=demo_row["run_id"],
+        event_id=demo_row["event_id"],
+        status=demo_row["status"],
+    )
+
+
 @app.post("/agents/demo/reset")
 def reset_demo_state() -> dict:
     """Wipe demo output tables. Keeps demo.raw_findings (the 5-row seed fixture).
@@ -1717,6 +1815,234 @@ def review_reject_demo_package(pkg_id: int, body: ReviewDecisionBody | None = No
         "reviewed_by": reviewed_by,
         "decision": "rejected",
         "restore_message": message,
+    }
+
+
+# =============================================================================
+# HITL v2 Git-native review endpoints (Phase B, side experiment)
+# =============================================================================
+# Distinct from the sandbox review endpoints above:
+#   sandbox → operates on env2 files via SSM (backup restore / rm .bak)
+#   git-native → operates on GitHub PRs (merge / close via GitHub API)
+# UI decides which set to call based on whether the package has git_pr_url.
+
+
+class GitReviewDecisionBody(BaseModel):
+    reviewed_by: str = "demo-user@acmecorp.com"
+    # Optional comment posted on the PR before close (Reject flow only).
+    comment: str | None = None
+
+
+@app.get("/admin/remediation-packages/demo/{pkg_id}/review-git-info")
+def get_demo_review_git_info(pkg_id: int) -> dict:
+    """Return the git-native review context for this package.
+
+    UI calls this for `awaiting_review` packages that carry a `git_pr_url`,
+    to render the "View PR on GitHub" card instead of the sandbox diff.
+    Refreshes the PR state from GitHub on each call so a merge / close
+    that happened outside our UI is reflected without needing a webhook.
+    """
+    sb = supabase_admin_demo()
+    pkg = (
+        sb.table("remediation_packages")
+        .select(
+            "id, status, git_native_review, git_pr_number, git_pr_url, "
+            "git_pr_state, git_pr_branch, git_pr_repo"
+        )
+        .eq("id", pkg_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not pkg:
+        raise HTTPException(status_code=404, detail=f"package #{pkg_id} not found")
+
+    pr_number = pkg.get("git_pr_number")
+    pr_repo = pkg.get("git_pr_repo") or settings.github_repo
+    live_state = None
+    if pr_number and pr_repo and settings.github_pat:
+        try:
+            from .agents.fixer.git_review import get_pr_state  # noqa: PLC0415
+
+            st = get_pr_state(pat=settings.github_pat, repo=pr_repo, pr_number=pr_number)
+            if st.ok:
+                live_state = {
+                    "state": st.state,
+                    "merged": st.merged,
+                    "mergeable": st.mergeable,
+                    "html_url": st.html_url,
+                    "head_sha": st.head_sha,
+                }
+                if st.state and st.state != pkg.get("git_pr_state"):
+                    try:
+                        sb.table("remediation_packages").update({"git_pr_state": st.state}).eq(
+                            "id", pkg_id
+                        ).execute()
+                    except Exception:  # noqa: BLE001, S110
+                        pass
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    return {
+        "package_id": pkg_id,
+        "package_status": pkg.get("status"),
+        "git_native": bool(pkg.get("git_native_review")),
+        "pr_number": pr_number,
+        "pr_url": pkg.get("git_pr_url"),
+        "pr_state_cached": pkg.get("git_pr_state"),
+        "pr_state_live": live_state,
+        "branch": pkg.get("git_pr_branch"),
+        "repo": pr_repo,
+    }
+
+
+@app.post("/admin/remediation-packages/demo/{pkg_id}/review-git-approve")
+def review_git_approve_demo_package(pkg_id: int, body: GitReviewDecisionBody | None = None) -> dict:
+    """Merge the PR via GitHub API. Marks package as `fixed`.
+
+    Uses squash merge by default so the base branch history stays clean.
+    Falls through to the existing status CHECK (fixed) — no schema change.
+    """
+    reviewed_by = body.reviewed_by if body else "demo-user@acmecorp.com"
+    sb = supabase_admin_demo()
+
+    pkg = (
+        sb.table("remediation_packages")
+        .select("id, status, git_pr_number, git_pr_repo")
+        .eq("id", pkg_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not pkg:
+        raise HTTPException(status_code=404, detail=f"package #{pkg_id} not found")
+    if pkg.get("status") != "awaiting_review":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"package #{pkg_id} is {pkg.get('status')!r}, not 'awaiting_review' "
+                f"— git-review approve is only valid on packages waiting for review"
+            ),
+        )
+    pr_number = pkg.get("git_pr_number")
+    pr_repo = pkg.get("git_pr_repo") or settings.github_repo
+    if not (pr_number and pr_repo and settings.github_pat):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"package #{pkg_id} missing git PR info — cannot merge. "
+                f"pr_number={pr_number}, repo={pr_repo}"
+            ),
+        )
+
+    from .agents.fixer.git_review import merge_pr  # noqa: PLC0415
+
+    ok, message = merge_pr(
+        pat=settings.github_pat,
+        repo=pr_repo,
+        pr_number=pr_number,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub merge failed for PR #{pr_number}: {message}",
+        )
+
+    now_iso = datetime.now(UTC).isoformat()
+    sb.table("remediation_packages").update(
+        {
+            "status": "fixed",
+            "git_pr_state": "merged",
+            "approved_by": reviewed_by,
+            "approved_at": now_iso,
+            "updated_at": now_iso,
+        }
+    ).eq("id", pkg_id).execute()
+
+    return {
+        "id": pkg_id,
+        "status": "fixed",
+        "decision": "approved",
+        "reviewed_by": reviewed_by,
+        "pr_number": pr_number,
+        "pr_state": "merged",
+        "message": message,
+    }
+
+
+@app.post("/admin/remediation-packages/demo/{pkg_id}/review-git-reject")
+def review_git_reject_demo_package(pkg_id: int, body: GitReviewDecisionBody | None = None) -> dict:
+    """Close the PR without merging. Optionally posts a rejection comment
+    on the PR first so history shows why. Marks package as `review_rejected`
+    (falls back to `rolled_back` if migration 0041 not applied)."""
+    reviewed_by = body.reviewed_by if body else "demo-user@acmecorp.com"
+    comment = (body.comment if body else None) or (
+        f"Closed by VOP HITL Review — rejected by {reviewed_by}."
+    )
+    sb = supabase_admin_demo()
+
+    pkg = (
+        sb.table("remediation_packages")
+        .select("id, status, git_pr_number, git_pr_repo")
+        .eq("id", pkg_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not pkg:
+        raise HTTPException(status_code=404, detail=f"package #{pkg_id} not found")
+    if pkg.get("status") != "awaiting_review":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"package #{pkg_id} is {pkg.get('status')!r}, not 'awaiting_review'"),
+        )
+    pr_number = pkg.get("git_pr_number")
+    pr_repo = pkg.get("git_pr_repo") or settings.github_repo
+    if not (pr_number and pr_repo and settings.github_pat):
+        raise HTTPException(
+            status_code=409,
+            detail=f"package #{pkg_id} missing git PR info — cannot close",
+        )
+
+    from .agents.fixer.git_review import close_pr  # noqa: PLC0415
+
+    ok, message = close_pr(
+        pat=settings.github_pat,
+        repo=pr_repo,
+        pr_number=pr_number,
+        comment=comment,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub close failed for PR #{pr_number}: {message}",
+        )
+
+    now_iso = datetime.now(UTC).isoformat()
+    patch = {
+        "status": "review_rejected",
+        "git_pr_state": "closed",
+        "updated_at": now_iso,
+    }
+    applied_status = "review_rejected"
+    try:
+        sb.table("remediation_packages").update(patch).eq("id", pkg_id).execute()
+    except Exception as e:  # noqa: BLE001
+        if "remediation_packages_status_check" in str(e) or "23514" in str(e):
+            patch["status"] = "rolled_back"
+            applied_status = "rolled_back"
+            sb.table("remediation_packages").update(patch).eq("id", pkg_id).execute()
+        else:
+            raise
+
+    return {
+        "id": pkg_id,
+        "status": applied_status,
+        "decision": "rejected",
+        "reviewed_by": reviewed_by,
+        "pr_number": pr_number,
+        "pr_state": "closed",
+        "message": message,
     }
 
 
