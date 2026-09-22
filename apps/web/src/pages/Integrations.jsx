@@ -415,7 +415,7 @@ export default function Integrations() {
 
     const eventId = `EVT-HITL-GIT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     try {
-      const res = await fetch(`${API_URL}/agents/trigger_demo_hitl_git_review`, {
+      const res = await fetch(`${API_URL}/agents/trigger_demo_hitl_verified_pr`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -591,7 +591,7 @@ export default function Integrations() {
               >
                 {isTriggering
                   ? 'Triggering…'
-                  : `🔀 Run HITL Git Review${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
+                  : `🔀 Run HITL + Verified PR${selectedScanners.size ? ` (${selectedScanners.size})` : ''}`}
               </button>
               {lastResult && (
                 <div

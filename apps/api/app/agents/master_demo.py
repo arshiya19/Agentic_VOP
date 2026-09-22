@@ -541,11 +541,11 @@ def _fix_node(state: DemoMasterState) -> dict:
         # failure paths are unaffected (nothing to review if the fix didn't
         # land). See design doc: Post-Fix Review Modes, Approach A.
         #
-        # Git-native review (side experiment) uses the SAME awaiting_review
-        # state — the "review" happens on GitHub via the opened PR, not on
-        # env2 via SSM restore. Either flag triggers the override.
-        _is_review_pkg = bool(pkg.get("review_required")) or bool(pkg.get("git_native_review"))
-        if _new_pkg_status == "fixed" and _is_review_pkg:
+        # Note: git_native_review packages DO flip to `fixed` here — the
+        # sandbox already applied + verified the fix on env2, and the
+        # Verified-PR hook (orchestrator._run_lifecycle) opens the mirror
+        # PR as a bonus artifact, not a review gate.
+        if _new_pkg_status == "fixed" and bool(pkg.get("review_required")):
             _new_pkg_status = "awaiting_review"
         if _new_pkg_status:
             try:
@@ -581,20 +581,9 @@ def _fix_node(state: DemoMasterState) -> dict:
                 any_broad_passing_rescan = True
 
         # Bucket each covered_id: fixed or unaddressed by rescan coverage.
-        #
-        # Git-native review packages have NO local rescan (nothing to build
-        # or scan on the fixer machine — verification happens on the
-        # customer's CI when the PR is merged). Their "proof" is the PR
-        # itself. So on success we credit every covered_id as fixed;
-        # otherwise the summary line would say `0 fixed, N unaddressed`
-        # even though N real PRs are open on GitHub awaiting review.
         fixed_ids_here: list[int] = []
         unaddressed_ids_here: list[int] = []
-        _is_git_native = bool(pkg.get("git_native_review"))
         for _cid in covered_ids_list:
-            if _is_git_native and status == "success":
-                fixed_ids_here.append(_cid)
-                continue
             _cid_check = check_id_by_issue.get(_cid)
             _is_covered_by_rescan = any_broad_passing_rescan or (
                 _cid_check is not None and _cid_check in distinct_passing_check_ids

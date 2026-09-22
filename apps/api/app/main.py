@@ -439,22 +439,22 @@ def trigger_demo_hitl_review_run(
     )
 
 
-@app.post("/agents/trigger_demo_hitl_git_review", response_model=RunCreated, status_code=201)
-def trigger_demo_hitl_git_review_run(
+@app.post("/agents/trigger_demo_hitl_verified_pr", response_model=RunCreated, status_code=201)
+def trigger_demo_hitl_verified_pr_run(
     payload: TriggerEvent, background_tasks: BackgroundTasks
 ) -> RunCreated:
-    """HITL v2 Git-native review (Phase B, side experiment).
+    """HITL v2 Verified PR — sandbox fix + evidence-attached PR.
 
-    Same pipeline shape as HITL Review, but SA-4 skips env2 / SSM entirely
-    and instead:
-      1. Clones the configured GitHub repo (GITHUB_REPO) into a temp dir
-      2. Applies the fix's shell commands in the cloned working tree
-      3. Commits, pushes a branch, opens a real PR against GITHUB_BASE_BRANCH
-      4. Package pauses at `awaiting_review` with the PR URL attached
-      5. Approve endpoint calls GitHub Merge API; Reject closes the PR
+    Runs the full sandbox lifecycle (SA-4 → SSM → env2 → build → trivy
+    rescan). Only after the fix is empirically verified on env2 does the
+    orchestrator's success hook mirror the same edit into a PR against
+    the configured GitHub repo, with the rescan output attached as proof.
 
-    Requires GITHUB_PAT + GITHUB_REPO env vars + migration 0042 applied.
-    Existing pipelines (auto-demo, HITL v1, HITL Sandbox review) unaffected.
+    Contrast with the earlier standalone git flow (removed): that one
+    skipped env2 and the PR carried no proof. This one is closed-loop
+    verified before it ever leaves the sandbox.
+
+    Requires GITHUB_PAT + GITHUB_REPO env vars.
     """
     import uuid
 
@@ -489,13 +489,13 @@ def trigger_demo_hitl_git_review_run(
         raise HTTPException(status_code=500, detail="Failed to create real run")
     real_run_id = real_insert.data[0]["run_id"]
 
-    demo_event_id = f"demo-hitl-git-{uuid.uuid4().hex[:8]}"
+    demo_event_id = f"demo-hitl-verified-{uuid.uuid4().hex[:8]}"
     demo_insert = (
         sb_demo.table("agent_runs")
         .insert(
             {
                 "event_id": demo_event_id,
-                "triggered_by": "demo-hitl-git-review",
+                "triggered_by": "demo-hitl-verified-pr",
                 "action": "FULL",
                 "targets": {
                     "demo": True,
@@ -511,14 +511,15 @@ def trigger_demo_hitl_git_review_run(
         .execute()
     )
     if not demo_insert.data:
-        raise HTTPException(status_code=500, detail="Failed to create demo git-review run")
+        raise HTTPException(status_code=500, detail="Failed to create demo verified-PR run")
     demo_row = demo_insert.data[0]
 
-    def _run_real_then_demo_git_review():
+    def _run_real_then_demo_verified_pr():
         run_master(real_run_id)
-        # hitl=False → autonomous dispatch (no pre-fix gate)
-        # hitl_review=False → no sandbox diff capture (we get the diff from GitHub)
-        # hitl_git_review=True → orchestrator uses git flow instead of SSM
+        # Full sandbox flow (SSM + build + rescan) runs as normal.
+        # hitl_git_review=True → planner_demo sets git_native_review on
+        # each package, and the orchestrator's post-success hook opens a
+        # PR after the sandbox rescan verifies the fix.
         run_demo_master(
             demo_row["run_id"],
             real_run_id=real_run_id,
@@ -528,7 +529,7 @@ def trigger_demo_hitl_git_review_run(
             per_scanner_cap=5,
         )
 
-    background_tasks.add_task(_run_real_then_demo_git_review)
+    background_tasks.add_task(_run_real_then_demo_verified_pr)
 
     return RunCreated(
         run_id=demo_row["run_id"],
