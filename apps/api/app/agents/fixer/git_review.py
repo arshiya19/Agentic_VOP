@@ -220,7 +220,7 @@ class GitReviewClient:
         results: list[dict[str, Any]] = []
         for i, cmd in enumerate(commands, start=1):
             try:
-                r = subprocess.run(  # noqa: S602 — SA-3 shell commands; runs against a cloned repo, not env2
+                r = subprocess.run(  # noqa: S602  # nosec B602 — SA-3 shell commands; runs against a cloned repo, not env2
                     cmd,
                     cwd=self._local_path,
                     shell=True,
