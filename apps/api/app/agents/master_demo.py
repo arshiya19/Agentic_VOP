@@ -152,6 +152,11 @@ class DemoMasterState(TypedDict, total=False):
     # page. Independent of `hitl` — you can mix v1 (pre-fix approve)
     # with v2 (post-fix review) or use either on its own.
     hitl_review: bool
+    # HITL v2 Git-native (Phase B, side experiment): when True, SA-3 flags
+    # packages with `git_native_review=True`. The orchestrator's early
+    # branch clones the target GitHub repo, edits in the working tree,
+    # commits, pushes, and opens a real PR — bypassing env2 entirely.
+    hitl_git_review: bool
     # Optional override for per-scanner sampling cap. HITL default = 5.
     # None keeps the standard _SOURCE_SCOOPS values (auto-demo behavior).
     per_scanner_cap: int | None
@@ -242,6 +247,7 @@ def _remediate_node(state: DemoMasterState) -> dict:
         run_id,
         hitl=bool(state.get("hitl")),
         hitl_review=bool(state.get("hitl_review")),
+        hitl_git_review=bool(state.get("hitl_git_review")),
     )
     emit_trace_demo(
         run_id,
@@ -534,6 +540,11 @@ def _fix_node(state: DemoMasterState) -> dict:
         # so a human can approve or reject the captured diff. Rollback +
         # failure paths are unaffected (nothing to review if the fix didn't
         # land). See design doc: Post-Fix Review Modes, Approach A.
+        #
+        # Note: git_native_review packages DO flip to `fixed` here — the
+        # sandbox already applied + verified the fix on env2, and the
+        # Verified-PR hook (orchestrator._run_lifecycle) opens the mirror
+        # PR as a bonus artifact, not a review gate.
         if _new_pkg_status == "fixed" and bool(pkg.get("review_required")):
             _new_pkg_status = "awaiting_review"
         if _new_pkg_status:
@@ -564,7 +575,7 @@ def _fix_node(state: DemoMasterState) -> dict:
             if _broad:
                 any_broad_passing_rescan = True
 
-        # Bucket each covered_id: fixed or unaddressed by rescan coverage
+        # Bucket each covered_id: fixed or unaddressed by rescan coverage.
         fixed_ids_here: list[int] = []
         unaddressed_ids_here: list[int] = []
         for _cid in covered_ids_list:
@@ -1005,6 +1016,7 @@ def run_demo_master(
     per_scanner_cap: int | None = None,
     *,
     hitl_review: bool = False,
+    hitl_git_review: bool = False,
 ) -> None:
     """Compile-once graph, invoke per run. Falls back to _fail_node on exception.
 
@@ -1028,6 +1040,7 @@ def run_demo_master(
                 "real_run_id": real_run_id,
                 "hitl": hitl,
                 "hitl_review": hitl_review,
+                "hitl_git_review": hitl_git_review,
                 "per_scanner_cap": per_scanner_cap,
             }
         )

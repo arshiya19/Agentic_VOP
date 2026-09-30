@@ -279,7 +279,15 @@ def _run_fixer_locked(
     environment: str,
     cfg: FixerConfig,
 ) -> int:
-    """Body of run_fixer — executed only while _ENV2_DISPATCH_LOCK is held."""
+    """Body of run_fixer — executed only while _ENV2_DISPATCH_LOCK is held.
+
+    HITL v2 "Verified PR" note: packages flagged `git_native_review=True`
+    still run the full sandbox lifecycle below (SSM + build + rescan) —
+    only after that succeeds and the rescan verifies the fix does the
+    orchestrator's success path open a PR mirroring the change against
+    the customer's repo (see git_verified_pr.open_verified_pr). That
+    hook is best-effort and never gates the sandbox success.
+    """
     # Concurrency lock (DB-side belt-and-suspenders) — env2 is a single
     # shared sandbox; only one fix_run at a time. This check remains as
     # cross-process safety for multi-worker deployments even though the
@@ -1051,6 +1059,36 @@ def _run_lifecycle(
                 "MESSAGE",
                 f"⚠ Review diff capture crashed ({type(e).__name__}: "
                 f"{str(e)[:200]}) — package will still pause at awaiting_review.",
+            )
+
+    # HITL v2 Verified-PR hook. When the package is flagged
+    # git_native_review=True, mirror the sandbox-proven edit into the
+    # customer's repo as a PR with the rescan output in the body. Best-
+    # effort — if the PR side fails, the sandbox success stands.
+    if _pkg.get("git_native_review"):
+        from app.config import settings  # noqa: PLC0415
+
+        if settings.github_pat and settings.github_repo:
+            from .git_verified_pr import open_verified_pr  # noqa: PLC0415
+
+            open_verified_pr(
+                sb=sb,
+                package_id=ctx.package_id,
+                pkg_row=_pkg,
+                fix_run_id=ctx.fix_run_id,
+                agent_run_id=ctx.agent_run_id,
+                validation_results=validation_results,
+                emit_fn=emit_fn,
+                pat=settings.github_pat,
+                repo=settings.github_repo,
+                base_branch=settings.github_base_branch or "main",
+            )
+        else:
+            emit_fn(
+                ctx.agent_run_id,
+                "sub-agent-4",
+                "MESSAGE",
+                "⚠ Verified-PR requested but GITHUB_PAT/REPO not set — skipping PR side.",
             )
 
     # 🎉 Success

@@ -801,6 +801,22 @@
   color: #64748B;
 }
 
+/* Run HITL Git Review — deep indigo for the Git-native (Phase B) variant.
+ * Third distinct hue after purple (v1) + teal (sandbox review). Indigo
+ * carries the "GitHub / open source" association without being the
+ * literal GitHub octocat color. */
+.scanner-runner-btn-hitl-git-review {
+  background: #4338CA;
+  color: #ffffff;
+}
+.scanner-runner-btn-hitl-git-review:hover:not(:disabled) {
+  background: #3730A3;
+}
+.scanner-runner-btn-hitl-git-review:disabled {
+  background: #1E293B;
+  color: #64748B;
+}
+
 .scanner-runner-result {
   font-size: 13px;
   padding: 8px 12px;

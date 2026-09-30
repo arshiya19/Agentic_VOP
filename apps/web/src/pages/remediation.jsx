@@ -215,15 +215,22 @@ export default function Remediation() {
   // HITL v2 — approve the DIFF SA-4 produced. Keeps changes live,
   // finalizes package as `fixed`, cleans up the .bak on env2.
   const handleReviewApprove = useCallback(async (id) => {
-    if (!window.confirm('Approve these changes?\n\nThis will keep the file edits SA-4 made and mark the package as Fixed. The backup file will be deleted from env2.')) return
+    // Route to the git-native or sandbox endpoint based on whether the
+    // package has a PR attached. Only one flow ever applies per package.
+    const isGitNative = Boolean(detail?.git_pr_url)
+    const endpoint = isGitNative ? 'review-git-approve' : 'review-approve'
+    const confirmMsg = isGitNative
+      ? `Merge PR #${detail?.git_pr_number} on GitHub?\n\nThis will merge the pull request into the base branch. Package will be marked as Fixed.`
+      : 'Approve these changes?\n\nThis will keep the file edits SA-4 made and mark the package as Fixed. The backup file will be deleted from env2.'
+    if (!window.confirm(confirmMsg)) return
     try {
-      const res = await fetch(`${apiBase}/${id}/review-approve`, {
+      const res = await fetch(`${apiBase}/${id}/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reviewed_by: 'demo-user@acmecorp.com' }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
-      showToast('success', `Package ${id} — changes approved (Fixed)`)
+      showToast('success', `Package ${id} — changes approved (Fixed)${isGitNative ? ' · PR merged' : ''}`)
       await refreshList()
       if (selectedId === id) {
         const refreshed = await fetch(`${apiBase}/${id}`).then(r => r.json())
@@ -232,21 +239,27 @@ export default function Remediation() {
     } catch (e) {
       showToast('error', `Review approve failed: ${e.message}`)
     }
-  }, [refreshList, selectedId, showToast, apiBase])
+  }, [refreshList, selectedId, showToast, apiBase, detail])
 
-  // HITL v2 — reject the diff. Restores the .bak via SSM, finalizes as
-  // `review_rejected`.
+  // HITL v2 — reject the change. Sandbox: SSM restores the .bak on env2.
+  // Git-native: closes the PR on GitHub. Package flips to review_rejected.
   const handleReviewReject = useCallback(async (id) => {
-    if (!window.confirm('Reject these changes?\n\nThis will restore the original file on env2 from the backup, and mark the package as Review Rejected. The fix will be undone.')) return
+    const isGitNative = Boolean(detail?.git_pr_url)
+    const endpoint = isGitNative ? 'review-git-reject' : 'review-reject'
+    const confirmMsg = isGitNative
+      ? `Close PR #${detail?.git_pr_number} on GitHub without merging?\n\nThe branch stays but no changes land on the base branch. Package will be marked as Review Rejected.`
+      : 'Reject these changes?\n\nThis will restore the original file on env2 from the backup, and mark the package as Review Rejected. The fix will be undone.'
+    if (!window.confirm(confirmMsg)) return
     try {
-      const res = await fetch(`${apiBase}/${id}/review-reject`, {
+      const res = await fetch(`${apiBase}/${id}/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reviewed_by: 'demo-user@acmecorp.com' }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
       const data = await res.json()
-      showToast('success', `Package ${id} — changes rejected, file restored (${data.status})`)
+      const suffix = isGitNative ? ' · PR closed' : ' · file restored'
+      showToast('success', `Package ${id} — changes rejected (${data.status})${suffix}`)
       await refreshList()
       if (selectedId === id) {
         const refreshed = await fetch(`${apiBase}/${id}`).then(r => r.json())
@@ -255,7 +268,7 @@ export default function Remediation() {
     } catch (e) {
       showToast('error', `Review reject failed: ${e.message}`)
     }
-  }, [refreshList, selectedId, showToast, apiBase])
+  }, [refreshList, selectedId, showToast, apiBase, detail])
 
   const handleReject = useCallback(async (id) => {
     const reason = window.prompt('Reject reason (will be saved on the package):')
@@ -572,18 +585,36 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
   // HITL v2 — review diff loaded lazily when the package is awaiting_review.
   const [reviewDiff, setReviewDiff] = useState(null)
   const [reviewDiffLoading, setReviewDiffLoading] = useState(false)
+  // HITL v2 Git-native: separate state for PR info when the package
+  // carries a git_pr_url. Sandbox packages never populate this.
+  const [gitReviewInfo, setGitReviewInfo] = useState(null)
+  const [gitReviewInfoLoading, setGitReviewInfoLoading] = useState(false)
   const isAwaitingReview = pkg?.status === 'awaiting_review'
+  const isGitNative = Boolean(pkg?.git_pr_url)
   useEffect(() => {
-    if (!isAwaitingReview || !pkg?.id) { setReviewDiff(null); return }
+    if (!isAwaitingReview || !pkg?.id) {
+      setReviewDiff(null); setGitReviewInfo(null); return
+    }
     let mounted = true
-    setReviewDiffLoading(true)
-    fetch(`${apiBase}/${pkg.id}/review-diff`)
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(data => { if (mounted) setReviewDiff(data) })
-      .catch(() => { if (mounted) setReviewDiff({ diff: [], error: true }) })
-      .finally(() => { if (mounted) setReviewDiffLoading(false) })
+    if (isGitNative) {
+      // Git-native: fetch PR info (number, url, live state from GitHub)
+      setGitReviewInfoLoading(true)
+      fetch(`${apiBase}/${pkg.id}/review-git-info`)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(data => { if (mounted) setGitReviewInfo(data) })
+        .catch(() => { if (mounted) setGitReviewInfo({ error: true }) })
+        .finally(() => { if (mounted) setGitReviewInfoLoading(false) })
+    } else {
+      // Sandbox: fetch the captured unified diff
+      setReviewDiffLoading(true)
+      fetch(`${apiBase}/${pkg.id}/review-diff`)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(data => { if (mounted) setReviewDiff(data) })
+        .catch(() => { if (mounted) setReviewDiff({ diff: [], error: true }) })
+        .finally(() => { if (mounted) setReviewDiffLoading(false) })
+    }
     return () => { mounted = false }
-  }, [isAwaitingReview, pkg?.id, apiBase])
+  }, [isAwaitingReview, isGitNative, pkg?.id, apiBase])
   const [ticket, setTicket] = useState(() => {
     // If package is ready_for_execution and was approved, check if we already created a ticket
     // (Demo tickets are deterministic: INC + package ID)
@@ -1085,9 +1116,65 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
           )}
 
           {/* HITL v2 — Post-fix review panel. Only shown when the package
-              is awaiting_review (SA-4 already applied the fix, backup is
-              preserved, human decides whether to keep or restore). */}
-          {isAwaitingReview && (
+              is awaiting_review. Two flavors:
+                - Git-native: package has git_pr_url → show PR card + link
+                - Sandbox: no PR → show captured unified diff */}
+          {isAwaitingReview && isGitNative && (
+            <div style={{ padding: '16px 0', borderTop: '1px solid #2D3748', marginTop: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.06em', color: '#a5b4fc', textTransform: 'uppercase' }}>
+                  Post-fix review · Git-native
+                </span>
+                <span style={{ fontSize: 11, color: '#64748B' }}>
+                  Real PR on GitHub. Approve merges it; Reject closes it.
+                </span>
+              </div>
+              {gitReviewInfoLoading ? (
+                <div style={{ padding: '18px 12px', color: '#94a3b8', fontSize: 13 }}>Loading PR info…</div>
+              ) : gitReviewInfo?.error ? (
+                <div style={{ padding: '12px', color: '#f87171', fontSize: 13 }}>Failed to load PR info. Try refresh or check backend logs.</div>
+              ) : (
+                <div style={{
+                  background: '#0b1220', border: '1px solid #1e2a3a', borderRadius: 4,
+                  padding: '16px 18px', display: 'grid', gap: 12,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, color: '#cbd5e1', fontFamily: 'ui-monospace, SF Mono, Menlo, monospace' }}>
+                      🔀 PR #{gitReviewInfo?.pr_number} · <span style={{ color: '#94a3b8' }}>{gitReviewInfo?.repo}</span>
+                    </span>
+                    <span style={{
+                      fontSize: 10.5, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase',
+                      padding: '2px 8px', borderRadius: 3,
+                      background: gitReviewInfo?.pr_state_live?.state === 'open' ? '#0f2f2b' : '#2a1d20',
+                      color: gitReviewInfo?.pr_state_live?.state === 'open' ? '#5eead4' : '#fda4af',
+                      border: `1px solid ${gitReviewInfo?.pr_state_live?.state === 'open' ? '#14b8a6' : '#f87171'}`,
+                    }}>
+                      {gitReviewInfo?.pr_state_live?.state || gitReviewInfo?.pr_state_cached || 'unknown'}
+                    </span>
+                    {gitReviewInfo?.pr_state_live?.mergeable === false && (
+                      <span style={{ fontSize: 11, color: '#f59e0b' }}>⚠ merge conflict on base branch</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: '#94a3b8', fontFamily: 'ui-monospace, SF Mono, Menlo, monospace' }}>
+                    Branch: <span style={{ color: '#cbd5e1' }}>{gitReviewInfo?.branch}</span>
+                  </div>
+                  <a
+                    href={gitReviewInfo?.pr_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: 'inline-block', padding: '8px 14px', textDecoration: 'none',
+                      background: '#4338CA', color: '#ffffff', borderRadius: 4,
+                      fontSize: 13, fontWeight: 500, alignSelf: 'flex-start',
+                    }}
+                  >
+                    View diff on GitHub ↗
+                  </a>
+                </div>
+              )}
+            </div>
+          )}
+          {isAwaitingReview && !isGitNative && (
             <div style={{ padding: '16px 0', borderTop: '1px solid #2D3748', marginTop: '12px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                 <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.06em', color: '#5eead4', textTransform: 'uppercase' }}>
