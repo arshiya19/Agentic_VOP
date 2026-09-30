@@ -301,36 +301,13 @@ def try_kb_replay(
     # 2. Query KB for a replay candidate
     try:
         candidate = _find_replay_candidate(sb, check_id, resource_type)
-    except Exception as e:  # noqa: BLE001
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"📚 KB replay lookup failed: {type(e).__name__}: {str(e)[:200]} — "
-            "falling through to agentic path.",
-        )
+    except Exception:  # noqa: BLE001, S110
         return None, None
 
     if candidate is None:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"📚 KB replay: no candidate found for check_id={check_id}, "
-            f"resource_type={resource_type} — using agentic path.",
-        )
         return None, None
 
     kb_id = candidate["id"]
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"📚 KB replay: found candidate KB #{kb_id} (check={check_id}, "
-        f"confidence={candidate.get('confidence_score')}, "
-        f"reused={candidate.get('times_reused')} times). "
-        f"Adapting proven recipe via constrained LLM call...",
-    )
 
     # 3. Pre-fetch the target file content so the adaptation LLM can compose
     #    old_text against real bytes (Fix A). Prevents cross-file phantom
@@ -357,21 +334,8 @@ def try_kb_replay(
             if _prefetch.get("exists") and _prefetch.get("content"):
                 target_content = _prefetch["content"]
                 target_truncated = bool(_prefetch.get("truncated"))
-                emit_fn(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"📎 KB adapter pre-fetched {_prefetch['content_length']} chars of "
-                    f"{target_path} — recipe will be adapted to actual file bytes",
-                )
-        except Exception as _e:  # noqa: BLE001
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"⚠ KB adapter file_fetch skipped ({type(_e).__name__}: {str(_e)[:100]}) "
-                f"— falling back to blind adaptation",
-            )
+        except Exception:  # noqa: BLE001, S110
+            pass  # fall back to blind adaptation
 
     # 4. Build adaptation messages and call LLM
     try:
@@ -406,19 +370,7 @@ def try_kb_replay(
         output = _parse_adaptation_output(text, capture_error=first_errors)
 
         if output is None:
-            # ONE retry with the parse error fed back. Costs 1 extra LLM call
-            # (~$0.02, ~5s) vs falling through to full agentic path (~5-15 calls,
-            # ~60-90s, ~$0.10). We now pass the EXACT pydantic validation error
-            # to the LLM so it knows precisely which field is missing/wrong,
-            # rather than a generic "shape wrong" hint that it may not act on.
             first_err = first_errors[0] if first_errors else "unknown parse error"
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"📚 KB replay: first adaptation attempt failed to parse — "
-                f"validation error: {first_err[:220]}. Retrying with feedback...",
-            )
             retry_messages = messages + [
                 AIMessage(content=text),
                 HumanMessage(
@@ -445,14 +397,7 @@ def try_kb_replay(
                     else json.dumps(retry_response.content)
                 )
                 output = _parse_adaptation_output(retry_text, capture_error=retry_errors)
-            except Exception as retry_err:  # noqa: BLE001
-                emit_fn(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"📚 KB replay: retry LLM call raised "
-                    f"({type(retry_err).__name__}: {str(retry_err)[:100]})",
-                )
+            except Exception:  # noqa: BLE001
                 output = None
 
             if output is None:
@@ -465,12 +410,6 @@ def try_kb_replay(
                     f"retry validation error: {retry_err_msg[:220]}. Falling through to agentic.",
                 )
                 return None, None
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                "📚 KB replay: retry succeeded — proceeding with adapted recipe.",
-            )
 
         # 4. Ensure validation_tests include the re-scan from the KB entry.
         # The adaptation LLM sometimes drops or truncates validation_tests.
@@ -478,15 +417,6 @@ def try_kb_replay(
         # the mandatory re-scan). Inject any missing re-scan test directly
         # from the KB rather than trusting the LLM to reproduce it.
         output = _ensure_rescan_in_validation(output, candidate)
-
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"📚 KB replay SUCCESS — adapted recipe KB #{kb_id} for "
-            f"issue #{issue.get('id')} ({check_id}). "
-            f"Skipping agentic/hybrid path.",
-        )
         return output, kb_id
 
     except Exception as e:  # noqa: BLE001

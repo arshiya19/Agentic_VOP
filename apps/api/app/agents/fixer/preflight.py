@@ -240,12 +240,6 @@ def snapshot_env2(executor: RemoteExecutor, ctx: FixContext, emit_fn: Any) -> En
          (skipped when resource_name not in ctx)
     """
     snap = EnvSnapshot()
-    emit_fn(
-        ctx.agent_run_id,
-        "sub-agent-4",
-        "MESSAGE",
-        "🔬 Pre-flight snapshot: querying env2 state (IAM + terraform)…",
-    )
 
     # 1. AWS caller identity — quick, always works if AWS CLI is functional
     try:
@@ -579,29 +573,10 @@ def run_preflight_rewrite(
     """
     original_pathway = ctx.pathway
     if not original_pathway or not original_pathway.get("remediation_steps"):
-        emit_fn(
-            ctx.agent_run_id,
-            "sub-agent-4",
-            "MESSAGE",
-            "🧠 Pre-flight rewriter: no remediation_steps in package — skipping.",
-        )
         return original_pathway, []
 
-    # Gate: the rewriter's snapshot logic queries `terraform state list` and
-    # `terraform state show <resource>`. That's meaningful only for IaC-shaped
-    # fixes. For container-image and host-OS categories, the snapshot would
-    # produce noise (or crash on `working_directory` not being a terraform
-    # module) and the rewrites it proposes would target the wrong resource
-    # shape. Skip cleanly for non-IaC scanner_types.
     non_iac_scanner_types = {"container_image", "os_pkg", "os", "image"}
     if ctx.scanner_type in non_iac_scanner_types:
-        emit_fn(
-            ctx.agent_run_id,
-            "sub-agent-4",
-            "MESSAGE",
-            f"🧠 Pre-flight rewriter: scanner_type={ctx.scanner_type!r} is non-IaC — "
-            "skipping (rewriter is Terraform-specific).",
-        )
         return original_pathway, []
 
     cfg = config or FixerConfig()
@@ -659,13 +634,8 @@ def run_preflight_rewrite(
         f"{len(advisory)} advisory (logged only)",
     )
 
-    for r in advisory:
-        emit_fn(
-            ctx.agent_run_id,
-            "sub-agent-4",
-            "MESSAGE",
-            f"   ↳ Advisory (confidence={r.confidence}, step={r.step_index}): {r.reason[:200]}",
-        )
+    for _ in advisory:
+        pass  # advisory rewrites not surfaced to client trace
 
     for concern in plan.unfixable_concerns:
         emit_fn(
@@ -676,12 +646,6 @@ def run_preflight_rewrite(
         )
 
     if not high_conf:
-        emit_fn(
-            ctx.agent_run_id,
-            "sub-agent-4",
-            "MESSAGE",
-            "✓ Pre-flight: no high-confidence rewrites to apply. Executing original package.",
-        )
         return original_pathway, []
 
     # 4. Apply high-confidence rewrites (each still hits safety layer)
@@ -693,13 +657,6 @@ def run_preflight_rewrite(
 
     for r in sorted(high_conf, key=lambda x: x.step_index):
         if r.step_index < 0 or r.step_index >= len(steps):
-            emit_fn(
-                ctx.agent_run_id,
-                "sub-agent-4",
-                "MESSAGE",
-                f"   ⚠ Rewrite skipped (step_index={r.step_index} out of range "
-                f"0..{len(steps) - 1})",
-            )
             skipped += 1
             continue
 

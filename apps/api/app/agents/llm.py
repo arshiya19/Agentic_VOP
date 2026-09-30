@@ -20,8 +20,10 @@ equivalent) is tracked separately, including parallel worker calls in
 Sub-Agent 1 / Sub-Agent 2.
 """
 
+import threading
 import time
 from .trace import emit_trace  # noqa: PLC0415
+from collections import defaultdict
 from typing import Any
 
 import httpx
@@ -33,6 +35,43 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from ..config import settings
+
+
+# =============================================================================
+# In-memory token accumulator
+# =============================================================================
+# Keyed by run_id → agent → running totals. Populated by _TokenUsageCallback
+# on every LLM call regardless of the trace_token_usage flag, so the final
+# TOKEN_SUMMARY event always has accurate numbers even when per-call DB events
+# are suppressed.
+
+_token_accumulator: dict[str, dict[str, dict[str, int]]] = defaultdict(
+    lambda: defaultdict(lambda: {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+)
+_token_accumulator_lock = threading.Lock()
+
+
+def accumulate_tokens(run_id: str, agent: str, usage: dict[str, int]) -> None:
+    with _token_accumulator_lock:
+        bucket = _token_accumulator[run_id][agent]
+        bucket["prompt_tokens"] += usage["prompt_tokens"]
+        bucket["completion_tokens"] += usage["completion_tokens"]
+        bucket["total_tokens"] += usage["total_tokens"]
+
+
+def get_accumulated_tokens(run_id: str, agent: str) -> dict[str, int]:
+    with _token_accumulator_lock:
+        return dict(
+            _token_accumulator[run_id].get(
+                agent, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            )
+        )
+
+
+def clear_accumulated_tokens(run_id: str) -> None:
+    """Free memory after the run ends (success, failure, or cancellation)."""
+    with _token_accumulator_lock:
+        _token_accumulator.pop(run_id, None)
 
 
 class _TokenUsageCallback(BaseCallbackHandler):
@@ -62,6 +101,13 @@ class _TokenUsageCallback(BaseCallbackHandler):
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:  # noqa: ARG002
         usage = self._extract_usage(response)
         if usage is None:
+            return
+
+        # Always accumulate in memory so TOKEN_SUMMARY is accurate even when
+        # per-call DB events are suppressed by trace_token_usage=false.
+        accumulate_tokens(self._run_id, self._agent, usage)
+
+        if not settings.trace_token_usage:
             return
 
         emit = self._emit_fn or emit_trace

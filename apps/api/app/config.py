@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # 200K TPM limit for gpt-4o-mini. Bump to 10+ if you have a higher tier.
     llm_parallel_workers: int = 5
 
+    # Emit per-call TOKEN_USAGE trace events to the Agents page trace stream.
+    # Set false to suppress the chatty per-LLM-invocation events at scale.
+    # Token totals in the final TOKEN_SUMMARY remain accurate either way
+    # because the callback always accumulates counts in memory.
+    trace_token_usage: bool = True
+
     # --- Sub-Agent 4 (Fixer) settings ---
     # env2 (Remediation Playground) EC2 instance id — the sandbox target for
     # every fix run. Set once per deployment. Empty = Sub-Agent 4 refuses to

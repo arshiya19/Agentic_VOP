@@ -351,13 +351,6 @@ def _maybe_expand_for_depth(
 
     if _os.getenv("SA3_DISABLE_EXPANSION_RETRY", "").lower() in ("1", "true", "yes"):
         if _count_extractable_commands(parsed) > 0:
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                "Depth-expansion retry skipped (SA3_DISABLE_EXPANSION_RETRY=1) — "
-                "keeping draft as produced",
-            )
             return parsed
         # else: fall through — zero-command drafts still need repair
 
@@ -387,13 +380,6 @@ def _maybe_expand_for_depth(
         return parsed
 
     fetched_hosts = _distinct_hosts_fetched(messages)
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"↻ RETRY — {'; '.join(reasons)}. Re-invoking for expansion "
-        f"(no tool calls — uses fetched sources: {sorted(fetched_hosts)[:5]}).",
-    )
 
     min_rollback = max(
         2, int((min_steps or len(parsed.pathways[0].remediation_steps or [1])) * 0.5)
@@ -456,12 +442,6 @@ def _maybe_expand_for_depth(
             context="depth-retry",
         )
         if expanded is None:
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                "Retry LLM returned non-parseable content — keeping original draft",
-            )
             return parsed
     except Exception as e:  # noqa: BLE001
         emit_fn(
@@ -479,29 +459,10 @@ def _maybe_expand_for_depth(
             after = len(expanded.pathways[i].remediation_steps or [])
             if after > before:
                 improved = True
-                emit_fn(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"✓ RETRY pathway {i}: {before} → {after} steps",
-                )
-    # Also accept if commands appeared where none existed before
     commands_after = _count_extractable_commands(expanded)
     if total_commands == 0 and commands_after > 0:
         improved = True
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"✓ RETRY — commands extracted: 0 → {commands_after} (steps now have Command: blocks)",
-        )
     if not improved:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            "Retry did not improve step count OR command extractability — keeping original draft",
-        )
         return parsed
     return expanded
 
@@ -543,15 +504,6 @@ def _maybe_expand_for_placeholders(
         flag_lines.append(
             f"  - Step {f.get('step_num')}: placeholder {f.get('match')!r} ({f.get('pattern')})"
         )
-
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"↻ RETRY — {len(flag_lines)} unfilled placeholder(s) detected. "
-        f"Re-invoking to replace with discovery commands or drop the step "
-        f"(no tool calls).",
-    )
 
     fetched_hosts = _distinct_hosts_fetched(messages)
     expand_msg = HumanMessage(
@@ -603,12 +555,6 @@ def _maybe_expand_for_placeholders(
             context="placeholder-retry",
         )
         if expanded is None:
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                "Placeholder retry: non-parseable content — keeping original draft",
-            )
             return parsed, report
     except Exception as e:  # noqa: BLE001
         emit_fn(
@@ -626,25 +572,9 @@ def _maybe_expand_for_placeholders(
     before = len(report.placeholder_flags)
     after = len(new_flags)
     if after < before:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"✓ PLACEHOLDER RETRY: {before} → {after} unfilled placeholder(s)",
-        )
-        # Update the report so downstream confidence reflects the improvement.
-        # We can't easily remove considerations already stitched in, but the
-        # placeholder_flags list is what confidence_agentic reads.
         report.placeholder_flags = new_flags
         return expanded, report
 
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"Placeholder retry did not reduce placeholder count ({before} → {after}) — "
-        "keeping original draft",
-    )
     return parsed, report
 
 
@@ -720,21 +650,7 @@ def run_agentic_planner(
 
     # Trace shows which prompt actually ran — makes it obvious in the UI
     # when a specialized prompt kicks in vs the generic fallback.
-    selection_desc = describe_selected_prompt(prompt_row, issue_source, family)
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"🧭 SA-3 router selected prompt: {selection_desc}",
-    )
-
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"🤖 Agentic remediation starting — family={family}, budget={budget.max_calls} calls / "
-        f"${budget.max_cost_usd:.2f} — model={model} @ temp={temperature}",
-    )
+    describe_selected_prompt(prompt_row, issue_source, family)
 
     # Build the initial context: issue + asset + family passed as JSON.
     # Per-file batch context (attached by planner_demo._plan_and_enrich_batch)
@@ -1445,19 +1361,8 @@ def run_agentic_planner(
                             )
                         )
                     ]
-                    emit_fn(
-                        run_id,
-                        "sub-agent-3",
-                        "MESSAGE",
-                        f"📎 Pre-fetched {prefetch['content_length']} chars of {file_path_hint} into turn-1 context",
-                    )
-            except Exception as e:  # noqa: BLE001
-                emit_fn(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"⚠ file_fetch pre-inject skipped ({type(e).__name__}: {str(e)[:100]}) — LLM will work blind",
-                )
+            except Exception:  # noqa: BLE001, S110
+                pass  # LLM will work without file pre-inject
 
     # --- Knowledge Base injection (few-shot from proven fixes) ---
     kb_context_msg: list[Any] = []
@@ -1476,12 +1381,6 @@ def run_agentic_planner(
             kb_text = format_examples_for_agentic_prompt(kb_examples)
             if kb_text:
                 kb_context_msg = [HumanMessage(content=kb_text)]
-                emit_fn(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"Injected {len(kb_examples)} proven fix pattern(s) from knowledge base",
-                )
     except Exception:  # noqa: BLE001, S110
         pass  # KB retrieval is best-effort
 
@@ -1531,13 +1430,6 @@ def run_agentic_planner(
 
             if not floor_ok and can_afford_more and iteration < max_iterations - 2:
                 # PUSH BACK — research floor not met. Force more fetching.
-                emit_fn(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"▶ FETCH FLOOR ({done}/{required}) — {family} requires more "
-                    f"authoritative research before synthesis. Pushing back.",
-                )
                 messages.append(
                     HumanMessage(
                         content=(
@@ -1566,12 +1458,6 @@ def run_agentic_planner(
                 context="loop-final",
             )
             if parsed is not None:
-                emit_fn(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"✓ Agent produced draft package — {budget.summary()}",
-                )
                 # Depth retry: expand pathways that fell short of family minimum
                 parsed = _maybe_expand_for_depth(
                     parsed,
@@ -1597,12 +1483,6 @@ def run_agentic_planner(
                 )
                 return (parsed, report)
             # Fall through to synthesis backup below
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                "Agent produced final answer but not parseable JSON — attempting synthesis pass",
-            )
             return _synthesize_backup(llm, messages, run_id, emit_fn, budget, family)
 
         # Execute each tool call
@@ -1638,21 +1518,9 @@ def run_agentic_planner(
                     budget_exhausted = True
 
         if budget_exhausted:
-            emit_fn(
-                run_id,
-                "sub-agent-3",
-                "MESSAGE",
-                f"Budget exhausted mid-loop ({budget.summary()}) — forcing synthesis",
-            )
             return _synthesize_backup(llm, messages, run_id, emit_fn, budget, _family_for_verify)
 
     # Loop exhausted without a final answer — force synthesis
-    emit_fn(
-        run_id,
-        "sub-agent-3",
-        "MESSAGE",
-        f"Max iterations ({max_iterations}) reached — forcing synthesis. {budget.summary()}",
-    )
     return _synthesize_backup(llm, messages, run_id, emit_fn, budget, _family_for_verify)
 
 
@@ -1703,12 +1571,6 @@ def _synthesize_backup(
                 "Synthesis pass returned non-parseable content — no package produced",
             )
             return None
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"✓ Synthesis pass succeeded — {budget.summary()}",
-        )
         # Depth retry: expand if the backup synthesis under-produced.
         result = _maybe_expand_for_depth(
             result,

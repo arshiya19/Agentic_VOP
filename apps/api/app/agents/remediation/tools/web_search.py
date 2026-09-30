@@ -149,14 +149,6 @@ def web_search(
     if not allowed:
         raise RuntimeError(f"web_search denied: {reason}")
 
-    if emit_fn and run_id:
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"🔍 Searching web: {query[:120]} (call {budget.call_count + 1}/{budget.max_calls})",
-        )
-
     start = time.time()
     client = TavilyClient(api_key=settings.tavily_api_key)
     try:
@@ -197,16 +189,6 @@ def web_search(
             }
         )
     results.sort(key=lambda r: (r["authority_tier"], -1 * (r.get("score") or 0)))
-
-    if emit_fn and run_id:
-        top_domains = sorted({r["url"].split("/")[2] for r in results[:3] if "/" in r["url"]})
-        emit_fn(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"Search returned {len(results)} result(s) in {elapsed_ms}ms · "
-            f"top: {', '.join(top_domains)[:150]}",
-        )
 
     return {
         "query": query,
