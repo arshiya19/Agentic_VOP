@@ -99,27 +99,23 @@ jobs:
           cosign sign --yes "${{ env.ECR_IMAGE }}@${DIGEST}"
           echo "✅ Image signed successfully"
 
-      # ── 5. Generate SBOM and attach as attestation ──
-      # We generate a fresh SBOM on the CI side from the registry image (by
-      # digest) rather than transferring the build-box SBOM. This way the SBOM
-      # is verifiably generated from the exact published artifact, not a local
-      # copy that could have diverged.
-      - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0
-
-      - name: Generate SBOM and attach as attestation
-        env:
-          DIGEST: ${{ inputs.image_digest }}
-        run: |
-          echo "Generating SBOM for ${{ env.ECR_IMAGE }}@${DIGEST}"
-          syft "${{ env.ECR_IMAGE }}@${DIGEST}" -o spdx-json=/tmp/sbom.spdx.json
-
-          echo "Attaching SBOM as cosign attestation"
-          cosign attest --yes \
-            --type spdxjson \
-            --predicate /tmp/sbom.spdx.json \
-            "${{ env.ECR_IMAGE }}@${DIGEST}"
-          echo "✅ SBOM attestation attached"
+      # ── 5. SBOM attestation — DEFERRED (next milestone) ──
+      # NOTE: SBOM attestation is intentionally NOT done here yet.
+      #
+      # Regenerating the SBOM in CI fails for two reasons:
+      #   1. Arch mismatch — the image is arm64 (built on the arm64 build box)
+      #      but the GitHub runner is amd64, so syft cannot pull it to scan.
+      #   2. syft's own registry client did not inherit the ECR login (401).
+      #
+      # The correct design is NOT to regenerate the SBOM in CI. The build box
+      # already produced a valid SBOM (syft, from the exact image) at build
+      # time. The next milestone wires the build box to publish that SBOM to
+      # an S3 artifacts bucket keyed by digest; this workflow will download it
+      # by digest and run `cosign attest --type spdxjson --predicate <sbom>`.
+      # cosign attaches attestations by digest WITHOUT pulling the image, so it
+      # is arch-independent and will work on the amd64 runner.
+      #
+      # For this slice we prove sign + SLSA provenance + verify end-to-end.
 
       # ── 6. Generate and attach SLSA build provenance ──
       - name: Attach SLSA build provenance
@@ -183,18 +179,20 @@ jobs:
             "${{ env.ECR_IMAGE }}@${DIGEST}"
           echo "✅ Signature verification passed"
 
-      # ── 8. Verify the SBOM attestation (smoke test) ──
-      - name: Verify SBOM attestation
+      # ── 8. Verify the SLSA provenance attestation (smoke test) ──
+      # Verifies the attestation we DID create in step 6. (SBOM attestation
+      # verification returns in the next milestone, once SBOM is attached.)
+      - name: Verify SLSA provenance attestation
         env:
           DIGEST: ${{ inputs.image_digest }}
         run: |
-          echo "Verifying SBOM attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
+          echo "Verifying SLSA provenance attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
           cosign verify-attestation \
-            --type spdxjson \
+            --type slsaprovenance1 \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${{ env.ECR_IMAGE }}@${DIGEST}"
-          echo "✅ SBOM attestation verification passed"
+          echo "✅ SLSA provenance attestation verification passed"
 
       # ── 9. Summary ──
       - name: Summary
@@ -209,8 +207,8 @@ jobs:
           echo "| **Image** | \`${{ env.ECR_IMAGE }}:${TAG}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Digest** | \`${DIGEST}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Signed** | ✅ Keyless (Fulcio + Rekor) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **SBOM** | ✅ SPDX JSON attestation attached |" >> $GITHUB_STEP_SUMMARY
-          echo "| **SLSA Provenance** | ✅ Attestation attached |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SLSA Provenance** | ✅ Attestation attached + verified |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SBOM** | ⏳ Deferred to next milestone (via S3, build-box-generated) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Signing Identity** | GitHub Actions OIDC (\`${{ github.repository }}\`) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Transparency Log** | Public Rekor |" >> $GITHUB_STEP_SUMMARY
           echo "| **Verify command** | \`cosign verify --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.*' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' ${{ env.ECR_IMAGE }}@${DIGEST}\` |" >> $GITHUB_STEP_SUMMARY
