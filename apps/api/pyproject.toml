@@ -24,8 +24,9 @@ dependencies = [
     "langsmith>=0.8.18",
     # Pinned to remediate CVE-2026-48775 (JsonPlusSerializer arbitrary object reconstruction).
     "langgraph-checkpoint>=4.1.1",
-    # Pinned to remediate CVE-2026-48776 (unsanitized path interpolation in HTTP requests).
-    "langgraph-sdk>=0.3.15",
+    # Pinned to remediate CVE-2026-48776 (unsanitized path interpolation in HTTP requests)
+    # and CVE-2026-104873 (actions= arg misapplied on resource-scoped auth decorators); fixed in 0.4.4.
+    "langgraph-sdk>=0.4.4",
     # Pinned to remediate CVE-2026-97687/97688/97689 (HTTPS proxy TLS + streaming-API issues); fixed in 2.8.0.
     "urllib3>=2.8.0",
     # Pinned to remediate CVE-2026-53540/53539/53538 (Content-Length, QuerystringParser issues).
@@ -50,6 +51,12 @@ dependencies = [
     "msgpack>=1.2.1",
     # Pinned to remediate PYSEC-2026-3455/3456/3457 (pyasn1 quadratic OID parsing + unbounded tag + Real exponentiation).
     "pyasn1>=0.6.4",
+    # Transitive via langgraph/fsspec consumers. Pinned to remediate CVE-2026-104851
+    # (ReferenceFileSystem Kerchunk JSON parsing issue); fixed in 2026.6.0.
+    "fsspec>=2026.6.0",
+    # Transitive via aiohttp/langchain stack. Pinned to remediate CVE-2026-104874
+    # (reference leak in items-view union/subtraction, C extension); fixed in 6.9.1.
+    "multidict>=6.9.1",
     # Tavily web-search API for the agentic Sub-Agent 3 (Phase-2 remediation).
     # Free tier = 1000 searches/month. Get key at https://tavily.com.
     "tavily-python>=0.5.0",

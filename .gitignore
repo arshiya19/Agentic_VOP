@@ -44,6 +44,9 @@ pnpm-debug.log*
 *.tfstate
 *.tfstate.backup
 .terraform.lock.hcl
+# Saved Terraform plan files — binary, may contain resolved values; never commit.
+tfplan
+*.tfplan
 
 # Lambda build artifacts
 lambda.zip

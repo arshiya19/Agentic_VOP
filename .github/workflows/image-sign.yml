@@ -1,0 +1,216 @@
+# =============================================================================
+# Image Forge - Sign & Attest Hardened Base Image
+# =============================================================================
+# Manually-triggered workflow that keylessly signs a hardened base image in ECR
+# and attaches SBOM + SLSA provenance attestations.
+#
+# This is the "Option A" signing step: the build happens on the dedicated EC2
+# build box; this workflow signs the already-pushed image BY DIGEST, using the
+# GitHub Actions OIDC identity via Sigstore (cosign + Fulcio + Rekor).
+#
+# Why signing runs here, not on the build box:
+#   - Keyless signing needs an OIDC identity that Fulcio trusts. GitHub Actions
+#     has one natively; a plain EC2 does not.
+#   - Separating build (EC2) from sign (CI) means the signing identity is never
+#     on the build host -- advancing the SLSA L3 "signing secret not accessible
+#     to build steps" requirement.
+#
+# Inputs:
+#   image_digest: the exact sha256 digest to sign (from the build box push output)
+#   image_tag:    the tag that was pushed (e.g. v0.1.0) -- for display/logging only
+#
+# The workflow:
+#   1. Assumes the CI signing role (sisyfix-github-image-sign-dev) via OIDC
+#   2. Authenticates to ECR
+#   3. Keylessly signs the image digest (cosign sign)
+#   4. Attaches the SBOM as a cosign attestation
+#   5. Generates and attaches SLSA build provenance
+#
+# Public Sigstore note: signatures and attestations are recorded in the PUBLIC
+# Rekor transparency log. Fine for this test image; switch to private Sigstore
+# before real client images.
+#
+# Safety:
+#   - Only runs on main (OIDC trust gated to main in IAM)
+#   - workflow_dispatch only (manual trigger)
+#   - Concurrency group prevents concurrent signing runs
+# =============================================================================
+
+name: "Image Forge: Sign & Attest"
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Image digest to sign (sha256:... from the build box push output)"
+        required: true
+        type: string
+      image_tag:
+        description: "Image tag that was pushed (e.g. v0.1.0) -- for logging only"
+        required: false
+        default: "v0.1.0"
+        type: string
+
+permissions:
+  id-token: write   # OIDC token for AWS + Fulcio keyless signing
+  contents: read
+
+concurrency:
+  group: image-sign
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO: sisyfix-hardened-base-test
+  # Full ECR image reference (without tag/digest -- those come from inputs)
+  ECR_IMAGE: 486655355038.dkr.ecr.us-east-1.amazonaws.com/sisyfix-hardened-base-test
+
+jobs:
+  sign-and-attest:
+    name: "Sign & Attest · Hardened Base Image"
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 0. Checkout (needed for provenance -- source context) ──
+      - uses: actions/checkout@v4
+
+      # ── 1. Install cosign ──
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # ── 2. Configure AWS credentials (OIDC → CI signing role) ──
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/sisyfix-github-image-sign-dev
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-image-sign-${{ github.run_id }}
+
+      # ── 3. Authenticate Docker to ECR ──
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 4. Keyless sign the image digest ──
+      - name: Sign image (keyless via Fulcio/Rekor)
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          echo "Signing image: ${{ env.ECR_IMAGE }}@${DIGEST}"
+          cosign sign --yes "${{ env.ECR_IMAGE }}@${DIGEST}"
+          echo "✅ Image signed successfully"
+
+      # ── 5. Generate SBOM and attach as attestation ──
+      # We generate a fresh SBOM on the CI side from the registry image (by
+      # digest) rather than transferring the build-box SBOM. This way the SBOM
+      # is verifiably generated from the exact published artifact, not a local
+      # copy that could have diverged.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM and attach as attestation
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          echo "Generating SBOM for ${{ env.ECR_IMAGE }}@${DIGEST}"
+          syft "${{ env.ECR_IMAGE }}@${DIGEST}" -o spdx-json=/tmp/sbom.spdx.json
+
+          echo "Attaching SBOM as cosign attestation"
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate /tmp/sbom.spdx.json \
+            "${{ env.ECR_IMAGE }}@${DIGEST}"
+          echo "✅ SBOM attestation attached"
+
+      # ── 6. Generate and attach SLSA build provenance ──
+      - name: Attach SLSA build provenance
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          # Build a minimal SLSA v1.0 provenance predicate.
+          # In a full L3 setup this would come from the build platform itself;
+          # for the first slice we generate it here with the facts we know.
+          cat > /tmp/slsa-provenance.json <<PROVENANCE
+          {
+            "buildDefinition": {
+              "buildType": "https://slsa.dev/container-based-build/v0.1?draft",
+              "externalParameters": {
+                "source": {
+                  "uri": "git+https://github.com/${{ github.repository }}@refs/heads/${{ github.ref_name }}",
+                  "digest": {
+                    "sha1": "${{ github.sha }}"
+                  }
+                },
+                "builderImage": {
+                  "uri": "${{ env.ECR_IMAGE }}",
+                  "digest": {
+                    "sha256": "$(echo '${{ inputs.image_digest }}' | sed 's/sha256://')"
+                  }
+                }
+              },
+              "internalParameters": {
+                "buildPlatform": "dedicated-ec2-arm64",
+                "signingPlatform": "github-actions-oidc"
+              }
+            },
+            "runDetails": {
+              "builder": {
+                "id": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              },
+              "metadata": {
+                "invocationId": "${{ github.run_id }}/${{ github.run_attempt }}",
+                "startedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              }
+            }
+          }
+          PROVENANCE
+
+          echo "Attaching SLSA provenance attestation"
+          cosign attest --yes \
+            --type slsaprovenance1 \
+            --predicate /tmp/slsa-provenance.json \
+            "${{ env.ECR_IMAGE }}@${DIGEST}"
+          echo "✅ SLSA provenance attestation attached"
+
+      # ── 7. Verify the signature (smoke test) ──
+      - name: Verify signature
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          echo "Verifying signature on ${{ env.ECR_IMAGE }}@${DIGEST}"
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ env.ECR_IMAGE }}@${DIGEST}"
+          echo "✅ Signature verification passed"
+
+      # ── 8. Verify the SBOM attestation (smoke test) ──
+      - name: Verify SBOM attestation
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          echo "Verifying SBOM attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
+          cosign verify-attestation \
+            --type spdxjson \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ env.ECR_IMAGE }}@${DIGEST}"
+          echo "✅ SBOM attestation verification passed"
+
+      # ── 9. Summary ──
+      - name: Summary
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+          TAG: ${{ inputs.image_tag }}
+        run: |
+          echo "## Image Forge: Sign & Attest Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | \`${{ env.ECR_IMAGE }}:${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Digest** | \`${DIGEST}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Signed** | ✅ Keyless (Fulcio + Rekor) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SBOM** | ✅ SPDX JSON attestation attached |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SLSA Provenance** | ✅ Attestation attached |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Signing Identity** | GitHub Actions OIDC (\`${{ github.repository }}\`) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Transparency Log** | Public Rekor |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Verify command** | \`cosign verify --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.*' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' ${{ env.ECR_IMAGE }}@${DIGEST}\` |" >> $GITHUB_STEP_SUMMARY

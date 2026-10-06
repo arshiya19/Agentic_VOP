@@ -22,6 +22,7 @@ on:
       - "infra/**"
       - "!infra/vuln-labs/**"
       - "!infra/app-hosting/**"
+      - "!infra/image-forge/**"
 
 permissions:
   id-token: write
