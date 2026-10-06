@@ -21,10 +21,10 @@
 # =============================================================================
 
 # --- Stage 1: build a fully static binary --------------------------------
-# golang:1.23-alpine pinned by DIGEST (linux/arm64/v8), not a floating tag,
+# golang:1.25-alpine pinned by DIGEST (linux/arm64/v8), not a floating tag,
 # so the build input is reproducible (a supply-chain requirement). Re-resolve
-# when bumping the base: docker buildx imagetools inspect golang:1.23-alpine
-FROM golang:1.23-alpine@sha256:56e44a486dc12270a471259239c0005ae492be2f078c4f54567c0e3159e23e4b AS build
+# when bumping the base: docker buildx imagetools inspect golang:1.25-alpine
+FROM golang:1.25-alpine@sha256:ac555adf0aa5588ce5c707a2534b7d2d6f9f3938faa3560ab12eedeb6a18541f AS build
 
 WORKDIR /src
 
