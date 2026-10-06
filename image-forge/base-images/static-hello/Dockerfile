@@ -21,12 +21,10 @@
 # =============================================================================
 
 # --- Stage 1: build a fully static binary --------------------------------
-# Pin golang by digest. The digest below is a PLACEHOLDER — resolve the real
-# one on the build host before first use, e.g.:
-#   docker buildx imagetools inspect golang:1.23-alpine
-# then replace @sha256:... Keeping it pinned (not `golang:1.23-alpine`) is a
-# supply-chain requirement, so this is intentionally not a floating tag.
-FROM golang:1.23-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS build
+# golang:1.23-alpine pinned by DIGEST (linux/arm64/v8), not a floating tag,
+# so the build input is reproducible (a supply-chain requirement). Re-resolve
+# when bumping the base: docker buildx imagetools inspect golang:1.23-alpine
+FROM golang:1.23-alpine@sha256:56e44a486dc12270a471259239c0005ae492be2f078c4f54567c0e3159e23e4b AS build
 
 WORKDIR /src
 
@@ -45,10 +43,9 @@ RUN go build \
 
 # --- Stage 2: distroless-style final image -------------------------------
 # gcr.io/distroless/static carries no shell and no package manager — minimal
-# attack surface. Pin by DIGEST (placeholder below — resolve before use):
-#   docker buildx imagetools inspect gcr.io/distroless/static:nonroot
-# `nonroot` variant runs as uid 65532 by default.
-FROM gcr.io/distroless/static:nonroot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+# attack surface. Pinned by DIGEST (linux/arm64/v8); `nonroot` variant runs as
+# uid 65532. Re-resolve when bumping: docker buildx imagetools inspect gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:dd804b6c91a33a478f9a56e5033f463007696c2934a73303eb186767226bc33d
 
 # OCI image labels — provenance-friendly metadata. source/revision are build
 # args so CI can stamp the exact commit without editing the Dockerfile.
