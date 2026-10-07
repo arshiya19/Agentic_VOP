@@ -14,8 +14,12 @@ public_subnet_cidr = "10.1.1.0/24"
 instance_type = "t4g.medium"
 volume_size   = 40
 
-# Test publish target. IMMUTABLE tags model a real supply chain; flip to
-# MUTABLE only if rapid re-tagging during manual iteration gets in the way.
+# Test publish target. MUTABLE because cosign stores signatures/attestations
+# as derived OCI tags (sha256-<digest>.sig / .att) and must be able to write
+# (and re-write on re-sign) them — IMMUTABLE blocks that with TAG_INVALID.
+# Integrity still comes from signing the immutable DIGEST + the Rekor log, not
+# from ECR tag immutability. Production milestone: immutable image tags + a
+# mutability EXCLUSION for the *.sig/*.att cosign tags.
 ecr_repository_name      = "sisyfix-hardened-base-test"
-ecr_image_tag_mutability = "IMMUTABLE"
+ecr_image_tag_mutability = "MUTABLE"
 ecr_untagged_expire_days = 7
