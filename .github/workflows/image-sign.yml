@@ -184,15 +184,28 @@ jobs:
           echo "✅ SLSA provenance attestation attached"
 
       # ── 7. Verify the signature (smoke test) ──
+      # NOTE: cosign verify / verify-attestation stream the verified payload(s)
+      # to stdout AFTER printing the verification result. In this runner that
+      # stdout stream can block and hang the step even though verification
+      # already succeeded. We redirect stdout to a file so the stream drains
+      # and cosign exits; the exit CODE (pass/fail) is preserved, so a real
+      # verification failure still fails the step. A `timeout` guards against
+      # any future hang instead of letting it run for minutes.
       - name: Verify signature
         env:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying signature on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          cosign verify \
+          if ! timeout 120 cosign verify \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-sig.out 2>&1; then
+            echo "❌ Signature verification FAILED (or timed out). Output:"
+            cat /tmp/verify-sig.out
+            exit 1
+          fi
+          # Show only the human-readable verification header, not the streamed payload.
+          grep -A20 "verified using trusted certificate" /tmp/verify-sig.out || true
           echo "✅ Signature verification passed"
 
       # ── 8a. Verify the SLSA provenance attestation (smoke test) ──
@@ -201,11 +214,16 @@ jobs:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying SLSA provenance attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          cosign verify-attestation \
+          if ! timeout 120 cosign verify-attestation \
             --type slsaprovenance1 \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-slsa.out 2>&1; then
+            echo "❌ SLSA provenance verification FAILED (or timed out). Output:"
+            cat /tmp/verify-slsa.out
+            exit 1
+          fi
+          grep -A20 "verified using trusted certificate" /tmp/verify-slsa.out || true
           echo "✅ SLSA provenance attestation verification passed"
 
       # ── 8b. Verify the SBOM attestation (smoke test) ──
@@ -214,11 +232,16 @@ jobs:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying SBOM attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          cosign verify-attestation \
+          if ! timeout 120 cosign verify-attestation \
             --type spdxjson \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-sbom.out 2>&1; then
+            echo "❌ SBOM attestation verification FAILED (or timed out). Output:"
+            cat /tmp/verify-sbom.out
+            exit 1
+          fi
+          grep -A20 "verified using trusted certificate" /tmp/verify-sbom.out || true
           echo "✅ SBOM attestation verification passed"
 
       # ── 9. Summary ──
