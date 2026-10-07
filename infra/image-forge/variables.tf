@@ -55,9 +55,9 @@ variable "ecr_repository_name" {
 }
 
 variable "ecr_image_tag_mutability" {
-  description = "ECR tag mutability. IMMUTABLE is preferred for a supply chain (tags can't be silently overwritten), but MUTABLE is convenient while iterating on the test slice."
+  description = "ECR tag mutability. MUTABLE is required when cosign stores signatures/attestations as derived OCI tags (sha256-<digest>.sig/.att) in the same repo — IMMUTABLE blocks re-signing with TAG_INVALID. Integrity comes from signing the immutable digest + Rekor, not from ECR tag immutability. Production target: immutable image tags with a mutability exclusion for *.sig/*.att."
   type        = string
-  default     = "IMMUTABLE"
+  default     = "MUTABLE"
 
   validation {
     condition     = contains(["MUTABLE", "IMMUTABLE"], var.ecr_image_tag_mutability)
@@ -69,6 +69,12 @@ variable "ecr_untagged_expire_days" {
   description = "Expire untagged images in the test repo after this many days (keeps throwaway build artifacts from piling up)"
   type        = number
   default     = 7
+}
+
+variable "sbom_expire_days" {
+  description = "Expire SBOM artifacts (and noncurrent versions) in the SBOM bucket after this many days."
+  type        = number
+  default     = 30
 }
 
 # --- Supply-chain toolchain versions (installed by user-data) ---
