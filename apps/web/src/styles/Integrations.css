@@ -760,63 +760,6 @@
   cursor: not-allowed;
 }
 
-/* Run Demo Pipeline — blue accent to distinguish from Fetch findings */
-.scanner-runner-btn-demo {
-  background: #3B82F6;
-  color: #ffffff;
-}
-.scanner-runner-btn-demo:hover:not(:disabled) {
-  background: #2563EB;
-}
-.scanner-runner-btn-demo:disabled {
-  background: #1E293B;
-  color: #64748B;
-}
-
-/* Run HITL Pipeline — purple accent for the human-approval variant */
-.scanner-runner-btn-hitl {
-  background: #A855F7;
-  color: #ffffff;
-}
-.scanner-runner-btn-hitl:hover:not(:disabled) {
-  background: #9333EA;
-}
-.scanner-runner-btn-hitl:disabled {
-  background: #1E293B;
-  color: #64748B;
-}
-
-/* Run HITL Review — teal accent for the post-fix review variant.
- * Distinct from HITL v1's purple so they read as different products
- * at a glance. Teal reads as "code review / diff" more than purple. */
-.scanner-runner-btn-hitl-review {
-  background: #14B8A6;
-  color: #ffffff;
-}
-.scanner-runner-btn-hitl-review:hover:not(:disabled) {
-  background: #0F9488;
-}
-.scanner-runner-btn-hitl-review:disabled {
-  background: #1E293B;
-  color: #64748B;
-}
-
-/* Run HITL Git Review — deep indigo for the Git-native (Phase B) variant.
- * Third distinct hue after purple (v1) + teal (sandbox review). Indigo
- * carries the "GitHub / open source" association without being the
- * literal GitHub octocat color. */
-.scanner-runner-btn-hitl-git-review {
-  background: #4338CA;
-  color: #ffffff;
-}
-.scanner-runner-btn-hitl-git-review:hover:not(:disabled) {
-  background: #3730A3;
-}
-.scanner-runner-btn-hitl-git-review:disabled {
-  background: #1E293B;
-  color: #64748B;
-}
-
 .scanner-runner-result {
   font-size: 13px;
   padding: 8px 12px;

@@ -424,68 +424,20 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
         or raw.get("path")  # Semgrep
         or (raw.get("location") or {}).get("filename")  # tfsec
         or (raw.get("location") or {}).get("path")
-        or raw.get("Target")  # Trivy container/fs target (original casing)
-        or raw.get("target")  # Trivy FS (scan-server normalizes to lowercase)
+        or raw.get("Target")  # Trivy container/fs target
         or identity.get("file")  # canonical fallback
     )
-
-    # Container-image scanners: raw.Target / raw.target is an IMAGE REFERENCE
-    # (e.g. "vuln-lab-image:latest (ubuntu 20.04)"), NOT a file path. If left
-    # in place, the prefix resolution below mangles it into a fake path like
-    # "/opt/vuln-labs/cspm-lab/vuln-lab-image:latest (ubuntu 20.04)" which
-    # contaminates SA-3's output. Clear it — the real Dockerfile path comes
-    # from connection_registry.metadata (resolved by the orchestrator and
-    # injected via execution_context).
-    source_lower = (issue.get("source") or "").lower()
-    if (
-        "trivy-image" in source_lower
-        or "snyk-container" in source_lower
-        or "grype-image" in source_lower
-    ):
-        file_path = None
 
     # Translate raw-finding path to env2's real filesystem layout, if a
     # prefix is configured. Scanners often emit paths relative to their
     # scan root (Checkov shows `/main.tf` when scanning `/opt/lab/`), so
     # env2's actual path is `<prefix>/main.tf`. Without translation, SA4's
     # pre-flight file-existence check fails on the raw path.
-    #
-    # Two cases:
-    #   a) Absolute path starting with "/" — may need prefix if it's root-relative
-    #      (e.g., Checkov emits `/main.tf` meaning `<scan_root>/main.tf`)
-    #   b) Relative path (no leading "/") — SCA scanners like TrivyFs emit just
-    #      the filename (e.g., `requirements.txt`). Need to resolve to full path
-    #      using the scanner's known scan directory from connection_registry or
-    #      a source-based convention.
-    if file_path and not file_path.startswith("/"):
-        # Relative path — resolve to absolute using source-based scan directory.
-        # SCA/SAST scanners scan /opt/vuln-labs/appsec-lab/ on env2.
-        # IaC scanners scan /opt/vuln-labs/cspm-lab/ on env2.
-        src_lower = (issue.get("source") or "").lower()
-        if (
-            "trivy-fs" in src_lower
-            or "semgrep" in src_lower
-            or "bandit" in src_lower
-            or "snyk-appsec" in src_lower
-        ):
-            file_path = f"/opt/vuln-labs/appsec-lab/{file_path}"
-        elif settings.fixer_env2_path_prefix:
-            file_path = f"{settings.fixer_env2_path_prefix.rstrip('/')}/{file_path}"
-        # else: leave as-is (relative) — SA-3 and SA-4 will handle or fail gracefully
-
     if file_path and file_path.startswith("/"):
         prefix = (settings.fixer_env2_path_prefix or "").rstrip("/")
         # Only prepend if the file_path isn't already inside the prefix
         # (idempotent — safe if raw_finding already emits full env2 paths).
-        # Also skip if the path is already a full absolute path under a known
-        # vuln-labs directory (SAST/SCA scanners emit full paths like
-        # /opt/vuln-labs/appsec-lab/app.py that should NOT be prefixed).
-        prefix_base = prefix.rsplit("/", 1)[0] if prefix else ""  # e.g. /opt/vuln-labs
-        if (
-            prefix
-            and not file_path.startswith(prefix + "/")
-            and not (prefix_base and file_path.startswith(prefix_base + "/"))
-        ):
+        if prefix and not file_path.startswith(prefix + "/"):
             file_path = prefix + file_path
 
     # working_directory — parent of file_path
@@ -545,25 +497,11 @@ def _extract_iac_context(issue: dict, raw: dict | None) -> dict:
         if any(file_path.endswith(ext) for ext in iac_extensions):
             scanner_type = "iac"
 
-    # file_line_range — scanner-provided precise line range (checkov: [start, end],
-    # semgrep: {start: {line}, end: {line}}, bandit: line_number). Lets SA-3 target
-    # the exact lines instead of the whole file when it composes edits.
-    file_line_range = (
-        raw.get("file_line_range")  # Checkov: [117, 136]
-        or (
-            [raw["start"]["line"], raw["end"]["line"]]  # Semgrep
-            if isinstance(raw.get("start"), dict) and isinstance(raw.get("end"), dict)
-            else None
-        )
-        or ([raw["line_number"], raw["line_number"]] if raw.get("line_number") else None)  # Bandit
-    )
-
     return {
         "file_path": file_path,
         "working_directory": working_directory,
         "resource_name": resource_name,
         "scanner_type": scanner_type,
-        "file_line_range": file_line_range,
     }
 
 
@@ -623,81 +561,6 @@ def plan_remediation(
         )
 
     asset = _load_asset(sb, issue)
-
-    # --- Try KB DIRECT REPLAY first (fastest path — no web search) ---
-    # If the knowledge base has a verified successful recipe for this exact
-    # check_id + resource_type, adapt it via a single constrained LLM call
-    # and return immediately. This eliminates non-determinism for known fixes.
-    # Falls through to agentic/hybrid if no candidate or adaptation fails.
-    kb_replay_output = None
-    kb_replay_id = None
-    try:
-        from ..trace import emit_trace  # noqa: PLC0415
-        from .kb_replay import try_kb_replay  # noqa: PLC0415
-
-        kb_replay_output, kb_replay_id = try_kb_replay(
-            issue=issue,
-            family=family,
-            raw=raw,
-            sb=sb,
-            run_id=run_id,
-            emit_fn=emit_trace,
-        )
-    except Exception as e:  # noqa: BLE001
-        from ..trace import emit_trace  # noqa: PLC0415
-
-        emit_trace(
-            run_id,
-            "sub-agent-3",
-            "ERROR",
-            f"KB replay module raised: {type(e).__name__}: {str(e)[:200]} "
-            "— continuing with agentic/hybrid path.",
-        )
-
-    if kb_replay_output is not None:
-        # --- KB REPLAY SUCCESS — skip agentic + hybrid entirely ---
-        from ..trace import emit_trace  # noqa: PLC0415
-
-        enriched_pathways: list[RemediationPathway] = []
-        for pathway in kb_replay_output.pathways:
-            # Use the KB recipe's confidence (already proven) — attach validation
-            # metadata indicating this came from the knowledge base.
-            pathway.validation_metadata = ValidationMetadata(
-                status="validated",
-                sources=["Knowledge Base (proven fix from prior successful run)"],
-                timestamp=datetime.now(UTC).isoformat(),
-                confidence="high",
-            )
-            # Carry forward the KB recipe's confidence score
-            pathway.confidence_score = 95  # High — proven recipe
-            pathway.confidence_components = {
-                "source": "kb_replay",
-                "kb_id": kb_replay_id,
-                "reason": "Proven fix replayed from knowledge base",
-            }
-            enriched_pathways.append(pathway)
-
-        recommended_idx = 0
-        recommended_score = enriched_pathways[0].confidence_score or 95
-
-        emit_trace(
-            run_id,
-            "sub-agent-3",
-            "MESSAGE",
-            f"📚 KB replay path complete — returning package from KB #{kb_replay_id} "
-            f"(confidence={recommended_score}, family={family})",
-        )
-
-        return RemediationPackage(
-            issue_id=int(issue["id"]),
-            family=family,
-            finding=kb_replay_output.finding,
-            root_cause=kb_replay_output.root_cause,
-            impact=kb_replay_output.impact,
-            pathways=enriched_pathways,
-            recommended_pathway_index=recommended_idx,
-            approval_required=_derive_approval(recommended_score, issue.get("priority")),
-        )
 
     # --- Try the AGENTIC path first (Phase-2 default when Tavily key set) ---
     # Agent researches from live authoritative sources (AWS/CIS/NVD/CISA docs).
@@ -773,29 +636,6 @@ def plan_remediation(
             "pattern": _pattern_payload(pattern),
         }
 
-        # --- Knowledge Base injection (few-shot from proven fixes) ---
-        kb_context = ""
-        try:
-            from .kb_retrieval import retrieve_examples, format_examples_for_prompt  # noqa: PLC0415
-
-            check_id = (
-                issue.get("source_vuln_id")
-                or issue.get("cve_id")
-                or (issue.get("source_raw") or {}).get("check_id")
-            )
-            kb_examples = retrieve_examples(sb, check_id=check_id, family=family)
-            if kb_examples:
-                kb_context = format_examples_for_prompt(kb_examples)
-                emit_trace(
-                    run_id,
-                    "sub-agent-3",
-                    "MESSAGE",
-                    f"Injected {len(kb_examples)} proven fix(es) from knowledge base "
-                    f"(checks: {[e.check_id for e in kb_examples]})",
-                )
-        except Exception:  # noqa: BLE001, S110
-            pass  # KB retrieval is best-effort — never blocks planner
-
         base_temp = float(params.get("temperature", 0.3))
         max_tokens = int(params.get("max_tokens", 2500))
         primary_model = prompt_row["model"]
@@ -807,7 +647,6 @@ def plan_remediation(
             schema=LLMRemediationOutput,
             messages=[
                 SystemMessage(content=prompt_row["prompt_text"]),
-                *([HumanMessage(content=kb_context)] if kb_context else []),
                 HumanMessage(content=str(payload)),
             ],
             attempts=[

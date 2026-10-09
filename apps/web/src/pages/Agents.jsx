@@ -65,32 +65,11 @@ export default function Agents() {
   const [selectedTrace, setSelectedTrace] = useState(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [modelConfigOpen, setModelConfigOpen] = useState(false)
-  // env2 reset state — buttons next to Real/Demo toggle
-  // `resettingLabel` holds the label of the button currently running (e.g.
-  // 'CSPM'). Only that button shows the spinner; the others stay disabled
-  // but keep their normal label so the UI is clear about which reset is in
-  // flight. null when no reset is running.
-  const [resettingLabel, setResettingLabel] = useState(null)
-  const resetting = resettingLabel !== null
+  const [showLogs, setShowLogs] = useState(false)
+  // env2 reset state — button next to Real/Demo toggle
+  const [resetting, setResetting] = useState(false)
   const [resetToast, setResetToast] = useState(null)  // { kind: 'success'|'error', message: string }
-  // env2 busy state — poll /admin/env2/status so reset buttons can disable
-  // themselves when a fix_run is active (would race with SSM). Poll cadence
-  // is 10s so the UI updates within one iteration of the fix loop.
-  const [env2Busy, setEnv2Busy] = useState(null)  // null (unknown) | Env2StatusResponse
-  useEffect(() => {
-    let mounted = true
-    const poll = async () => {
-      try {
-        const r = await fetch(`${API_URL}/admin/env2/status`)
-        if (!mounted || !r.ok) return
-        const d = await r.json()
-        if (mounted) setEnv2Busy(d)
-      } catch { /* transient network error */ }
-    }
-    poll()
-    const interval = setInterval(poll, 10000)
-    return () => { mounted = false; clearInterval(interval) }
-  }, [])
+  const [_dataLoaded, _setDataLoaded] = useState(false)  // Track if initial data has been fetched
   // Contextual switch: 'real' (supabase realtime on public.*) or 'demo' (poll
   // backend demo endpoints). Set by Integrations page's trigger buttons; can
   // be overridden manually via the pill at the top of the page.
@@ -218,110 +197,42 @@ export default function Agents() {
     window.dispatchEvent(new Event('pipelineModeChanged'))
   }
 
-  // Shared runner for all 4 lab-reset buttons. `resetting` is a single flag
-  // that blocks ALL reset buttons while any one is running — env2 is a shared
-  // sandbox so overlapping resets would race on the same host.
-  const runReset = async ({ label, endpoint, confirmMsg, successFmt }) => {
+  const handleResetEnv2 = async () => {
     if (resetting) return
-    if (confirmMsg && !window.confirm(confirmMsg)) return
-    setResettingLabel(label)
+    const ok = window.confirm(
+      "Reset env2 to the vulnerable baseline?\n\n" +
+      "This will:\n" +
+      "  • terraform destroy the current lab resources\n" +
+      "  • wipe S3 terraform state + DynamoDB lock\n" +
+      "  • restore main.tf from main.tf.original\n" +
+      "  • terraform apply the fresh vulnerable baseline\n\n" +
+      "Takes ~60 seconds. Do not trigger a demo run during this."
+    )
+    if (!ok) return
+    setResetting(true)
     setResetToast(null)
-    // Hard-cap the request so a stuck backend / dead network can never
-    // leave the button spinning forever. 10 min covers every reset flow
-    // (longest is Images at ~3-5 min) with plenty of buffer.
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000)
     try {
-      const res = await fetch(`${API_URL}${endpoint}`, {
-        method: 'POST',
-        signal: controller.signal,
-      })
+      const res = await fetch(`${API_URL}/admin/env2/reset`, { method: 'POST' })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
-        const detail = typeof body?.detail === 'string'
-          ? body.detail
-          : JSON.stringify(body?.detail || body)
-        setResetToast({ kind: 'error', message: `${label} reset failed: ${detail.slice(0, 300)}` })
+        const detail = typeof body?.detail === 'string' ? body.detail : JSON.stringify(body?.detail || body)
+        setResetToast({ kind: 'error', message: `Reset failed: ${detail.slice(0, 300)}` })
       } else {
+        const bits = []
+        if (body.checkov_failed != null) bits.push(`${body.checkov_failed} checkov failures`)
+        if (body.new_sg_id) bits.push(`new SG ${body.new_sg_id}`)
+        if (body.duration_s != null) bits.push(`${body.duration_s}s`)
         setResetToast({
           kind: 'success',
-          message: successFmt ? successFmt(body) : `✅ ${label} reset — ready`,
+          message: `✅ env2 cleaned — ${bits.join(' · ') || 'ready'}`,
         })
       }
     } catch (e) {
-      const msg = e.name === 'AbortError'
-        ? `${label} reset timed out after 10 min — backend unresponsive. Check the server logs.`
-        : `${label} reset request failed: ${e.message || e}`
-      setResetToast({ kind: 'error', message: msg })
+      setResetToast({ kind: 'error', message: `Reset request failed: ${e.message || e}` })
     } finally {
-      clearTimeout(timeoutId)
-      setResettingLabel(null)
+      setResetting(false)
     }
   }
-
-  const handleResetCSPM = () => runReset({
-    label: 'CSPM',
-    endpoint: '/admin/env2/reset',
-    confirmMsg:
-      'Reset CSPM lab (checkov-ec2) to the vulnerable baseline?\n\n' +
-      'This will:\n' +
-      '  • terraform destroy the current lab resources\n' +
-      '  • wipe S3 terraform state + DynamoDB lock\n' +
-      '  • restore main.tf from the pristine template\n' +
-      '  • terraform apply the fresh vulnerable baseline\n\n' +
-      'Takes ~60 seconds. Do not trigger a demo run during this.',
-    successFmt: (body) => {
-      const bits = []
-      if (body.checkov_failed != null) bits.push(`${body.checkov_failed} checkov failures`)
-      if (body.new_sg_id) bits.push(`new SG ${body.new_sg_id}`)
-      if (body.duration_s != null) bits.push(`${body.duration_s}s`)
-      return `✅ CSPM reset — ${bits.join(' · ') || 'ready'}`
-    },
-  })
-
-  const handleResetImages = () => runReset({
-    label: 'Images',
-    endpoint: '/admin/env2/reset-images',
-    confirmMsg:
-      'Reset all 3 image labs (infra + java + python) to their vulnerable baseline?\n\n' +
-      'Covers scanners: trivy-image-ec2, trivy-image-java-ec2, trivy-image-python-ec2.\n\n' +
-      'Rebuilds each Docker image with --no-cache. Takes ~2-3 minutes.\n' +
-      'Do not trigger a demo run during this.',
-    successFmt: (body) => {
-      const imgs = (body.images_reset || []).length
-      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
-      return `✅ Images reset — ${imgs} image(s)${secs}`
-    },
-  })
-
-  const handleResetAppSec = () => runReset({
-    label: 'AppSec',
-    endpoint: '/admin/env2/reset-appsec',
-    confirmMsg:
-      'Reset AppSec lab source files to their vulnerable baseline?\n\n' +
-      'Covers scanners: semgrep-ec2 (SAST) and trivy-fs-ec2 (SCA).\n' +
-      'Restores 7 files under /opt/vuln-labs/appsec-lab/. Takes ~10 seconds.',
-    successFmt: (body) => {
-      const n = (body.files_restored || []).length
-      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
-      return `✅ AppSec reset — ${n} file(s)${secs}`
-    },
-  })
-
-  const handleResetServerless = () => runReset({
-    label: 'Serverless',
-    endpoint: '/admin/env2/reset-serverless',
-    confirmMsg:
-      'Reset Serverless lab (lambda_function.py + main.tf) to vulnerable baseline?\n\n' +
-      'Covers scanner: serverless-ec2.\n' +
-      'Restores /opt/vuln-labs/serverless-lab/{lambda_function.py, main.tf}. Takes ~10 seconds.\n' +
-      'Note: file-only reset — deployed AWS state is reconciled by the next fix run\'s terraform apply.',
-    successFmt: (body) => {
-      const n = (body.files_restored || []).length
-      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
-      return `✅ Serverless reset — ${n} file(s)${secs}`
-    },
-  })
 
   // Auto-dismiss the reset toast after 8s so it doesn't cover the trace
   useEffect(() => {
@@ -329,6 +240,40 @@ export default function Agents() {
     const t = setTimeout(() => setResetToast(null), 8000)
     return () => clearTimeout(t)
   }, [resetToast])
+
+  // ----- Stage mapping and current stage detection -----
+  const STAGES = [
+    { id: 'connector', name: 'Smart Connector', agent: 'sub-agent-1' },
+    { id: 'enrichment', name: 'Enrichment Specialist', agent: 'sub-agent-2' },
+    { id: 'planning', name: 'Remediation Planner', agent: 'sub-agent-3' },
+    { id: 'fixing', name: 'Fixer', agent: 'sub-agent-4' },
+  ]
+
+  const getCurrentStage = () => {
+    const activeRunIds = new Set(
+      runs.filter((r) => r.status === 'running').map((r) => r.run_id)
+    )
+    
+    if (activeRunIds.size === 0) return null
+
+    // Find the most recent event from any agent to determine current stage
+    for (let i = 0; i < traceEvents.length; i++) {
+      const event = traceEvents[i]
+      if (activeRunIds.has(event.runId)) {
+        // Match agent to stage
+        for (let s = STAGES.length - 1; s >= 0; s--) {
+          const stage = STAGES[s]
+          if (event.from === stage.agent || event.from === 'master') {
+            return stage.id
+          }
+        }
+        break
+      }
+    }
+    return null
+  }
+
+  const currentStage = useMemo(() => getCurrentStage(), [traceEvents, runs])
 
   // ----- Derived: agents (master + 4 sub-agents with live status) -----
   // "working" = the agent has emitted at least one trace event for an
@@ -428,15 +373,9 @@ export default function Agents() {
           : `${(avgDurationMs / 1000).toFixed(0)}s`
         : '—'
 
-    const errorEventsToday = traceEvents.filter(
+    const _errorEventsToday = traceEvents.filter(
       (e) => e.type === 'error' && new Date(e.timestamp) >= today
     )
-    const lastErrorAt =
-      errorEventsToday.length > 0
-        ? new Date(
-            errorEventsToday[errorEventsToday.length - 1].timestamp
-          ).toLocaleTimeString()
-        : '—'
 
     return {
       activeAgents: activeRuns > 0 ? 5 : 0,   // 1 master + 4 sub-agents
@@ -446,8 +385,6 @@ export default function Agents() {
       tasksQueued: queuedRuns,
       completedToday: completedTodayRuns.length,
       avgDuration,
-      errorsToday: errorEventsToday.length,
-      lastErrorAt,
     }
   }, [runs, traceEvents])
 
@@ -510,43 +447,105 @@ export default function Agents() {
     // Wire to your backend when ready
   }
 
+  // ProgressFlow component
+  const ProgressFlow = () => {
+    const isRunning = runs.some((r) => r.status === 'running')
+    // Only show completed state if the MOST RECENT run is completed (and nothing is running)
+    const mostRecentRun = runs.length > 0 ? runs[0] : null
+    const hasCompletedRun = !isRunning && mostRecentRun && mostRecentRun.status === 'completed'
+
+    return (
+      <div className="progress-flow-container">
+        <div className="progress-flow-header">
+    
+          <p className="progress-flow-description">Agent pipeline execution</p>
+        </div>
+        {!isRunning && currentStage === null ? (
+          <div className="progress-flow-empty">
+            <svg viewBox="0 0 64 64" className="empty-icon">
+              <circle cx="32" cy="32" r="30" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.3" />
+              <path d="M32 16v32M16 32h32" stroke="currentColor" strokeWidth="2" opacity="0.3" strokeLinecap="round" />
+            </svg>
+            <p className="empty-title">No Active Run</p>
+            <p className="empty-description">Start a pipeline run to see progress</p>
+          </div>
+        ) : (
+          <div className="progress-flow">
+            {STAGES.map((stage, idx) => {
+              // When run completes, show all stages as completed
+              const isCompleted = hasCompletedRun || (
+                currentStage &&
+                STAGES.findIndex((s) => s.id === currentStage) > idx
+              )
+              const isCurrent = currentStage === stage.id && isRunning
+              const isUpcoming =
+                currentStage &&
+                STAGES.findIndex((s) => s.id === currentStage) < idx &&
+                !hasCompletedRun
+
+              return (
+                <div key={stage.id} className="progress-stage-vertical-wrapper">
+                  <div
+                    className={`progress-stage ${isCurrent ? 'current' : ''} ${
+                      isCompleted ? 'completed' : ''
+                    } ${isUpcoming ? 'upcoming' : ''}`}
+                  >
+                    <div className="stage-indicator">
+                      {isCompleted ? (
+                        <svg className="stage-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                      ) : isCurrent ? (
+                        <>
+                          <span className="stage-dot"></span>
+                          <span className="stage-pulse"></span>
+                        </>
+                      ) : (
+                        <span className="stage-number">{idx + 1}</span>
+                      )}
+                    </div>
+                    <div className="stage-info">
+                      <div className="stage-name">{stage.name}</div>
+                      <div className="stage-details">
+                        {isCurrent && isRunning && (
+                          <span className="stage-badge current-badge">
+                            <span className="badge-dot"></span>
+                            Processing
+                          </span>
+                        )}
+                        {isCompleted && (
+                          <span className="stage-badge completed-badge">
+                            <span className="badge-dot"></span>
+                            {hasCompletedRun && !isRunning ? 'Completed' : 'Done'}
+                          </span>
+                        )}
+                        {isUpcoming && (
+                          <span className="stage-badge upcoming-badge">
+                            <span className="badge-dot"></span>
+                            Queued
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  {idx < STAGES.length - 1 && (
+                    <div className={`progress-connector-vertical ${isCompleted || isCurrent ? 'active' : ''} ${hasCompletedRun ? 'completed' : ''}`}>
+                      <div className="vertical-arrow">↓</div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const handleStopActiveRun = async () => {
     const activeRun = runs.find(r => r.status === 'running' || r.status === 'queued')
     if (!activeRun) return
 
-    // Demo runs use a different endpoint (writes to demo.agent_runs) and
-    // skip the issue-delete step (demo issues are transient per run).
-    if (pipelineMode === 'demo') {
-      const ok = window.confirm(
-        `Stop the running demo pipeline?\n\n` +
-        `This will:\n` +
-        `  • Set cancellation_requested on the demo run\n` +
-        `  • SA-4 watchdog will abort in-flight fix within seconds\n` +
-        `  • Env2 lease releases so the reset buttons unlock\n\n` +
-        `Continue?`
-      )
-      if (!ok) return
-      try {
-        const res = await fetch(`${API_URL}/agents/demo/runs/${activeRun.run_id}/cancel`, {
-          method: 'POST',
-        })
-        if (!res.ok) {
-          alert(`Failed to stop demo run: ${res.status} — ${await res.text()}`)
-          return
-        }
-        const data = await res.json()
-        alert(
-          `Stopped demo run ${data.run_id.slice(0, 8)}…\n\n` +
-          `Previous status: ${data.previous_status}\n` +
-          `Active fix_runs flagged: ${data.active_fix_runs_flagged}`
-        )
-      } catch (err) {
-        alert(`Network error stopping demo run: ${err.message || err}`)
-      }
-      return
-    }
-
-    // Real-mode stop — original behavior (cleans issues + resets watermark).
     const scanners = (activeRun.targets?.scanners || []).join(', ') || 'this scanner'
     const ok = window.confirm(
       `Stop the running fetch?\n\n` +
@@ -558,6 +557,7 @@ export default function Agents() {
     )
     if (!ok) return
 
+    const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
     try {
       const res = await fetch(`${API_URL}/agents/runs/${activeRun.run_id}/cancel`, {
         method: 'POST',
@@ -579,41 +579,6 @@ export default function Agents() {
     }
   }
 
-  const handleForceReleaseEnv2 = async () => {
-    const ok = window.confirm(
-      `Force-release env2?\n\n` +
-      `This will:\n` +
-      `  • Close every active fix_run (marks as failed)\n` +
-      `  • Cancel every running agent_run on both schemas\n` +
-      `  • Free the env2 lease so you can trigger a fresh reset or pipeline\n\n` +
-      `Use this when a run is stuck or you just want to start over.\n\n` +
-      `Continue?`
-    )
-    if (!ok) return
-    try {
-      const res = await fetch(`${API_URL}/admin/env2/force-release`, { method: 'POST' })
-      if (!res.ok) {
-        alert(`Force-release failed: ${res.status} — ${await res.text()}`)
-        return
-      }
-      const data = await res.json()
-      alert(
-        `✅ env2 released\n\n` +
-        `Fix runs closed: ${data.fix_runs_closed}\n` +
-        `Agent runs closed: ${data.agent_runs_closed}\n` +
-        `Schemas touched: ${data.schemas_touched.join(', ') || 'none'}`
-      )
-      // Immediately re-poll so the reset buttons re-enable without waiting
-      // for the next 10s tick.
-      try {
-        const s = await fetch(`${API_URL}/admin/env2/status`)
-        if (s.ok) setEnv2Busy(await s.json())
-      } catch { /* transient */ }
-    } catch (err) {
-      alert(`Network error: ${err.message || err}`)
-    }
-  }
-
   return (
     <div className="agents-page-wrapper">
       <Topbar />
@@ -629,70 +594,35 @@ export default function Agents() {
               </p>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              {[
-                { label: 'CSPM', onClick: handleResetCSPM, title: 'Destroy + recreate CSPM lab (checkov-ec2) — ~60s' },
-                { label: 'Images', onClick: handleResetImages, title: 'Rebuild all 3 image labs (infra + java + python) — ~2-3 min' },
-                { label: 'AppSec', onClick: handleResetAppSec, title: 'Restore appsec-lab files (semgrep + trivy-fs) — ~10s' },
-                { label: 'Serverless', onClick: handleResetServerless, title: 'Restore serverless-lab files (lambda + main.tf) — ~10s' },
-              ].map(({ label, onClick, title }) => {
-                const isMe = resettingLabel === label
-                const busyBlocked = Boolean(env2Busy?.busy) && !isMe
-                const effectiveTitle = busyBlocked
-                  ? `env2 busy — ${env2Busy.reason}. Cancel the active run first.`
-                  : title
-                const disabled = resetting || busyBlocked
-                return (
-                  <button
-                    key={label}
-                    type="button"
-                    onClick={onClick}
-                    disabled={disabled}
-                    title={effectiveTitle}
-                    style={{
-                      padding: '6px 14px',
-                      borderRadius: 999,
-                      border: '1px solid ' + (disabled && !isMe ? '#334155' : '#f59e0b'),
-                      background: disabled && !isMe ? 'transparent' : 'rgba(245,158,11,0.12)',
-                      color: disabled && !isMe ? '#64748b' : '#f59e0b',
-                      opacity: disabled && !isMe ? 0.55 : 1,
-                      fontSize: 12, fontWeight: 600,
-                      cursor: resetting ? 'wait' : (busyBlocked ? 'not-allowed' : 'pointer'),
-                      display: 'inline-flex', alignItems: 'center', gap: 6,
-                    }}
-                  >
-                    {isMe ? (
-                      <>
-                        <span style={{
-                          width: 10, height: 10, border: '2px solid currentColor',
-                          borderTopColor: 'transparent', borderRadius: '50%',
-                          animation: 'spin 0.8s linear infinite', display: 'inline-block',
-                        }} />
-                        Resetting {label}…
-                      </>
-                    ) : (
-                      <>🧹 Reset {label}</>
-                    )}
-                  </button>
-                )
-              })}
-              {env2Busy?.busy && (
-                <button
-                  type="button"
-                  onClick={handleForceReleaseEnv2}
-                  title={`Force-close all active fix_runs + running agent_runs so env2 unlocks immediately. ${env2Busy.reason}`}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: 999,
-                    border: '1px solid #ef4444',
-                    background: 'rgba(239,68,68,0.12)',
-                    color: '#ef4444',
-                    fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                    display: 'inline-flex', alignItems: 'center', gap: 6,
-                  }}
-                >
-                  🚨 Force Release env2
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={handleResetEnv2}
+                disabled={resetting}
+                title="Destroy + recreate env2 to the vulnerable baseline (~60s)"
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: 999,
+                  border: '1px solid ' + (resetting ? '#334155' : '#f59e0b'),
+                  background: resetting ? 'transparent' : 'rgba(245,158,11,0.12)',
+                  color: resetting ? '#94a3b8' : '#f59e0b',
+                  fontSize: 12, fontWeight: 600,
+                  cursor: resetting ? 'wait' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                {resetting ? (
+                  <>
+                    <span style={{
+                      width: 10, height: 10, border: '2px solid currentColor',
+                      borderTopColor: 'transparent', borderRadius: '50%',
+                      animation: 'spin 0.8s linear infinite', display: 'inline-block',
+                    }} />
+                    Resetting env2…
+                  </>
+                ) : (
+                  <>🧹 Reset env2</>
+                )}
+              </button>
               <button
                 type="button"
                 onClick={() => setModeManual('real')}
@@ -765,7 +695,6 @@ export default function Agents() {
                 Avg duration: {stats.avgDuration ?? '—'}
               </div>
             </div>
-          
           </div>
 
           <div className="agents-content-grid">
@@ -903,6 +832,15 @@ export default function Agents() {
                     <span>Auto-scroll</span>
                   </label>
 
+                  <label className="trace-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showLogs}
+                      onChange={(e) => setShowLogs(e.target.checked)}
+                    />
+                    <span>Show Logs</span>
+                  </label>
+
                   <button className="trace-btn" onClick={handleClearTrace} title="Clear trace">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="3 6 5 6 21 6"></polyline>
@@ -913,9 +851,7 @@ export default function Agents() {
                     <button
                       className="trace-btn trace-btn-stop"
                       onClick={handleStopActiveRun}
-                      title={pipelineMode === 'demo'
-                        ? 'Cancel the running demo pipeline — SA-4 watchdog aborts in-flight fix; env2 lease releases'
-                        : 'Stop the running fetch and wipe its scanner\'s data'}
+                      title="Stop the running fetch and wipe its scanner's data"
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                         <rect x="6" y="6" width="12" height="12" rx="1"></rect>
@@ -926,7 +862,11 @@ export default function Agents() {
                 </div>
               </div>
 
-              <div className="trace-stream">
+              {/* somewhere here */}
+
+              {!showLogs && <ProgressFlow />}
+
+              <div className="trace-stream" style={{ display: showLogs ? 'block' : 'none' }}>
                 {filteredEvents.length === 0 ? (
                   <div className="trace-empty">
                     <div className="trace-empty-title">Waiting for agent activity</div>

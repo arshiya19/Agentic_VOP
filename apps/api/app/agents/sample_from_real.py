@@ -70,31 +70,6 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 ]
 
 
-# Per-source "scoops" — take top N highest-risk issues from a source
-# regardless of what's in the pinned list. Lets us bring new scanner
-# categories into the demo without needing to hand-curate their check IDs.
-#
-# Ordering: applied AFTER pinned picks, so pinned Checkov issues always
-# land first, then the scoop fills in additional findings from other sources.
-#
-# Each entry: source (matches issues.source exactly) → N issues to pick.
-_SOURCE_SCOOPS: dict[str, int] = {
-    "checkov-ec2": 10,  # IaC misconfigurations (env2 focus — pinned picks land first, scoop fills to 20)
-    "trivy-image-ec2": 20,  # container image OS-package CVEs (per-finding — no batching)
-    "trivy-image-java-ec2": 20,  # Java image CVEs (per-finding — no batching)
-    "trivy-image-python-ec2": 20,  # Python image CVEs (per-finding — no batching)
-    "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
-    "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
-    "trivy-fs-ec2": 20,  # app-level dep CVEs (DependencyStrategy)
-    "semgrep-ec2": 20,  # SAST findings (CodeEditStrategy)
-    "serverless-ec2": 20,  # Semgrep on Lambda source — full-pool run (pool ≈ 21) to stress .py + .tf mix
-}
-
-# Hard cap on final sample size — trims picks after pinned + scoops + fallback.
-# Guarantees the downstream planner never sees more than N issues per demo run.
-_MAX_SAMPLE_SIZE = 20
-
-
 def _resource_label(issue: dict) -> str:
     """Extract the HCL-style resource label from an issue's asset_identity."""
     ai = issue.get("asset_identity") or {}
@@ -119,11 +94,7 @@ _SEVERITY_RANK = {
 }
 
 
-def sample_and_copy_ec2_issues(
-    run_id: str,
-    real_run_id: str | None = None,
-    per_scanner_cap: int | None = None,
-) -> dict:
+def sample_and_copy_ec2_issues(run_id: str, real_run_id: str | None = None) -> dict:
     """Query public.issues (source LIKE '%-ec2'), classify + group by family,
     copy 1 per family into demo.issues under this run_id.
 
@@ -133,10 +104,6 @@ def sample_and_copy_ec2_issues(
             THIS real fetch (so we don't pull in stale -ec2 rows from prior
             runs). If None, samples across every -ec2 issue in the DB —
             useful when the demo is triggered without a chained real fetch.
-        per_scanner_cap: if provided, overrides EVERY entry in `_SOURCE_SCOOPS`
-            with this value. Used by the HITL pipeline to keep the queue
-            reviewable (default cap=5 keeps the total sample ≤ 5 × scanners).
-            None (default) keeps each scanner's normal scoop.
 
     Returns: {"sampled": N, "families_found": [...], "families_missing": [...]}
     """
@@ -216,76 +183,30 @@ def sample_and_copy_ec2_issues(
         sev_val = _SEVERITY_RANK.get(issue.get("severity") or "", 0)
         return (risk_val, sev_val)
 
-    # Pinned demo picks disabled — the sampler now runs scoops only so the
-    # same rule applies to auto-demo and HITL alike. The `_PINNED_DEMO_CHECKS`
-    # constant is kept above as documentation of the historical investor-demo
-    # pin list.
-    picks: list[dict] = []
-
-    # Per-source scoops — pull top N highest-risk issues from each configured
-    # source. Runs AFTER pinned picks so those always land first. Any issue
-    # already selected by the pinned pass is skipped.
-    #
-    # Dedup key: (source_vuln_id, resource_label, line_hint). The line hint
-    # collapses TRUE duplicates (same rule + same file + same line) while
-    # keeping legitimately distinct findings (same rule triggered on multiple
-    # lines of the same file). Universal — line is derived generically from
-    # whatever field each scanner emits (semgrep start.line, checkov
-    # file_line_range[0], bandit line_number). Without a line hint (rare —
-    # some scanners don't emit one), we fall back to the old key.
-    def _line_hint(iss: dict) -> str:
-        raw = raw_by_id.get(iss.get("raw_finding_id")) or {}
-        # Semgrep emits flat `start_line` (int). Some semgrep versions also
-        # use nested `start.line`. Check both shapes for portability.
-        sl = raw.get("start_line")
-        if sl is not None:
-            return f"L{sl}"
-        start = raw.get("start")
-        if isinstance(start, dict) and "line" in start:
-            return f"L{start['line']}"  # semgrep (nested form)
-        flr = raw.get("file_line_range")
-        if isinstance(flr, (list, tuple)) and flr:
-            return f"L{flr[0]}"  # checkov
-        ln = raw.get("line_number")
-        if ln is not None:
-            return f"L{ln}"  # bandit
-        return ""  # no line info → dedup key stays as (rule, file)
-
-    def _dedup_key(iss: dict) -> tuple[str, str, str]:
-        return (iss.get("source_vuln_id") or "", _resource_label(iss), _line_hint(iss))
-
-    already_picked_keys = {_dedup_key(p) for p in picks}
-    by_source: dict[str, list[dict]] = {}
+    by_pin: dict[tuple[str, str], dict] = {}
     for iss in ec2_issues:
-        by_source.setdefault(iss.get("source") or "", []).append(iss)
+        key = (iss.get("source_vuln_id") or "", _resource_label(iss))
+        # First-seen wins — real-fetch may create duplicate rows across runs.
+        by_pin.setdefault(key, iss)
 
-    # HITL override: cap every scanner to the same low number so the
-    # approval queue stays reviewable. Keeps _SOURCE_SCOOPS as the default
-    # for the auto-demo pipeline (unchanged behavior when cap is None).
-    _effective_scoops = (
-        {k: per_scanner_cap for k in _SOURCE_SCOOPS}
-        if per_scanner_cap is not None
-        else _SOURCE_SCOOPS
+    picks: list[dict] = []
+    pinned_hits: list[str] = []
+    pinned_misses: list[str] = []
+    for check_id, resource in _PINNED_DEMO_CHECKS:
+        hit = by_pin.get((check_id, resource))
+        if hit is not None:
+            picks.append(hit)
+            pinned_hits.append(f"{check_id}@{resource.split('.')[-1]}")
+        else:
+            pinned_misses.append(f"{check_id}@{resource.split('.')[-1]}")
+
+    emit_trace_demo(
+        run_id,
+        "system",
+        "MESSAGE",
+        f"Pinned picks: {len(picks)}/{len(_PINNED_DEMO_CHECKS)} hit "
+        f"(hit={pinned_hits or '-'}, missed={pinned_misses or '-'})",
     )
-    for source_name, n in _effective_scoops.items():
-        pool = by_source.get(source_name, [])
-        if not pool:
-            continue
-
-        # Sort by (derived_risk DESC, severity_rank DESC) — same ordering
-        # the fallback path already uses.
-        pool_sorted = sorted(pool, key=_rank, reverse=True)
-
-        scooped_this_source = 0
-        for iss in pool_sorted:
-            if scooped_this_source >= n:
-                break
-            key = _dedup_key(iss)
-            if key in already_picked_keys:
-                continue
-            picks.append(iss)
-            already_picked_keys.add(key)
-            scooped_this_source += 1
 
     # Fallback: if pinned picks < 2, top up from families that weren't
     # covered by any pinned hit. Preserves the demo running on fresh env2
@@ -309,24 +230,6 @@ def sample_and_copy_ec2_issues(
                 f"⚠ Fallback: pinned set insufficient — added highest-risk {fam} "
                 f"issue (source_vuln_id={fallback_pick.get('source_vuln_id')})",
             )
-
-    # (per-file dedup removed 2026-08-21 — replaced by per-file batching in
-    # planner_demo.run_demo_remediation. Batching groups multiple findings
-    # for the same file into ONE package so state drift is impossible AND
-    # we still fix every vuln. See the "group by file" step downstream.)
-
-    # Hard cap — trim final sample so the downstream planner + fixer never
-    # see more than _MAX_SAMPLE_SIZE issues. Pinned picks + higher-risk
-    # scoops land first, so the trimmed set stays representative.
-    if len(picks) > _MAX_SAMPLE_SIZE:
-        dropped = len(picks) - _MAX_SAMPLE_SIZE
-        picks = picks[:_MAX_SAMPLE_SIZE]
-        emit_trace_demo(
-            run_id,
-            "system",
-            "MESSAGE",
-            f"Cap applied: trimmed to {_MAX_SAMPLE_SIZE} issue(s) (dropped {dropped} lower-priority pick(s))",
-        )
 
     families_missing = [
         f

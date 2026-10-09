@@ -28,9 +28,6 @@ WORKDIR /app
 # Copy application source
 COPY app/ ./app/
 
-# Create logs directory writable by appuser
-RUN mkdir -p /app/logs && chown appuser:appuser /app/logs
-
 # Switch to non-root user
 USER appuser
 

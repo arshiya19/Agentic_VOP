@@ -15,8 +15,6 @@ Two entry points:
 
 from __future__ import annotations
 
-import threading
-from datetime import datetime
 from typing import Any
 
 from .config import FixerConfig, load_config_from_settings
@@ -35,30 +33,7 @@ from .persistence import (
     set_terraform_plan_output,
 )
 from .strategies.base import BaseFixStrategy
-from .strategies.code_edit_strategy import CodeEditStrategy
-from .strategies.dependency_strategy import DependencyStrategy
 from .strategies.iac_strategy import IaCStrategy
-from .strategies.image_strategy import ImageStrategy
-from .strategies.os_strategy import OSStrategy
-from .watchdog import RunCancelledError, WatchdogTimeout, check_run_health
-
-
-# ─── Process-level env2 dispatch lock ────────────────────────────────────
-# The DB-based `any_concurrent_run` check has a TOCTOU race: multiple
-# background dispatches (typical when a user approves several HITL packages
-# in quick succession) all wake up simultaneously when a prior fix finishes,
-# each pass the "is env2 busy?" SELECT, and each rush to INSERT a new
-# fix_run — putting two SA-4 runs in parallel on env2 despite the design
-# saying "one at a time." Result: both hit env2 contention, both trivy
-# rescans time out, both roll back.
-#
-# A process-local `threading.Lock` closes the window inside a single
-# uvicorn worker. Combined with the existing DB check (which stays as
-# cross-process backup), dispatches strictly serialize.
-#
-# Multi-worker deploys need a real DB lease (postgres advisory lock or
-# a leases table). Not required for the current single-process backend.
-_ENV2_DISPATCH_LOCK = threading.Lock()
 
 
 # =============================================================================
@@ -67,12 +42,10 @@ _ENV2_DISPATCH_LOCK = threading.Lock()
 # =============================================================================
 _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
     "iac": IaCStrategy,
-    "image": ImageStrategy,  # trivy-image (container image OS pkgs)
-    "os": OSStrategy,  # trivy-os / tenable / qualys (host apt/yum)
-    "code_edit": CodeEditStrategy,  # semgrep / bandit / sonarqube (source edits)
-    "dependency": DependencyStrategy,  # trivy-fs / snyk-appsec (manifest edits)
-    # Phase-3 additions land here:
-    # "cli":        CliStrategy,          # aws-cli direct cloud fixes
+    # Phase-2 additions land here:
+    # "dependency": DependencyStrategy,
+    # "code_edit":  CodeEditStrategy,
+    # "cli":        CliStrategy,
 }
 
 
@@ -84,135 +57,35 @@ _STRATEGY_BY_KEY: dict[str, type[BaseFixStrategy]] = {
 # a mutable direct-cloud bucket would go 'cli'. So we prefer scanner_type
 # (from IaC context) with family as a secondary hint.
 # =============================================================================
-_SOURCE_CODE_EXTENSIONS: tuple[str, ...] = (
-    # Interpreted / dynamic
-    ".py",
-    ".rb",
-    ".php",
-    ".pl",
-    ".lua",
-    ".groovy",
-    # JS / TS family
-    ".js",
-    ".mjs",
-    ".cjs",
-    ".ts",
-    ".jsx",
-    ".tsx",
-    # JVM
-    ".java",
-    ".kt",
-    ".kts",
-    ".scala",
-    # Native / systems
-    ".go",
-    ".rs",
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cxx",
-    ".h",
-    ".hpp",
-    # .NET / Apple / other
-    ".cs",
-    ".swift",
-    ".m",
-    ".mm",
-)
-
-# Terraform/HCL config files — always IacStrategy regardless of family.
-# Fixes the case where a finding on `main.tf` classifies as `injection`
-# (via CWE-778/770/392 code-oriented CWEs on Lambda infra rules) and would
-# otherwise misroute to CodeEditStrategy. Universal — future IaC scanners
-# (tfsec, kics, terrascan) get correct routing for free.
-_IAC_EXTENSIONS: tuple[str, ...] = (
-    ".tf",
-    ".tf.json",
-    ".hcl",
-    ".tfvars",
-)
-
-
 def _select_strategy_key(
     *,
     family: str,
     scanner_type: str | None,
-    source: str | None = None,
-    file_path: str | None = None,
 ) -> str:
-    """Pick the fix strategy key based on source + scanner_type + family + file extension.
+    """Pick the fix strategy key based on scanner_type + family.
 
-    Priority order (most specific → least specific):
-      1. Source name — deterministic when we know the scanner. Container
-         image scanners → image; host OS scanners → os.
-      2. Target file's extension — a `.py`/`.js`/etc. source file always
-         means edit the source (CodeEditStrategy), never terraform-apply
-         it. Prevents IacStrategy from being chosen for SAST findings that
-         happened to classify as public_exposure (e.g. CWE-798 hardcoded
-         credentials in Lambda source).
-      3. scanner_type from SA-3's extractor (iac / sast / sca / os_pkg).
-      4. Family as a final fallback.
-
-    Returns an unregistered key when no strategy is wired for the shape;
-    run_fixer's dispatch check will surface a clean "no strategy registered"
-    error rather than routing the fix to the wrong executor and corrupting
-    env2.
+    Priority: scanner_type wins when known (SA3 v2.4 decided the shape of
+    the package based on this). Family is a fallback for cases where
+    scanner_type wasn't extractable.
     """
-    src = (source or "").lower()
-
-    # ---- Source-first routing ----
-    # Container image scanners → ImageStrategy (docker rebuild + retag)
-    if "trivy-image" in src or "snyk-container" in src or "grype-image" in src:
-        return "image"
-    # Host OS scanners → OSStrategy (apt/yum upgrade) — not yet registered
-    if "trivy-os" in src or "tenable-nessus" in src or "qualys-vmdr" in src or "rapid7" in src:
-        return "os"
-    # App-dep scanners → DependencyStrategy — not yet registered
-    if "trivy-fs" in src or "snyk-appsec" in src or "dependabot" in src or src == "osv":
-        return "dependency"
-    # SAST scanners → CodeEditStrategy — not yet registered
-    if "semgrep" in src or "bandit" in src or "sonarqube" in src:
-        return "code_edit"
-
-    # ---- File-extension override ----
-    # File type is a stronger signal than family for choosing the strategy.
-    # A finding on `main.tf` must go to IacStrategy even when its CWE
-    # (e.g. CWE-778, CWE-770) pushed the family classifier toward
-    # `injection`. Symmetric for source-code files. Both branches keep
-    # future scanners routing correctly with no per-source rule needed.
-    if file_path:
-        fp = file_path.lower()
-        if fp.endswith(_IAC_EXTENSIONS):
-            return "iac"
-        if fp.endswith(_SOURCE_CODE_EXTENSIONS):
-            return "code_edit"
-
-    # ---- Family-based routing when source didn't decide ----
-    if family == "os_vulnerability":
-        # Family-only signal is ambiguous (image vs host). Prefer image
-        # for MVP since trivy-image is the primary demo path; the source
-        # branch above handles the disambiguation cleanly.
-        return "image"
-    if family == "vulnerable_dependency":
-        return "dependency"  # not yet registered
-    if family == "injection":
-        return "code_edit"  # not yet registered
-
-    # ---- scanner_type from IaC extractor ----
     if scanner_type in ("iac", "sca"):
         # SCA findings often ship with an IaC-shaped fix (edit manifest → install)
         # so they're handled by IaCStrategy in MVP too. Phase-2 introduces a
         # dedicated DependencyStrategy that reuses tools/ but adds pip/npm logic.
         return "iac"
     if scanner_type == "sast":
-        return "code_edit"
+        # No CodeEditStrategy yet — MVP doesn't handle injection findings.
+        # Return 'iac' as a best-effort; execution will likely fail on files
+        # that aren't valid HCL, which is what we want (fail fast).
+        return "iac"
     if scanner_type == "os_pkg":
-        return "os"
+        # DependencyStrategy will handle these post-MVP.
+        return "iac"
 
     # Fallback: family-based dispatch when scanner_type wasn't extracted
     if family in ("public_exposure", "network_exposure"):
         return "iac"
-    return "iac"  # Default to IaC for unknown shapes (matches historical behavior)
+    return "iac"  # MVP has only IaC; other cases will be added Phase-2+
 
 
 # =============================================================================
@@ -249,59 +122,15 @@ def run_fixer(
     """
     cfg = config or load_config_from_settings()
 
-    # Serialize env2 dispatches at the PROCESS level — closes the TOCTOU
-    # race between the DB concurrency check below and the create_fix_run
-    # INSERT further down. Even if multiple background tasks reach here
-    # simultaneously (typical when a user approves 5 HITL packages in
-    # quick succession), only one enters at a time. The others block
-    # until this one returns.
-    _lock_acquired_at = utcnow()
-    _ENV2_DISPATCH_LOCK.acquire()
-    try:
-        return _run_fixer_locked(
-            package_id=package_id,
-            agent_run_id=agent_run_id,
-            sb=sb,
-            emit_fn=emit_fn,
-            environment=environment,
-            cfg=cfg,
-        )
-    finally:
-        _ENV2_DISPATCH_LOCK.release()
-
-
-def _run_fixer_locked(
-    *,
-    package_id: int,
-    agent_run_id: str,
-    sb: Any,
-    emit_fn,
-    environment: str,
-    cfg: FixerConfig,
-) -> int:
-    """Body of run_fixer — executed only while _ENV2_DISPATCH_LOCK is held.
-
-    HITL v2 "Verified PR" note: packages flagged `git_native_review=True`
-    still run the full sandbox lifecycle below (SSM + build + rescan) —
-    only after that succeeds and the rescan verifies the fix does the
-    orchestrator's success path open a PR mirroring the change against
-    the customer's repo (see git_verified_pr.open_verified_pr). That
-    hook is best-effort and never gates the sandbox success.
-    """
-    # Concurrency lock (DB-side belt-and-suspenders) — env2 is a single
-    # shared sandbox; only one fix_run at a time. This check remains as
-    # cross-process safety for multi-worker deployments even though the
-    # process-level lock in run_fixer already serializes within one worker.
+    # Concurrency lock — env2 is a single shared sandbox; only one fix_run
+    # at a time (Nikhil's design note: parallel runs race on terraform state
+    # + AWS API rate limits). Wait with backoff when locked rather than
+    # raising immediately, so teammates iterating together don't step on
+    # each other's dispatches.
     if not FixerConfig.allow_concurrent_runs:
         import time  # noqa: PLC0415 — local import; keeps top-of-file clean
 
-        # 30 min total wait (was 5). Sized to survive a slow SA-4 fix chain
-        # (~90s each × 20 packages = 30 min worst case) so a legitimately
-        # long-running fix upstream doesn't cause downstream package casualties.
-        # Trace we saw: 6 packages of 20 timed out at 300s while a stuck fix_run
-        # from a prior killed uvicorn held the lock. 1800s gives comfortable
-        # headroom even if a real (not stuck) fix run takes its full time.
-        LOCK_WAIT_MAX_S = 1800
+        LOCK_WAIT_MAX_S = 300  # 5 min total wait
         LOCK_POLL_INTERVAL_S = 10
         waited_s = 0
         other = any_concurrent_run(sb)
@@ -371,108 +200,21 @@ def _run_fixer_locked(
     raw = _load_raw_finding(sb, issue_row.get("raw_finding_id"))
     iac_ctx = _extract_iac_context(issue_row, raw)
 
-    # 3b. For container-image scanners, resolve dockerfile_path dynamically
-    #     from connection_registry metadata. Avoids hardcoding per-image paths
-    #     in ImageStrategy — any new scanner just needs metadata filled in Supabase.
-    #
-    #     Always override (not just when file_path is empty) — `_extract_iac_context`
-    #     populates file_path with a mangled image-reference-as-path for image
-    #     findings (e.g. prepends `settings.fixer_env2_path_prefix` to
-    #     `vuln-java-image:latest` producing `/opt/vuln-labs/cspm-lab/vuln-java-image:latest`,
-    #     a fake path that fails ImageStrategy's pre-flight `test -f`). Override with
-    #     the real Dockerfile path, or clear to None so ImageStrategy uses its
-    #     _DEFAULT_DOCKERFILE fallback.
-    #
-    #     Sibling image scanners (grype-image, snyk-container) get the same treatment
-    #     — category-based, not rule-specific.
-    source = issue_row.get("source") or ""
-    _source_lower = source.lower()
-    _is_image_scanner = (
-        "trivy-image" in _source_lower
-        or "grype-image" in _source_lower
-        or "snyk-container" in _source_lower
-    )
-    if _is_image_scanner:
-        try:
-            from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
-
-            sb_pub = _sb_pub()
-            reg_row = (
-                sb_pub.table("connection_registry")
-                .select("metadata")
-                .eq("tool", source)
-                .single()
-                .execute()
-                .data
-            )
-            reg_meta = (reg_row or {}).get("metadata") or {}
-            if reg_meta.get("dockerfile_path"):
-                iac_ctx["file_path"] = reg_meta["dockerfile_path"]
-                iac_ctx["working_directory"] = (
-                    reg_meta.get("build_directory") or reg_meta["dockerfile_path"].rsplit("/", 1)[0]
-                )
-            else:
-                # Registry lookup succeeded but no dockerfile_path — clear the
-                # mangled path so ImageStrategy falls back to its _DEFAULT_DOCKERFILE.
-                iac_ctx["file_path"] = None
-        except Exception:  # noqa: BLE001
-            # Registry lookup failed entirely — same fallback, clear mangled path.
-            iac_ctx["file_path"] = None
-        # Also set resource_name to the image ref from raw target (e.g. "vuln-java-image:latest")
-        if not iac_ctx.get("resource_name") and raw:
-            target = raw.get("target") or raw.get("Target") or ""
-            # Extract image:tag from "vuln-java-image:latest (debian 10.2)"
-            image_ref = target.split("(")[0].strip() if "(" in target else target
-            if image_ref:
-                iac_ctx["resource_name"] = image_ref
-
-    # 4. Decide strategy — source name is the strongest signal for
-    #    disambiguating trivy-image (ImageStrategy) vs trivy-os (OSStrategy)
-    #    when both classify as family='os_vulnerability'.
-    strategy_key = _select_strategy_key(
-        family=family,
-        scanner_type=iac_ctx.get("scanner_type"),
-        source=issue_row.get("source"),
-        file_path=iac_ctx.get("file_path"),
-    )
+    # 4. Decide strategy
+    strategy_key = _select_strategy_key(family=family, scanner_type=iac_ctx.get("scanner_type"))
     strategy_cls = _STRATEGY_BY_KEY.get(strategy_key)
     if strategy_cls is None:
         raise RuntimeError(
             f"No fix strategy registered for key {strategy_key!r} "
-            f"(family={family}, scanner_type={iac_ctx.get('scanner_type')}, "
-            f"source={issue_row.get('source')!r})"
+            f"(family={family}, scanner_type={iac_ctx.get('scanner_type')})"
         )
 
-    # 5. Sanity: strategy needs a target instance to talk to.
-    #    For scanners with a dedicated fix target (e.g. trivy-os-al2-ec2 → AL2
-    #    instance), look up target_instance_id from connection_registry.metadata.
-    #    Falls back to the default FIXER_ENV2_INSTANCE_ID for scanners without
-    #    a dedicated target (most cases).
+    # 5. Sanity: strategy needs a target instance to talk to
     target_instance_id = cfg.env2_instance_id or ""
-    source = issue_row.get("source") or ""
-    if source:
-        try:
-            from ...db import supabase_admin as _sb_pub_fn  # noqa: PLC0415
-
-            _sb_pub = _sb_pub_fn()
-            reg_row = (
-                _sb_pub.table("connection_registry")
-                .select("metadata")
-                .eq("tool", source)
-                .single()
-                .execute()
-                .data
-            )
-            reg_meta = (reg_row or {}).get("metadata") or {}
-            if reg_meta.get("target_instance_id"):
-                target_instance_id = reg_meta["target_instance_id"]
-        except Exception:  # noqa: BLE001, S110
-            pass  # Fall through to default
-
     if not target_instance_id:
         raise RuntimeError(
-            "No target instance configured. Set FIXER_ENV2_INSTANCE_ID in env "
-            "or add target_instance_id to the scanner's connection_registry metadata."
+            "FixerConfig.env2_instance_id is not set. Configure "
+            "FIXER_ENV2_INSTANCE_ID in the app's environment before running SA4."
         )
 
     # 6. Create the fix_run row (status='pending')
@@ -526,50 +268,7 @@ def _run_fixer_locked(
     started_at = utcnow()
     outcome: StrategyOutcome
     try:
-        outcome = _run_lifecycle(
-            sb,
-            fix_run_id,
-            strategy,
-            ctx,
-            emit_fn=emit_fn,
-            started_at=started_at,
-            timeout_seconds=cfg.run_timeout_s,
-        )
-    except WatchdogTimeout as e:
-        # Watchdog fired — attempt rollback (safe if backup was taken; no-op
-        # otherwise) then finalize as failed so the row transitions cleanly.
-        rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
-        outcome = StrategyOutcome(
-            status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
-            rollback_results=rollback,
-            error_message=f"watchdog timeout: {str(e)[:400]}",
-        )
-        try:
-            emit_fn(
-                agent_run_id,
-                "sub-agent-4",
-                "ERROR",
-                f"⏱ Fix run #{fix_run_id} killed by watchdog "
-                f"(timeout={cfg.run_timeout_s}s); {str(e)[:200]}",
-            )
-        except Exception:  # noqa: BLE001, S110
-            pass
-    except RunCancelledError as e:
-        rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
-        outcome = StrategyOutcome(
-            status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
-            rollback_results=rollback,
-            error_message=f"cancelled by operator: {str(e)[:400]}",
-        )
-        try:
-            emit_fn(
-                agent_run_id,
-                "sub-agent-4",
-                "MESSAGE",
-                f"🛑 Fix run #{fix_run_id} cancelled by operator — {str(e)[:200]}",
-            )
-        except Exception:  # noqa: BLE001, S110
-            pass
+        outcome = _run_lifecycle(sb, fix_run_id, strategy, ctx, emit_fn=emit_fn)
     except Exception as e:  # noqa: BLE001
         # Belt-and-suspenders: _run_lifecycle already catches strategy-level
         # errors; this catches orchestrator-level bugs (bad emit call, etc.).
@@ -594,91 +293,24 @@ def _run_fixer_locked(
         except Exception:  # noqa: BLE001, S110
             pass
 
-    # 9. Persist final state — MUST run so the row leaves any non-terminal
-    # status. finalize_fix_run's Supabase update can fail transiently (network
-    # blip, connection pool exhaustion). Retry a few times with backoff, and
-    # if every attempt fails, fall back to a bare-minimum status update so
-    # the watchdog reaper doesn't have to close this row later.
-    import time  # noqa: PLC0415
-
-    for attempt in range(3):
+    # 9. Persist final state — MUST run so 'in_flight' status is cleared.
+    # If finalize itself crashes there's not much we can do, but at least the
+    # lifecycle exception path above will have produced a StrategyOutcome.
+    try:
+        finalize_fix_run(sb, fix_run_id, ctx=ctx, outcome=outcome, started_at=started_at)
+    except Exception as e:  # noqa: BLE001
         try:
-            finalize_fix_run(sb, fix_run_id, ctx=ctx, outcome=outcome, started_at=started_at)
-            break
-        except Exception as e:  # noqa: BLE001
-            if attempt == 2:
-                # All retries exhausted — try the minimal-fields fallback so
-                # at least status + finished_at land.
-                try:
-                    from .models import utcnow as _utcnow  # noqa: PLC0415
-
-                    _now = _utcnow()
-                    sb.table("fix_runs").update(
-                        {
-                            "status": "failed"
-                            if outcome.status == "partial_success"
-                            else outcome.status,
-                            "finished_at": _now.isoformat(),
-                            "error_message": (
-                                f"finalize_fix_run failed after 3 retries "
-                                f"({type(e).__name__}: {str(e)[:200]}); minimal fallback applied"
-                            )[:2000],
-                        }
-                    ).eq("id", fix_run_id).execute()
-                except Exception:  # noqa: BLE001, S110
-                    pass
-                try:
-                    emit_fn(
-                        agent_run_id,
-                        "sub-agent-4",
-                        "ERROR",
-                        f"✗ finalize_fix_run failed for fix_run #{fix_run_id} "
-                        f"after 3 attempts ({type(e).__name__}). Reaper will close "
-                        f"if the minimal fallback also missed.",
-                    )
-                except Exception:  # noqa: BLE001, S110
-                    pass
-            else:
-                time.sleep(0.5 * (attempt + 1))
-
-    # 10. Knowledge Base capture — store successful fixes for future few-shot reuse.
-    # Best-effort: never blocks the main flow. Only fires on verified success.
-    # NOTE: Always writes to the PUBLIC schema — the KB is a shared knowledge
-    # base that feeds SA-3 across all pipelines (real + demo). The `sb` passed
-    # to run_fixer may be a demo-schema client, so we use a fresh public client.
-    if outcome.status == "success":
-        try:
-            from ..remediation.kb_capture import capture_successful_fix  # noqa: PLC0415
-            from ...db import supabase_admin as _kb_admin  # noqa: PLC0415
-
-            capture_successful_fix(
-                _kb_admin(),
-                ctx=ctx,
-                outcome=outcome,
-                confidence_score=(ctx.pathway or {}).get("confidence_score") or 90,
-                emit_fn=emit_fn,
+            emit_fn(
+                agent_run_id,
+                "sub-agent-4",
+                "ERROR",
+                f"✗ finalize_fix_run crashed for fix_run #{fix_run_id}: "
+                f"{type(e).__name__}: {str(e)[:300]}. Row may remain 'in_flight' — "
+                f"manual DB fix required.",
             )
         except Exception:  # noqa: BLE001, S110
             pass
-
-    # 11. KB reuse tracking — if this fix used a KB replay recipe, update counters.
-    # Increment times_reused (always after completion) and times_succeeded (on success).
-    # This feeds the success_rate computed column for recipe quality monitoring.
-    try:
-        pathway_conf = (ctx.pathway or {}).get("confidence_components") or {}
-        kb_source_id = (
-            pathway_conf.get("kb_id") if pathway_conf.get("source") == "kb_replay" else None
-        )
-        if kb_source_id:
-            from ..remediation.kb_capture import increment_reuse_count, increment_success_count  # noqa: PLC0415
-            from ...db import supabase_admin as _kb_admin_fn  # noqa: PLC0415
-
-            _kb_sb = _kb_admin_fn()
-            increment_reuse_count(_kb_sb, kb_source_id)
-            if outcome.status == "success":
-                increment_success_count(_kb_sb, kb_source_id)
-    except Exception:  # noqa: BLE001, S110
-        pass  # Best-effort — never block main flow
+        raise
 
     # Best-effort trace — a crash here doesn't affect persisted state.
     try:
@@ -710,33 +342,14 @@ def _run_lifecycle(
     ctx: FixContext,
     *,
     emit_fn,
-    started_at: datetime,
-    timeout_seconds: int,
 ) -> StrategyOutcome:
     """Drive the 5 strategy phases. Returns a StrategyOutcome.
 
     Catches strategy-level exceptions and converts to 'failed' + rollback
     attempt. Never re-raises — the fix_run row captures everything the
     caller needs to know.
-
-    Watchdog: calls `check_run_health` at each phase boundary so a
-    long-running strategy or a stuck SSM call cannot hold the run past
-    `timeout_seconds`, and so the operator's Cancel button aborts within
-    at most one phase.
     """
-
-    def _health():
-        """Raise WatchdogTimeout / RunCancelledError if this run should abort."""
-        check_run_health(
-            sb,
-            agent_run_id=ctx.agent_run_id,
-            fix_run_id=fix_run_id,
-            started_at=started_at,
-            timeout_seconds=timeout_seconds,
-        )
-
     # ─── Phase 3: Pre-flight ────────────────────────────────────────────
-    _health()
     set_status(sb, fix_run_id, "provisioning")
     try:
         preflight = strategy.pre_flight_check(ctx)
@@ -781,7 +394,6 @@ def _run_lifecycle(
         )
 
     # ─── Phase 4: Backup ────────────────────────────────────────────────
-    _health()
     try:
         backup = strategy.backup(ctx)
     except Exception as e:  # noqa: BLE001
@@ -796,7 +408,6 @@ def _run_lifecycle(
         ctx = ctx.model_copy(update={"backup_reference": backup.backup_reference})
 
     # ─── Phase 5: Execute ───────────────────────────────────────────────
-    _health()
     set_status(sb, fix_run_id, "executing")
     try:
         step_results = strategy.execute(ctx)
@@ -880,7 +491,6 @@ def _run_lifecycle(
             )
 
     # ─── Phase 6: Validate ──────────────────────────────────────────────
-    _health()
     set_status(sb, fix_run_id, "validating")
     try:
         validation_results = strategy.validate(ctx)
@@ -906,25 +516,10 @@ def _run_lifecycle(
     #     check failure defeats the whole point of the closed loop.
     #   - Absent a scanner re-scan (SA3 v2.4 hard rule 17 violation), fall
     #     back to strict mode: any non-rescan failure triggers rollback.
-    # Collect ALL re-scan tests (batch mode emits one per finding — the old
-    # `next()` only picked the first, losing signal for the others).
-    all_rescans = [v for v in validation_results if v.is_rescan]
-    passed_rescans = [v for v in all_rescans if v.passed]
-    failed_rescans = [v for v in all_rescans if not v.passed]
-    # Primary rescan (for ancillary-vs-authoritative comparison downstream):
-    # the FIRST re-scan test. Kept for backward compat with single-fix packages.
-    rescan = all_rescans[0] if all_rescans else None
+    rescan = next((v for v in validation_results if v.is_rescan), None)
     non_rescan_failures = [v for v in validation_results if not v.is_rescan and not v.passed]
 
-    # Rollback decision (updated 2026-08-21):
-    #   - ALL re-scans failed → rollback (nothing worked)
-    #   - SOME re-scans passed, SOME failed → PARTIAL SUCCESS
-    #     (keep the file — good edits stay applied. Unfixed findings noted
-    #     in error_message. This preserves the value of batching: one bad
-    #     LLM composition doesn't undo the good ones.)
-    #   - ALL re-scans passed → success (as before)
-    if all_rescans and not passed_rescans:
-        # Complete re-scan failure — rollback
+    if rescan is not None and not rescan.passed:
         rollback = _safe_rollback(strategy, ctx, emit_fn=emit_fn)
         return StrategyOutcome(
             status="rolled_back" if any(r.status == "success" for r in rollback) else "failed",
@@ -933,37 +528,7 @@ def _run_lifecycle(
             rollback_results=rollback,
             backup_reference=backup.backup_reference,
             terraform_plan_output=plan_out,
-            error_message=(
-                f"Scanner re-scan still reports the finding{'s' if len(failed_rescans) > 1 else ''}: "
-                f"{len(failed_rescans)} of {len(all_rescans)} re-scan(s) failed. "
-                f"First: {failed_rescans[0].actual[:200]}"
-            ),
-        )
-
-    if failed_rescans and passed_rescans:
-        # Batch mode with mixed re-scan outcomes: keep the file as-is,
-        # good edits stay applied. In master's report each finding shows
-        # up as "fixed" or "rolled back" individually — no new status
-        # vocabulary needed at the user layer.
-        emit_fn(
-            ctx.agent_run_id,
-            "sub-agent-4",
-            "MESSAGE",
-            f"🟡 Mixed outcome — {len(passed_rescans)} finding(s) fixed, "
-            f"{len(failed_rescans)} finding(s) rolled back. "
-            f"File kept as-is (good edits preserved). "
-            f"First unfixed: {failed_rescans[0].test_name}",
-        )
-        return StrategyOutcome(
-            status="partial_success",  # internal marker — persistence translates → "success" for DB
-            step_results=step_results,
-            validation_results=validation_results,
-            backup_reference=backup.backup_reference,
-            terraform_plan_output=plan_out,
-            error_message=(
-                f"{len(passed_rescans)} finding(s) fixed, {len(failed_rescans)} rolled back. "
-                f"Unfixed re-scans: {[r.test_name for r in failed_rescans][:5]}"
-            ),
+            error_message=f"Scanner re-scan still reports the finding: {rescan.actual[:300]}",
         )
 
     if non_rescan_failures:
@@ -995,100 +560,6 @@ def _run_lifecycle(
                     f"(no scanner re-scan present to authoritatively confirm fix) — "
                     f"first failure: {non_rescan_failures[0].test_name}"
                 ),
-            )
-
-    # HITL v2 — post-fix review capture.
-    # If the package was created with `review_required=True`, we DON'T
-    # cleanup the backup yet. Instead:
-    #   1. Read the current file bytes + the .bak bytes via SSM
-    #   2. Compute a unified diff
-    #   3. Persist to fix_run.review_diff
-    # Master then flips the package to `awaiting_review` (see master's
-    # _FIX_TO_PACKAGE_STATUS override). The Approve endpoint later
-    # deletes the backup; the Reject endpoint restores from it.
-    #
-    # Best-effort — a failed capture is logged but doesn't block the
-    # success path. Rescan passed = fix is correct regardless of whether
-    # the diff was captured.
-    _pkg = ctx.package or {}
-    if _pkg.get("review_required") and ctx.file_path and backup.backup_reference:
-        try:
-            from .review import capture_review_diff, persist_diff  # noqa: PLC0415
-            from .tools.remote_exec import RemoteExecutor  # noqa: PLC0415
-
-            # Build the executor directly instead of asking the strategy for
-            # one — strategy method naming varies (IaCStrategy uses
-            # `_executor_for`, ImageStrategy uses `_executor`), and neither
-            # is part of a formal interface. Direct construction sidesteps
-            # the naming drift entirely.
-            _cfg = strategy.config if hasattr(strategy, "config") else None
-            _review_executor = RemoteExecutor(
-                ctx.target_instance_id,
-                region=ctx.aws_region,
-                config=_cfg,
-                emit_fn=emit_fn,
-                run_id=ctx.agent_run_id,
-            )
-            diff = capture_review_diff(
-                _review_executor,
-                current_path=ctx.file_path,
-                backup_path=backup.backup_reference,
-            )
-            if diff:
-                persist_diff(sb, fix_run_id, diff)
-                emit_fn(
-                    ctx.agent_run_id,
-                    "sub-agent-4",
-                    "MESSAGE",
-                    f"📸 Review diff captured — {len(diff)} file(s), "
-                    f"{sum(d.get('bytes_after', 0) for d in diff)} bytes. "
-                    f"Package will pause at awaiting_review for human approval.",
-                )
-            else:
-                emit_fn(
-                    ctx.agent_run_id,
-                    "sub-agent-4",
-                    "MESSAGE",
-                    "⚠ Review diff capture returned empty — package will still "
-                    "pause at awaiting_review but no diff will show in the UI.",
-                )
-        except Exception as e:  # noqa: BLE001
-            emit_fn(
-                ctx.agent_run_id,
-                "sub-agent-4",
-                "MESSAGE",
-                f"⚠ Review diff capture crashed ({type(e).__name__}: "
-                f"{str(e)[:200]}) — package will still pause at awaiting_review.",
-            )
-
-    # HITL v2 Verified-PR hook. When the package is flagged
-    # git_native_review=True, mirror the sandbox-proven edit into the
-    # customer's repo as a PR with the rescan output in the body. Best-
-    # effort — if the PR side fails, the sandbox success stands.
-    if _pkg.get("git_native_review"):
-        from app.config import settings  # noqa: PLC0415
-
-        if settings.github_pat and settings.github_repo:
-            from .git_verified_pr import open_verified_pr  # noqa: PLC0415
-
-            open_verified_pr(
-                sb=sb,
-                package_id=ctx.package_id,
-                pkg_row=_pkg,
-                fix_run_id=ctx.fix_run_id,
-                agent_run_id=ctx.agent_run_id,
-                validation_results=validation_results,
-                emit_fn=emit_fn,
-                pat=settings.github_pat,
-                repo=settings.github_repo,
-                base_branch=settings.github_base_branch or "main",
-            )
-        else:
-            emit_fn(
-                ctx.agent_run_id,
-                "sub-agent-4",
-                "MESSAGE",
-                "⚠ Verified-PR requested but GITHUB_PAT/REPO not set — skipping PR side.",
             )
 
     # 🎉 Success
@@ -1146,22 +617,6 @@ def _load_issue(sb: Any, issue_id: int) -> dict | None:
 def _load_raw_finding(sb: Any, raw_finding_id: int | None) -> dict | None:
     if raw_finding_id is None:
         return None
-    # Try the passed sb first (works for real pipeline where sb=public).
-    # If not found, fall back to public schema (handles demo pipeline where
-    # sb=demo but raw_finding_id points at public.raw_findings).
     resp = sb.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
     rows = resp.data or []
-    if rows:
-        return (rows[0] or {}).get("raw")
-    # Fallback: try public schema
-    try:
-        from ...db import supabase_admin as _sb_pub  # noqa: PLC0415
-
-        sb_pub = _sb_pub()
-        resp = (
-            sb_pub.table("raw_findings").select("raw").eq("id", raw_finding_id).limit(1).execute()
-        )
-        rows = resp.data or []
-        return (rows[0] or {}).get("raw") if rows else None
-    except Exception:  # noqa: BLE001
-        return None
+    return (rows[0] or {}).get("raw") if rows else None

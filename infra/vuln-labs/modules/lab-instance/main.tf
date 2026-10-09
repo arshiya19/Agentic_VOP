@@ -119,19 +119,10 @@ resource "aws_iam_role_policy" "ssm" {
         Effect = "Allow"
         Action = [
           "ssm:UpdateInstanceInformation",
-          "ssm:ListAssociations",
-          "ssm:ListInstanceAssociations",
-          "ssm:GetDeployablePatchSnapshotForInstance",
           "ssmmessages:CreateControlChannel",
           "ssmmessages:CreateDataChannel",
           "ssmmessages:OpenControlChannel",
-          "ssmmessages:OpenDataChannel",
-          "ec2messages:AcknowledgeMessage",
-          "ec2messages:DeleteMessage",
-          "ec2messages:FailMessage",
-          "ec2messages:GetEndpoint",
-          "ec2messages:GetMessages",
-          "ec2messages:SendReply"
+          "ssmmessages:OpenDataChannel"
         ]
         Resource = "*"
       }
@@ -158,8 +149,7 @@ resource "aws_iam_role_policy" "terraform_state" {
         ]
         Resource = [
           "arn:aws:s3:::${var.terraform_state_bucket}",
-          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/cspm-lab/*",
-          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/serverless-lab/*"
+          "arn:aws:s3:::${var.terraform_state_bucket}/vuln-labs/cspm-lab/*"
         ]
       },
       {
@@ -210,118 +200,6 @@ resource "aws_iam_role_policy" "cspm_sg" {
         Effect   = "Allow"
         Action   = "ec2:*"
         Resource = "*"
-      }
-    ]
-  })
-}
-
-# CSPM Lab — KMS, IAM, CloudWatch Logs, SNS, SQS management permissions
-resource "aws_iam_role_policy" "cspm_extended" {
-  name = "${var.name_prefix}-cspm-extended"
-  role = aws_iam_role.lab.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "CSPMLabKMS"
-        Effect   = "Allow"
-        Action   = "kms:*"
-        Resource = "*"
-      },
-      {
-        Sid    = "CSPMLabIAM"
-        Effect = "Allow"
-        Action = [
-          "iam:CreatePolicy",
-          "iam:DeletePolicy",
-          "iam:GetPolicy",
-          "iam:CreatePolicyVersion",
-          "iam:DeletePolicyVersion",
-          "iam:ListPolicyVersions",
-          "iam:GetPolicyVersion",
-          "iam:TagPolicy",
-          "iam:UntagPolicy"
-        ]
-        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/cspm-lab-*"
-      },
-      {
-        Sid    = "CSPMLabLogs"
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:DeleteLogGroup",
-          "logs:PutRetentionPolicy",
-          "logs:DeleteRetentionPolicy",
-          "logs:DescribeLogGroups",
-          "logs:ListTagsLogGroup",
-          "logs:ListTagsForResource",
-          "logs:TagLogGroup",
-          "logs:TagResource",
-          "logs:UntagLogGroup",
-          "logs:UntagResource",
-          "logs:AssociateKmsKey",
-          "logs:DisassociateKmsKey"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "CSPMLabSNS"
-        Effect = "Allow"
-        Action = [
-          "sns:CreateTopic",
-          "sns:DeleteTopic",
-          "sns:GetTopicAttributes",
-          "sns:SetTopicAttributes",
-          "sns:TagResource",
-          "sns:UntagResource",
-          "sns:ListTopics",
-          "sns:ListTagsForResource"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "CSPMLabSQS"
-        Effect = "Allow"
-        Action = [
-          "sqs:CreateQueue",
-          "sqs:DeleteQueue",
-          "sqs:GetQueueAttributes",
-          "sqs:SetQueueAttributes",
-          "sqs:TagQueue",
-          "sqs:UntagQueue",
-          "sqs:ListQueues",
-          "sqs:GetQueueUrl",
-          "sqs:ListQueueTags"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-# Serverless Lab — Lambda + IAM management permissions
-resource "aws_iam_role_policy" "serverless_lab" {
-  name = "${var.name_prefix}-serverless-lab"
-  role = aws_iam_role.lab.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "ServerlessLabIAM"
-        Effect = "Allow"
-        Action = "iam:*"
-        Resource = [
-          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/serverless-lab-*",
-          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/serverless-lab-*"
-        ]
-      },
-      {
-        Sid      = "ServerlessLabLambda"
-        Effect   = "Allow"
-        Action   = "lambda:*"
-        Resource = "arn:aws:lambda:*:${data.aws_caller_identity.current.account_id}:function:serverless-lab-*"
       }
     ]
   })

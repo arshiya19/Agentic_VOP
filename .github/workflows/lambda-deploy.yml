@@ -28,7 +28,6 @@ on:
       - "infra/**"
       - "!infra/vuln-labs/**"
       - "!infra/app-hosting/**"
-      - "!infra/image-forge/**"
   pull_request:
     branches: [main]
     paths:

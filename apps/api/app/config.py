@@ -1,11 +1,4 @@
-from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# Push .env values into os.environ so plain os.getenv() calls (used for
-# local-only feature flags that aren't worth adding to the Settings schema)
-# can see them. pydantic-settings itself reads .env for declared Settings
-# fields but does NOT propagate unknown keys to os.environ.
-load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -59,12 +52,6 @@ class Settings(BaseSettings):
     # 200K TPM limit for gpt-4o-mini. Bump to 10+ if you have a higher tier.
     llm_parallel_workers: int = 5
 
-    # Emit per-call TOKEN_USAGE trace events to the Agents page trace stream.
-    # Set false to suppress the chatty per-LLM-invocation events at scale.
-    # Token totals in the final TOKEN_SUMMARY remain accurate either way
-    # because the callback always accumulates counts in memory.
-    trace_token_usage: bool = True
-
     # --- Sub-Agent 4 (Fixer) settings ---
     # env2 (Remediation Playground) EC2 instance id — the sandbox target for
     # every fix run. Set once per deployment. Empty = Sub-Agent 4 refuses to
@@ -90,18 +77,6 @@ class Settings(BaseSettings):
 
     # AWS region for env2 + SSM RunCommand calls.
     aws_region: str = "us-east-1"
-
-    # --- HITL v2 Git-native review (Phase B, side experiment) ------------
-    # All optional. When any of these are empty, the git-review flow is
-    # simply unavailable — existing HITL v1 + sandbox review + auto-demo
-    # keep working unchanged.
-    #
-    # github_pat        — fine-grained PAT with contents+pull-requests write
-    # github_repo       — 'owner/name' the agent opens PRs against
-    # github_base_branch — target branch for the PR (usually 'main')
-    github_pat: str = ""
-    github_repo: str = ""
-    github_base_branch: str = "main"
 
     # --- Secrets encryption ---
     # Base64-encoded 32-byte key for AES-256-GCM encryption of sensitive
@@ -135,42 +110,6 @@ class Settings(BaseSettings):
 
     # Threshold for cache misses before emitting CacheMissesLookupFailed metric.
     max_sync_cache_misses: int = 10
-
-    # --- Ticketing integration ---
-    # When true, approving a remediation package auto-creates a ticket in the
-    # configured default provider. Requires at least one enabled row in
-    # ticketing_connections. When false, tickets are only created via explicit
-    # POST /admin/tickets/create or the per-package endpoint.
-    ticketing_auto_create_on_approve: bool = False
-
-    # Default ticketing provider slug used for auto-creation. Must match a
-    # provider value in ticketing_connections (e.g. "jira", "servicenow",
-    # "webhook"). Ignored when ticketing_auto_create_on_approve is False.
-    ticketing_default_provider: str = ""
-
-    # --- Jira settings (used when provider = "jira") ---
-    # These can alternatively live in ticketing_connections.config per-row,
-    # but env vars are convenient for single-instance setups.
-    jira_base_url: str = ""  # e.g. https://yourcompany.atlassian.net
-    jira_user_email: str = ""  # API token owner email
-    jira_api_token: str = ""  # Atlassian API token
-    jira_project_key: str = ""  # e.g. "SEC" or "VULN"
-
-    # --- ServiceNow OAuth2 credentials (password grant) ---
-    servicenow_client_id: str = ""
-    servicenow_client_secret: str = ""
-
-    # --- ServiceNow settings (used when provider = "servicenow") ---
-    servicenow_instance_url: str = ""  # e.g. https://yourcompany.service-now.com
-    servicenow_username: str = ""
-    servicenow_password: str = ""
-    servicenow_assignment_group: str = ""
-
-    # --- Generic webhook (used when provider = "webhook") ---
-    # Sends a JSON POST with ticket payload to this URL. Use for custom
-    # integrations (Slack, Teams, PagerDuty, n8n, Zapier, etc.)
-    ticketing_webhook_url: str = ""
-    ticketing_webhook_secret: str = ""  # Optional HMAC-SHA256 signing secret
 
     # --- Schema isolation for local development ---
     # Postgres schema that supabase_admin() targets. Defaults to "public"
