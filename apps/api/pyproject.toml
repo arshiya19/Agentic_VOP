@@ -68,6 +68,7 @@ dependencies = [
     # when the git-review orchestrator branch runs. Existing pipelines don't
     # load it. GitHub REST/GraphQL wrapper for creating PRs, merging, closing.
     "PyGithub>=2.5.0",
+    "anyio>=4.14.2",
 ]
 
 [dependency-groups]
